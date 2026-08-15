@@ -38,7 +38,7 @@ export const reserveSequence = Effect.fn("Bus.reserveSequence")(function* (
     .values([{ aggregate_id: aggregateID, seq }])
     .onConflictDoUpdate({
       target: EventSequenceTable.aggregate_id,
-      set: { seq: sql`max(${EventSequenceTable.seq}, ${seq})` },
+      set: { seq: sql`CASE WHEN ${EventSequenceTable.seq} > ${seq} THEN ${EventSequenceTable.seq} ELSE ${seq} END` },
     })
     .run()
     .pipe(Effect.orDie)
@@ -344,7 +344,7 @@ export function configured(options?: Options) {
                               .onConflictDoUpdate({
                                 target: EventSequenceTable.aggregate_id,
                                 set: {
-                                  seq: sql`max(${EventSequenceTable.seq}, ${seq})`,
+                                  seq: sql`CASE WHEN ${EventSequenceTable.seq} > ${seq} THEN ${EventSequenceTable.seq} ELSE ${seq} END`,
                                   ...(input?.ownerID && row?.ownerID == null ? { owner_id: input.ownerID } : {}),
                                 },
                               })

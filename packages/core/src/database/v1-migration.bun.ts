@@ -992,6 +992,6 @@ function parseState(input: unknown): MigrationState | undefined {
 function hasLegacySessions(db: Database.Interface["db"]) {
   return db.get(sql`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'session'`).pipe(
     Effect.map((row) => row !== undefined),
-    Effect.orDie,
+    Effect.catchAll(() => Effect.succeed(false)),
   )
 }

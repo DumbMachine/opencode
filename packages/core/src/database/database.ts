@@ -2,18 +2,251 @@ export * as Database from "./database.js"
 
 import { EffectDrizzleSqlite } from "./drizzle.js"
 import { sqliteLayer, supportsForeignKeyToggle, supportsTuningPragmas } from "#sqlite"
-import { Context, Effect, Layer, Schema } from "effect"
-import type { SqlClient } from "effect/unstable/sql"
+import { PgAsyncDatabase, PgAsyncSession, PgDialect } from "drizzle-orm/pg-core"
+import { PgClient } from "@effect/sql-pg"
+import { Config, Context, Effect, Layer, Redacted, Schema } from "effect"
+import { SqlClient } from "effect/unstable/sql/SqlClient"
 import { Global } from "@opencode-ai/util/global"
 import { isAbsolute, join } from "path"
 import { DatabaseMigration } from "./migration.js"
 import { makeGlobalNode } from "@opencode-ai/util/effect/app-node"
+import * as DatabaseConfig from "./config.js"
 
-const makeDatabase = EffectDrizzleSqlite.makeWithDefaults()
-type DatabaseShape = Effect.Success<typeof makeDatabase>
+const makeSqliteDatabase = EffectDrizzleSqlite.makeWithDefaults()
+type DatabaseShape = Effect.Success<typeof makeSqliteDatabase>
+
+class EffectPgSession extends PgAsyncSession {
+  constructor(public client: SqlClient, dialect: PgDialect) {
+    super(dialect)
+  }
+  prepareQuery(query: any, fields: any, name: any, customResultMapper: any) {
+    return new EffectPgPreparedQuery(this.client, query, fields, customResultMapper)
+  }
+}
+
+class EffectPgPreparedQuery {
+  constructor(
+    public client: SqlClient,
+    public query: any,
+    public fields: any,
+    public customResultMapper: any,
+  ) {}
+
+  executeEffect() {
+    const self = this
+    return Effect.gen(function* () {
+      const stmt = self.client.unsafe(self.query.sql, self.query.params ?? [])
+      if (self.customResultMapper && self.fields === "arrays") {
+        const rows = yield* stmt.values
+        return self.customResultMapper(rows)
+      }
+      return yield* stmt.withoutTransform
+    })
+  }
+}
+
+const numericPgFields = new Set([
+  "active",
+  "admitted_seq",
+  "baseline_seq",
+  "count",
+  "position",
+  "revision",
+  "seq",
+  "time_archived",
+  "time_completed",
+  "time_created",
+  "time_updated",
+  "time_initialized",
+  "time_used",
+  "time_suspended",
+  "time_compacting",
+  "tokens_cache_read",
+  "tokens_cache_write",
+  "tokens_input",
+  "tokens_output",
+  "tokens_reasoning",
+])
+
+const jsonPgFields = new Set([
+  "model",
+  "fork_boundary",
+  "summary_diffs",
+  "metadata",
+  "revert",
+  "permission",
+  "commands",
+  "data",
+  "payload",
+  "value",
+  "initial_values",
+  "current_values",
+  "binding",
+])
+
+function normalizePgRow(row: unknown): unknown {
+  if (!row || typeof row !== "object" || Array.isArray(row)) return row
+  const next: Record<string, unknown> = { ...(row as Record<string, unknown>) }
+  for (const [key, value] of Object.entries(next)) {
+    if (numericPgFields.has(key) && typeof value === "string" && /^-?\d+$/.test(value)) {
+      next[key] = Number(value)
+    } else if (jsonPgFields.has(key) && typeof value === "string") {
+      try {
+        next[key] = JSON.parse(value)
+      } catch {}
+    }
+  }
+  return next
+}
+
+function normalizePgRows(rows: unknown): unknown {
+  if (!Array.isArray(rows)) return rows
+  return rows.map(normalizePgRow)
+}
+
+function compatPostgresDb(client: SqlClient): DatabaseShape {
+  const dialect = new PgDialect()
+  const session = new EffectPgSession(client, dialect)
+  const pgDb = new PgAsyncDatabase(dialect, session, {}) as any
+  pgDb.$client = client
+
+  function toQuery(query: any): { sql: string; params: unknown[] } {
+    if (typeof query === "string") return { sql: query, params: [] }
+    if (query && typeof query === "object" && typeof query.toSQL === "function") {
+      return query.toSQL()
+    }
+    const sequel = query && typeof query === "object" && "getSQL" in query ? query.getSQL() : query
+    if (sequel && typeof sequel === "object" && ("queryChunks" in sequel || "toQuery" in sequel)) {
+      return dialect.sqlToQuery(sequel)
+    }
+    return { sql: String(query), params: [] }
+  }
+
+  function executeQuery(qb: any) {
+    if (qb && typeof qb === "object" && typeof qb._prepare === "function") {
+      const prep = qb._prepare()
+      if (prep && typeof prep.executeEffect === "function") {
+        return prep.executeEffect().pipe(
+          Effect.tapError((err) => {
+            console.error("[Postgres executeQuery Error]", prep.query?.sql, prep.query?.params, err)
+            return Effect.void
+          }),
+        )
+      }
+    }
+    const { sql, params } = toQuery(qb)
+    return client.unsafe(sql, params).withoutTransform.pipe(
+      Effect.tapError((err) => {
+        console.error("[Postgres executeQuery Error]", sql, params, err)
+        return Effect.void
+      }),
+    )
+  }
+
+  function patchEffectQuery(qb: any): any {
+    if (!qb || typeof qb !== "object") return qb
+    if (!("get" in qb)) {
+      qb.get = () =>
+        Effect.gen(function* () {
+          const rows = yield* executeQuery(qb)
+          return normalizePgRow(rows[0])
+        })
+    }
+    if (!("all" in qb)) {
+      qb.all = () =>
+        Effect.gen(function* () {
+          const rows = yield* executeQuery(qb)
+          return normalizePgRows(rows)
+        })
+    }
+    if (!("run" in qb)) {
+      qb.run = () =>
+        Effect.gen(function* () {
+          yield* executeQuery(qb)
+        }).pipe(Effect.asVoid)
+    }
+    for (const method of [
+      "from",
+      "where",
+      "values",
+      "set",
+      "returning",
+      "onConflictDoUpdate",
+      "onConflictDoNothing",
+      "innerJoin",
+      "leftJoin",
+      "rightJoin",
+      "orderBy",
+      "limit",
+      "offset",
+      "groupBy",
+      "having",
+    ]) {
+      const orig = qb[method]
+      if (typeof orig === "function" && !orig.__opencodePgCompatPatched) {
+        const wrapped = function (this: any, ...args: any[]) {
+          return patchEffectQuery(orig.apply(this, args))
+        }
+        ;(wrapped as any).__opencodePgCompatPatched = true
+        qb[method] = wrapped
+      }
+    }
+    return qb
+  }
+
+  const origSelect = pgDb.select.bind(pgDb)
+  pgDb.select = (...args: any[]) => patchEffectQuery(origSelect(...args))
+  for (const method of ["insert", "update", "delete"] as const) {
+    const orig = pgDb[method]?.bind(pgDb)
+    if (orig) pgDb[method] = (...args: any[]) => patchEffectQuery(orig(...args))
+  }
+
+  pgDb.run = (query: unknown) =>
+    Effect.gen(function* () {
+      const { sql, params } = toQuery(query)
+      yield* client.unsafe(sql, params).withoutTransform.pipe(
+        Effect.tapError((err) => {
+          console.error("[Postgres run Error]", sql, params, err)
+          return Effect.void
+        }),
+      )
+    }).pipe(Effect.asVoid)
+
+  pgDb.all = (query: unknown) =>
+    Effect.gen(function* () {
+      const { sql, params } = toQuery(query)
+      const rows = yield* client.unsafe(sql, params).withoutTransform.pipe(
+        Effect.tapError((err) => {
+          console.error("[Postgres all Error]", sql, params, err)
+          return Effect.void
+        }),
+      )
+      return normalizePgRows(rows)
+    })
+
+  pgDb.get = (query: unknown) =>
+    Effect.gen(function* () {
+      const { sql, params } = toQuery(query)
+      const rows = yield* client.unsafe(sql, params).withoutTransform.pipe(
+        Effect.tapError((err) => {
+          console.error("[Postgres get Error]", sql, params, err)
+          return Effect.void
+        }),
+      )
+      return normalizePgRow(rows[0])
+    })
+
+  pgDb.transaction = (transaction: any) =>
+    Effect.gen(function* () {
+      return yield* client.withTransaction(transaction(pgDb))
+    })
+
+  return pgDb as unknown as DatabaseShape
+}
 
 export interface Interface {
   db: DatabaseShape
+  config?: DatabaseConfig.Config
 }
 
 export const Options = Schema.Struct({
@@ -23,10 +256,29 @@ export type Options = typeof Options.Type
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/storage/Database") {}
 
-const databaseLayer = Layer.effect(
+const baseLayer = Layer.effect(
   Service,
   Effect.gen(function* () {
-    const db = yield* makeDatabase
+    const config = yield* DatabaseConfig.loadEffect
+
+    if (config.dialect === "postgres") {
+      if (!config.postgresUrl) {
+        return yield* Effect.die("OPENCODE_DATABASE_DIALECT=postgres requires OPENCODE_DATABASE_URL")
+      }
+
+      const client = yield* SqlClient
+      const db = compatPostgresDb(client)
+      yield* client.unsafe(`
+        CREATE OR REPLACE FUNCTION json_extract(doc text, path text) RETURNS text IMMUTABLE LANGUAGE sql AS $$
+          SELECT (doc::jsonb #>> string_to_array(trim(leading '$.' from path), '.'))
+        $$;
+      `).withoutTransform
+      yield* DatabaseMigration.apply(db, config.dialect)
+
+      return { db, config }
+    }
+
+    const db = yield* makeSqliteDatabase
 
     if (supportsTuningPragmas) {
       yield* db.run("PRAGMA journal_mode = WAL")
@@ -35,38 +287,82 @@ const databaseLayer = Layer.effect(
       yield* db.run("PRAGMA cache_size = -64000")
       yield* db.run("PRAGMA wal_checkpoint(PASSIVE)")
     }
-    // Durable Object SQLite always enforces foreign keys and rejects the pragma.
     if (supportsForeignKeyToggle) yield* db.run("PRAGMA foreign_keys = ON")
-    yield* DatabaseMigration.apply(db)
+    yield* DatabaseMigration.apply(db, config.dialect)
 
-    return { db }
+    return { db, config }
   }).pipe(Effect.orDie),
 )
+
+export const layerFromClient: Layer.Layer<Service, never, SqlClient | Global.Service> = baseLayer
+
+export function sqliteDatabaseLayer(filename: string): Layer.Layer<Service> {
+  const config: DatabaseConfig.Config = {
+    dialect: "sqlite",
+    sqliteFilename: filename,
+  }
+  return baseLayer.pipe(
+    Layer.provide(sqliteLayer({ filename })),
+    Layer.provide(Layer.succeed(DatabaseConfig.ConfigService, config)),
+  ) as unknown as Layer.Layer<Service>
+}
+
+export function postgresDatabaseLayer(url: string): Layer.Layer<Service> {
+  const config: DatabaseConfig.Config = {
+    dialect: "postgres",
+    sqliteFilename: DatabaseConfig.sqliteDefaultPath(),
+    postgresUrl: url,
+  }
+  const pgClientLayer = PgClient.layerConfig({
+    url: Config.succeed(Redacted.make(url)),
+    ssl: Config.succeed(false),
+    maxConnections: Config.succeed(10),
+  }).pipe(Layer.orDie)
+
+  return baseLayer.pipe(
+    Layer.provide(pgClientLayer),
+    Layer.provide(Global.layerWith({})),
+    Layer.provide(Layer.succeed(DatabaseConfig.ConfigService, config)),
+  ) as unknown as Layer.Layer<Service>
+}
 
 export function layer(options: Options = { path: ":memory:" }) {
   return Layer.unwrap(
     Effect.gen(function* () {
-      const provide = (filename: string) => layerFromClient.pipe(Layer.provide(sqliteLayer({ filename })))
-      const filename = options.path ?? ":memory:"
-      if (filename === ":memory:" || isAbsolute(filename)) return provide(filename)
+      const config = yield* DatabaseConfig.loadEffect
+      if (config.dialect === "postgres" && config.postgresUrl) {
+        return postgresDatabaseLayer(config.postgresUrl)
+      }
+      const filename = options.path ?? config.sqliteFilename ?? ":memory:"
+      if (filename === ":memory:" || isAbsolute(filename)) return sqliteDatabaseLayer(filename)
       const global = yield* Global.Service
-      return provide(join(global.data, filename))
+      return sqliteDatabaseLayer(join(global.data, filename))
     }),
   )
 }
 
-// The database service over an injected SqlClient, for runtimes that receive
-// database storage instead of opening a filesystem path. Any client provided
-// here still goes through the pragma guards and migrations; Global is required
-// because migrations may read it (the v1 import).
-export const layerFromClient: Layer.Layer<Service, never, SqlClient.SqlClient | Global.Service> = databaseLayer
+export function layerFromPath(filename: string) {
+  return sqliteDatabaseLayer(filename)
+}
+
+export const defaultLayer = Layer.unwrap(
+  Effect.sync(() => {
+    const config = DatabaseConfig.load()
+    if (config.dialect === "postgres") {
+      if (!config.postgresUrl) {
+        throw new Error("OPENCODE_DATABASE_DIALECT=postgres requires OPENCODE_DATABASE_URL")
+      }
+      return postgresDatabaseLayer(config.postgresUrl)
+    }
+    return layer({ path: config.sqliteFilename })
+  }),
+)
 
 export function configured(options?: Options) {
   return makeGlobalNode({ service: Service, layer: layer(options), deps: [Global.node] })
 }
 
-/** `configured`, but over an injected SqlClient layer instead of a filesystem path. */
-export function configuredClient(client: Layer.Layer<SqlClient.SqlClient>) {
+export function configuredClient(client: Layer.Layer<SqlClient>) {
   return makeGlobalNode({
     service: Service,
     layer: layerFromClient.pipe(Layer.provide(client)),
@@ -74,4 +370,16 @@ export function configuredClient(client: Layer.Layer<SqlClient.SqlClient>) {
   })
 }
 
-export const node = configured({ path: ":memory:" })
+export const node = makeGlobalNode({
+  service: Service,
+  layer: defaultLayer,
+  deps: [Global.node],
+})
+
+export function nodeFromPath(filename: string) {
+  return makeGlobalNode({
+    service: Service,
+    layer: sqliteDatabaseLayer(filename),
+    deps: [Global.node],
+  })
+}
