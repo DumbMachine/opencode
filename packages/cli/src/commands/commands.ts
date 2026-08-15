@@ -26,8 +26,8 @@ const PermissionParams = {
   ),
 }
 
-export const Commands = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME : "opencode", {
-  description: "OpenCode 2.0 preview command line interface",
+export const Commands = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME : "opencodepg", {
+  description: "OpenCode PostgreSQL Edition command line interface",
   params: {
     ...ServerParams,
     ...PermissionParams,

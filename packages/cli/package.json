@@ -5,6 +5,7 @@
   "type": "module",
   "license": "MIT",
   "bin": {
+    "opencodepg": "./bin/opencodepg.cjs",
     "opencode2": "./bin/opencode2.cjs"
   },
   "files": [

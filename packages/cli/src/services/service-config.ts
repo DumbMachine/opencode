@@ -25,11 +25,19 @@ const decodeInfo = Schema.decodeUnknownEffect(Schema.fromJsonString(Info))
 const decodeRegistration = Schema.decodeUnknownEffect(Schema.fromJsonString(Service.Info))
 
 export function filename(channel = OPENCODE_CHANNEL) {
+  const pgUrl = (process.env.OPENCODE_DATABASE_URL ?? process.env.DATABASE_URL ?? "").trim()
+  if (pgUrl) {
+    return `service-pg-${Hash.fast(pgUrl).slice(0, 8)}.json`
+  }
   if (channel === "latest" || channel === "next") return "service.json"
   return `service-${channel.replace(/[^a-zA-Z0-9._-]/g, "-")}.json`
 }
 
 export function defaultPort(channel = OPENCODE_CHANNEL) {
+  const pgUrl = (process.env.OPENCODE_DATABASE_URL ?? process.env.DATABASE_URL ?? "").trim()
+  if (pgUrl) {
+    return 10_000 + (Number.parseInt(Hash.fast(pgUrl).slice(0, 8), 16) % 50_000)
+  }
   if (channel === "latest" || channel === "next") return 0xc0de
   if (channel === "local") return 0xc0df
   return 10_000 + (Number.parseInt(Hash.fast(channel).slice(0, 8), 16) % 50_000)
