@@ -19,7 +19,6 @@ import {
   UnknownError,
 } from "@opencode-ai/protocol/errors"
 import { AbsolutePath } from "@opencode-ai/core/schema"
-import { SessionExecution } from "@opencode-ai/core/session/execution"
 import { SessionExecutionCapability } from "@opencode-ai/core/session/execution-capability"
 
 const DefaultSessionsLimit = 50
@@ -27,7 +26,6 @@ const DefaultSessionsLimit = 50
 export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handlers) =>
   Effect.gen(function* () {
     const session = yield* Session.Service
-    const execution = yield* SessionExecution.Service
     const transfer = yield* SessionTransfer.Service
     const pendingMutation = (effect: ReturnType<typeof session.cancelInbox>, conflict: string) =>
       effect.pipe(
@@ -333,7 +331,7 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
                   inputID: admitted.id,
                   mcp: ctx.payload.mcp,
                 })
-                yield* execution.wake(ctx.params.sessionID)
+                yield* session.wake(ctx.params.sessionID)
               }
               return admitted
             })
