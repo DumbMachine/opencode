@@ -4,13 +4,17 @@ import { Service } from "@opencode-ai/client/effect/service"
 import { ServiceStatus } from "@opencode-ai/protocol/groups/health"
 import { Schema } from "effect"
 import fs from "node:fs/promises"
+import net from "node:net"
 import os from "node:os"
 import path from "node:path"
 
 const nodeBuild = process.argv.includes("--node")
 const target = `cli${nodeBuild ? "-node" : ""}-${process.platform === "win32" ? "windows" : process.platform}-${process.arch}`
 const directory = path.join(import.meta.dir, "..", "dist", ...(nodeBuild ? ["node"] : []), target, "bin")
-const binary = path.join(directory, `opencode2${nodeBuild ? "-node" : ""}${process.platform === "win32" ? ".exe" : ""}`)
+const binary = path.join(
+  directory,
+  `${nodeBuild ? "opencode2-node" : "opencodepg"}${process.platform === "win32" ? ".exe" : ""}`,
+)
 if (!(await Bun.file(binary).exists())) throw new Error(`Missing compiled CLI in ${directory}`)
 
 const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "opencode-service-smoke-")))
@@ -30,6 +34,7 @@ const errors: Array<Promise<string>> = []
 let failure: unknown
 try {
   await fs.mkdir(path.join(root, ".opencode"))
+  await configurePort()
   spawnService()
   spawnService()
   const registration = await waitForRegistration()
@@ -109,6 +114,29 @@ function spawnService() {
   processes.push(process)
   errors.push(new Response(process.stderr).text())
   return process
+}
+
+async function configurePort() {
+  const port = await availablePort()
+  const configured = Bun.spawn([binary, "service", "set", "port", String(port)], {
+    env,
+    stdout: "ignore",
+    stderr: "pipe",
+  })
+  const stderr = new Response(configured.stderr).text()
+  if ((await configured.exited) !== 0) throw new Error(`Unable to configure smoke service port: ${await stderr}`)
+}
+
+function availablePort() {
+  return new Promise<number>((resolve, reject) => {
+    const server = net.createServer()
+    server.once("error", reject)
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address()
+      if (!address || typeof address === "string") return server.close(() => reject(new Error("No smoke port")))
+      server.close((error) => (error ? reject(error) : resolve(address.port)))
+    })
+  })
 }
 
 async function waitForRegistration() {
