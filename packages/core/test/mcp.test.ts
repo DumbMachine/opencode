@@ -58,7 +58,12 @@ type ResourceTemplatePage = {
 }
 
 function resourceServer(
-  input: { resources?: boolean; listChanged?: boolean; emptyElicitation?: boolean; urlElicitation?: boolean } = {},
+  input: {
+    resources?: boolean
+    listChanged?: boolean
+    emptyElicitation?: boolean
+    urlElicitation?: boolean
+  } = {},
 ) {
   return Effect.acquireRelease(
     Effect.promise(async () => {
@@ -161,6 +166,39 @@ function resourceServer(
           await http.stop(true)
         },
       }
+    }),
+    (server) => Effect.promise(server.close),
+  )
+}
+
+function statelessServer(tool: string) {
+  return Effect.acquireRelease(
+    Effect.sync(() => {
+      const headers: Array<{ authorization: string | null; session: string | null }> = []
+      const http = Bun.serve({
+        port: 0,
+        fetch: async (request) => {
+          headers.push({
+            authorization: request.headers.get("authorization"),
+            session: request.headers.get("mcp-session-id"),
+          })
+          if (request.method !== "POST") return new Response(null, { status: 405 })
+          const message = (await request.json()) as { id?: string | number; method?: string }
+          if (message.id === undefined) return new Response(null, { status: 202 })
+          const result =
+            message.method === "initialize"
+              ? {
+                  protocolVersion: "2025-03-26",
+                  capabilities: { tools: {} },
+                  serverInfo: { name: tool, version: "1.0.0" },
+                }
+              : message.method === "tools/list"
+                ? { tools: [{ name: tool, inputSchema: { type: "object", properties: {} } }] }
+                : { content: [{ type: "text", text: tool }] }
+          return Response.json({ jsonrpc: "2.0", id: message.id, result })
+        },
+      })
+      return { url: http.url.toString(), headers, close: () => http.stop(true) }
     }),
     (server) => Effect.promise(server.close),
   )
@@ -355,6 +393,82 @@ describe("MCP errors", () => {
 test("MCP tool names match V1 sanitization", () => {
   expect(McpTool.namespace("context 7")).toBe("context_7")
   expect(McpTool.name("context 7", "resolve.library/id")).toBe("context_7_resolve_library_id")
+})
+
+test("request MCP uses isolated stateless transports and caller authorization", async () => {
+  await Effect.runPromise(
+    Effect.scoped(
+      Effect.gen(function* () {
+        const alpha = yield* statelessServer("alpha-tool")
+        const beta = yield* statelessServer("beta-tool")
+        const service = yield* MCP.Service
+        const request = yield* service.request({
+          alpha: { type: "remote", url: alpha.url, headers: { authorization: "Bearer alpha" } },
+          beta: { type: "remote", url: beta.url, headers: { authorization: "Bearer beta" } },
+        })
+
+        expect((yield* request.tools()).map((tool) => `${tool.server}:${tool.name}`)).toEqual([
+          "alpha:alpha-tool",
+          "beta:beta-tool",
+        ])
+        expect((yield* request.callTool({ server: "alpha", name: "alpha-tool" })).content).toEqual([
+          { type: "text", text: "alpha-tool" },
+        ])
+        expect(alpha.headers.every((headers) => headers.authorization === "Bearer alpha")).toBe(true)
+        expect(beta.headers.every((headers) => headers.authorization === "Bearer beta")).toBe(true)
+        expect([...alpha.headers, ...beta.headers].every((headers) => headers.session === null)).toBe(true)
+      }).pipe(
+        Effect.provide(
+          resourceMcpLayer(
+            new ConfigMCP.Remote({ type: "remote", url: "http://unused.invalid", disabled: true, oauth: false }),
+          ),
+        ),
+      ),
+    ),
+  )
+})
+
+test("request MCP fails explicitly when a declared server cannot connect", async () => {
+  const error = await Effect.runPromise(
+    Effect.scoped(
+      Effect.gen(function* () {
+        const service = yield* MCP.Service
+        return yield* service.request({ unavailable: { type: "remote", url: "not-a-url" } }).pipe(Effect.flip)
+      }).pipe(
+        Effect.provide(
+          resourceMcpLayer(
+            new ConfigMCP.Remote({ type: "remote", url: "http://unused.invalid", disabled: true, oauth: false }),
+          ),
+        ),
+      ),
+    ),
+  )
+
+  expect(error).toBeInstanceOf(MCP.RequestConnectError)
+  expect(error.server).toBe("unavailable")
+})
+
+test("request MCP rejects servers that negotiate stateful sessions", async () => {
+  await Effect.runPromise(
+    Effect.scoped(
+      Effect.gen(function* () {
+        const stateful = yield* resourceServer()
+        const service = yield* MCP.Service
+        const error = yield* service
+          .request({ stateful: { type: "remote", url: stateful.url } })
+          .pipe(Effect.flip)
+
+        expect(error).toBeInstanceOf(MCP.RequestConnectError)
+        expect(error.message).toContain("negotiated a session for a stateless connection")
+      }).pipe(
+        Effect.provide(
+          resourceMcpLayer(
+            new ConfigMCP.Remote({ type: "remote", url: "http://unused.invalid", disabled: true, oauth: false }),
+          ),
+        ),
+      ),
+    ),
+  )
 })
 
 test("preserves output schema validation across paginated tool discovery", async () => {

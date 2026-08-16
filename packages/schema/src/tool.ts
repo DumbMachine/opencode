@@ -22,6 +22,8 @@ export interface Context {
 interface BaseOptions {
   readonly namespace?: string
   readonly permission?: string
+  /** Generic registry group used when an execution replaces one class of tools. */
+  readonly group?: string
 }
 
 export type Options = BaseOptions &

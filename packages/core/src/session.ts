@@ -222,6 +222,8 @@ export interface Interface {
     metadata?: Record<string, unknown>
     delivery?: SessionInbox.Delivery
     resume?: boolean
+    /** Non-secret process capability names to record for runner recovery checks. */
+    executionCapabilities?: ReadonlyArray<string>
   }) => Effect.Effect<SessionInbox.User, NotFoundError | PromptConflictError | AttachmentError | SkillNotFoundError>
   /** Generates text from current Session context without admitting input or mutating history. */
   readonly generate: (input: {
@@ -569,7 +571,7 @@ const layer = Layer.effect(
             // image attachment actually needs the resizer.
             const image = Image.Service.pipe(Effect.provide(locations.get(session.location)))
             const skills = Skill.Service.pipe(Effect.provide(locations.get(session.location)))
-            const prompt = yield* resolvePrompt(
+            const sanitizedPrompt = yield* resolvePrompt(
               { text: input.text, files: input.files, agents: input.agents, skills: input.skills },
               image,
               skills,
@@ -577,7 +579,14 @@ const layer = Layer.effect(
             const messageID = input.id ?? SessionMessage.ID.create()
             const admittedInput = SessionInbox.Item.make({
               type: "user",
-              payload: { ...prompt, metadata: input.metadata },
+              payload: {
+                text: sanitizedPrompt.text,
+                files: sanitizedPrompt.files,
+                agents: sanitizedPrompt.agents,
+                skills: sanitizedPrompt.skills,
+                metadata: input.metadata,
+                capabilities: input.executionCapabilities,
+              },
               delivery: input.delivery ?? "steer",
             })
             const admitted = yield* SessionInbox.admit(db, bus, {

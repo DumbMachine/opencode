@@ -13,6 +13,7 @@ export const emptyMcpLayer = Layer.succeed(
     connect: () => Effect.die("unused mcp.connect"),
     disconnect: () => Effect.die("unused mcp.disconnect"),
     remove: () => Effect.die("unused mcp.remove"),
+    request: () => Effect.die("unused mcp.request"),
     tools: () => Effect.succeed([]),
     callTool: () => Effect.die("unused mcp.callTool"),
     instructions: () => Effect.succeed([]),

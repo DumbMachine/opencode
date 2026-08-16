@@ -15,6 +15,7 @@ export interface UserPayload extends Schema.Schema.Type<typeof UserPayload> {}
 export const UserPayload = Schema.Struct({
   ...Prompt.fields,
   metadata: Schema.Record(Schema.String, Schema.Unknown).pipe(optional),
+  capabilities: Schema.Array(Schema.String).pipe(optional),
 }).annotate({ identifier: "Session.Inbox.UserPayload" })
 
 export interface SyntheticPayload extends Schema.Schema.Type<typeof SyntheticPayload> {}

@@ -10,6 +10,7 @@ import { Instructions } from "../instructions/index.js"
 import { InstructionBuiltIns } from "../instructions/builtins.js"
 import { Location } from "../location.js"
 import { McpInstructions } from "../mcp/instructions.js"
+import { MCP } from "../mcp/index.js"
 import { McpTool } from "../tool/mcp.js"
 import { PluginSupervisor } from "../plugin/supervisor.js"
 import { ReferenceInstructions } from "../reference/instructions.js"
@@ -28,6 +29,7 @@ export interface Selection {
   readonly agent: Agent.Selection & { readonly info: Agent.Info }
   readonly instructions: Instructions.List
   readonly tools: Tool.Snapshot
+  readonly ephemeral?: string
 }
 
 export interface Loaded {
@@ -37,6 +39,7 @@ export interface Loaded {
   readonly initial: string
   readonly messages: ReadonlyArray<SessionMessage.Info>
   readonly tools: Tool.Snapshot
+  readonly ephemeral?: string
 }
 
 /**
@@ -47,7 +50,10 @@ export interface Loaded {
  */
 export interface Interface {
   /** Selects the Session, agent, instructions, and tools used by subsequent work. */
-  readonly select: (sessionID: SessionSchema.ID) => Effect.Effect<Selection, AgentNotFoundError>
+  readonly select: (
+    sessionID: SessionSchema.ID,
+    executionMcp?: MCP.Execution,
+  ) => Effect.Effect<Selection, AgentNotFoundError>
   /** Resolves the model and active history for that selection. */
   readonly load: (selection: Selection) => Effect.Effect<Loaded, SessionRunnerModel.Error>
 }
@@ -73,7 +79,10 @@ const layer = Layer.effect(
     const store = yield* SessionStore.Service
     const registry = yield* Tool.Service
 
-    const select = Effect.fn("SessionContext.select")(function* (sessionID: SessionSchema.ID) {
+    const select = Effect.fn("SessionContext.select")(function* (
+      sessionID: SessionSchema.ID,
+      executionMcp?: MCP.Execution,
+    ) {
       const session = yield* store.get(sessionID)
       if (!session) return yield* Effect.die(new Error(`Session not found: ${sessionID}`))
       if (session.location.directory !== location.directory || session.location.workspaceID !== location.workspaceID)
@@ -83,15 +92,20 @@ const layer = Layer.effect(
       yield* mcpTools.flush
       const agent = yield* agents.select(session.agent)
       if (!agent.info) return yield* new AgentNotFoundError({ sessionID: session.id, agent: session.agent ?? agent.id })
+      const requestTools = executionMcp ? yield* mcpTools.tools(executionMcp) : undefined
       const loaded = yield* Effect.all(
         {
-          tools: registry.snapshot(agent.info.permissions),
+          tools: registry.snapshot(
+            agent.info.permissions,
+            executionMcp ? { excludeGroups: ["mcp"], tools: requestTools } : undefined,
+          ),
           builtins: builtins.load(sessionID),
           discovery: discovery.load(),
           skills: skillInstructions.load(agent),
           references: referenceInstructions.load(),
           mcp: mcpInstructions.load(agent),
           entries: entries.load(sessionID),
+          ephemeral: executionMcp ? mcpInstructions.ephemeral(executionMcp, agent) : Effect.succeed(undefined),
         },
         { concurrency: "unbounded" },
       )
@@ -108,6 +122,7 @@ const layer = Layer.effect(
           loaded.entries,
         ]),
         tools: loaded.tools,
+        ephemeral: loaded.ephemeral,
       }
     })
 
@@ -121,6 +136,7 @@ const layer = Layer.effect(
         initial: history.initial,
         messages: history.entries.map((entry) => entry.message),
         tools: selection.tools,
+        ephemeral: selection.ephemeral,
       }
     })
 

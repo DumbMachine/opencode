@@ -34,6 +34,9 @@ import { toSessionError } from "../to-session-error.js"
 import { SessionRunnerRetry } from "./retry.js"
 import { SessionUsage } from "../usage.js"
 import { ToolOutput } from "../../tool-output.js"
+import { MCP } from "../../mcp/index.js"
+import { SessionExecutionCapability } from "../execution-capability.js"
+import { ExecutionCapabilityUnavailableError } from "../error.js"
 
 /** How one model call ended: settled, awaiting retry/recovery, or restarted by compaction. */
 type CallOutcome = Data.TaggedEnum<{
@@ -102,6 +105,21 @@ const RESULT_MISSING = { type: "tool.result-missing", message: "Provider did not
 const CONTINUE_AFTER_INCOMPLETE_STREAM =
   "The previous response was interrupted. Continue from where you left off without repeating completed content."
 
+export const executionGrant = (
+  sessionID: SessionSchema.ID,
+  messages: ReadonlyArray<{
+    readonly id: SessionMessage.ID
+    readonly type: string
+    readonly capabilities?: ReadonlyArray<string>
+  }>,
+  grant: SessionExecutionCapability.Grant | undefined,
+) => {
+  const latestUser = messages.findLast((message) => message.type === "user")
+  if (latestUser?.capabilities?.includes("mcp") !== true) return Effect.succeed(undefined)
+  if (grant?.inputID === latestUser.id) return Effect.succeed(grant)
+  return Effect.fail(new ExecutionCapabilityUnavailableError({ sessionID, inputID: latestUser.id }))
+}
+
 const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
@@ -116,6 +134,7 @@ const layer = Layer.effect(
     const compaction = yield* SessionCompaction.Service
     const title = yield* SessionTitle.Service
     const toolOutput = yield* ToolOutput.Service
+    const mcp = yield* MCP.Service
     // Title generation starts once input is visible and must not delay model execution.
     // The in-flight set coalesces overlapping prompts while title presence records success durably.
     const titlesRunning = new Set<SessionSchema.ID>()
@@ -265,7 +284,16 @@ const layer = Layer.effect(
       if (promoted > 0) yield* startTitle(sessionID)
       // Promoted input opens a fresh step allowance.
       const currentStep = promoted > 0 ? 1 : step
-      const loaded = yield* context.load(selected)
+      const baseLoaded = yield* context.load(selected)
+      const grant = yield* executionGrant(
+        sessionID,
+        baseLoaded.messages,
+        yield* SessionExecutionCapability.get(sessionID),
+      )
+      const executionMcp = grant ? yield* mcp.request(grant.mcp) : undefined
+      const loaded = executionMcp
+        ? yield* context.select(sessionID, executionMcp).pipe(Effect.flatMap(context.load))
+        : baseLoaded
       const { session, agent } = loaded
       const resolved = loaded.model
       const model = resolved.model
@@ -638,6 +666,7 @@ export const node = makeLocationNode({
     Bus.node,
     llmClient,
     SessionContext.node,
+    MCP.node,
     SessionModelRequest.node,
     SessionModelTransport.node,
     SessionStore.node,

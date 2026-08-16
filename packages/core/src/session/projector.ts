@@ -535,6 +535,7 @@ const layer = Layer.effectDiscard(
                 files: input.payload.files,
                 agents: input.payload.agents,
                 skills: input.payload.skills,
+                capabilities: input.payload.capabilities,
                 time: { created: event.created },
               }
             : {
