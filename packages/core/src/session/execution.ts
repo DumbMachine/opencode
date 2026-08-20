@@ -11,6 +11,7 @@ import { SessionSchema } from "./schema.js"
 import { SessionStore } from "./store.js"
 import { toSessionError } from "./to-session-error.js"
 import { UserInterruptedError } from "./error.js"
+import { SessionExecutionCapability } from "./execution-capability.js"
 
 export interface Interface {
   /** Snapshots active execution owned by this process. */
@@ -98,34 +99,37 @@ export const layer = Layer.effect(
       drain: (sessionID, force) => drain(sessionID, force),
       // One terminal observation per busy period, covering every coalesced drain.
       settled: (sessionID, exit, reason) =>
-        reportLifecycle(
-          sessionID,
-          Effect.gen(function* () {
-            const outcome = terminal(exit, reason)
-            if (outcome.type === "succeeded") {
-              yield* bus.publish(SessionEvent.Execution.Succeeded, { sessionID }, releaseOnCommit(sessionID))
-              return
-            }
-            if (outcome.type === "interrupted") {
-              // A user cancel (or a superseding execution) releases the claim: the turn must not
-              // resurrect at the next boot. Shutdown interruption keeps it for restart continuity.
+        Effect.gen(function* () {
+          yield* reportLifecycle(
+            sessionID,
+            Effect.gen(function* () {
+              const outcome = terminal(exit, reason)
+              if (outcome.type === "succeeded") {
+                yield* bus.publish(SessionEvent.Execution.Succeeded, { sessionID }, releaseOnCommit(sessionID))
+                return
+              }
+              if (outcome.type === "interrupted") {
+                // A user cancel (or a superseding execution) releases the claim: the turn must not
+                // resurrect at the next boot. Shutdown interruption keeps it for restart continuity.
+                yield* bus.publish(
+                  SessionEvent.Execution.Interrupted,
+                  { sessionID, reason: outcome.reason },
+                  outcome.reason === "shutdown" ? undefined : releaseOnCommit(sessionID),
+                )
+                return
+              }
               yield* bus.publish(
-                SessionEvent.Execution.Interrupted,
-                { sessionID, reason: outcome.reason },
-                outcome.reason === "shutdown" ? undefined : releaseOnCommit(sessionID),
+                SessionEvent.Execution.Failed,
+                {
+                  sessionID,
+                  error: outcome.error,
+                },
+                releaseOnCommit(sessionID),
               )
-              return
-            }
-            yield* bus.publish(
-              SessionEvent.Execution.Failed,
-              {
-                sessionID,
-                error: outcome.error,
-              },
-              releaseOnCommit(sessionID),
-            )
-          }),
-        ),
+            }),
+          )
+          yield* SessionExecutionCapability.clear(sessionID)
+        }),
     })
     yield* bus.subscribe(SessionEvent.Moved).pipe(
       Stream.runForEach((event) => coordinator.wake(event.data.sessionID)),

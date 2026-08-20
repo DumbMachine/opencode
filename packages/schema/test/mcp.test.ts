@@ -35,3 +35,26 @@ describe("Mcp resources", () => {
     })
   })
 })
+
+describe("request-scoped MCP", () => {
+  test("accepts remote servers with caller-supplied headers", () => {
+    expect(
+      Schema.decodeUnknownSync(Mcp.RequestServers)({
+        tenant: { type: "remote", url: "https://mcp.example.test", headers: { authorization: "Bearer short" } },
+      }),
+    ).toEqual({
+      tenant: { type: "remote", url: "https://mcp.example.test", headers: { authorization: "Bearer short" } },
+    })
+  })
+
+  test("rejects local processes and persisted OAuth configuration", () => {
+    expect(() =>
+      Schema.decodeUnknownSync(Mcp.RequestServers)({ local: { type: "local", command: ["server"] } }),
+    ).toThrow()
+    expect(() =>
+      Schema.decodeUnknownSync(Mcp.RequestServers)({
+        tenant: { type: "remote", url: "https://mcp.example.test", oauth: { client_id: "persisted" } },
+      }),
+    ).toThrow()
+  })
+})

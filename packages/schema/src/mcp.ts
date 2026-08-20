@@ -50,6 +50,27 @@ export class RemoteConfig extends Schema.Class<RemoteConfig>("Mcp.RemoteConfig")
   timeout: TimeoutConfig.pipe(optional),
 }) {}
 
+/**
+ * Remote MCP configuration supplied for one Session execution. OAuth is
+ * deliberately unavailable: callers provide an already-minted capability in
+ * headers, and OpenCode must not create or retain OAuth credentials for it.
+ */
+export class RequestRemoteConfig extends Schema.Class<RequestRemoteConfig>("Mcp.RequestRemoteConfig")({
+  type: Schema.Literal("remote"),
+  url: Schema.String,
+  headers: Schema.Record(Schema.String, Schema.String).pipe(optional),
+  oauth: Schema.Literal(false).pipe(optional),
+  codemode: Schema.Boolean.pipe(optional).annotate({
+    description: "Expose this server's tools through Code Mode. Defaults to true.",
+  }),
+  timeout: TimeoutConfig.pipe(optional),
+}) {}
+
+export const RequestServers = Schema.Record(Schema.String, RequestRemoteConfig).annotate({
+  identifier: "Mcp.RequestServers",
+})
+export type RequestServers = typeof RequestServers.Type
+
 export const ServerConfig = Schema.Union([LocalConfig, RemoteConfig]).pipe(Schema.toTaggedUnion("type"))
 export type ServerConfig = typeof ServerConfig.Type
 

@@ -608,6 +608,7 @@ export function make(options: ClientOptions) {
               files: input["files"],
               agents: input["agents"],
               skills: input["skills"],
+              mcp: input["mcp"],
               metadata: input["metadata"],
               delivery: input["delivery"],
               resume: input["resume"],

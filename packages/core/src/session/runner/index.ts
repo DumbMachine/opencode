@@ -3,9 +3,16 @@ export * as SessionRunner from "./index.js"
 import type { AIError } from "@opencode-ai/ai"
 import { Context, Effect } from "effect"
 import { SessionSchema } from "../schema.js"
-import type { AgentNotFoundError, MessageDecodeError, StepFailedError, UserInterruptedError } from "../error.js"
+import type {
+  AgentNotFoundError,
+  ExecutionCapabilityUnavailableError,
+  MessageDecodeError,
+  StepFailedError,
+  UserInterruptedError,
+} from "../error.js"
 import { SessionRunnerModel } from "./model.js"
 import type { Instructions } from "../../instructions/index.js"
+import type { MCP } from "../../mcp/index.js"
 
 export type RunError =
   | AIError
@@ -14,7 +21,9 @@ export type RunError =
   | AgentNotFoundError
   | StepFailedError
   | UserInterruptedError
+  | ExecutionCapabilityUnavailableError
   | Instructions.InitializationBlocked
+  | MCP.RequestConnectError
 
 export type Continuation = { readonly step: number }
 

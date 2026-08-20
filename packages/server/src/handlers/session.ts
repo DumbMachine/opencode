@@ -19,6 +19,7 @@ import {
   UnknownError,
 } from "@opencode-ai/protocol/errors"
 import { AbsolutePath } from "@opencode-ai/core/schema"
+import { SessionExecutionCapability } from "@opencode-ai/core/session/execution-capability"
 
 const DefaultSessionsLimit = 50
 
@@ -306,9 +307,14 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
       .handle(
         "session.prompt",
         Effect.fn(function* (ctx) {
+          if (ctx.payload.mcp && ctx.payload.resume === false)
+            return yield* new InvalidRequestError({
+              message: "Request-scoped MCP requires immediate execution; resume=false is unsupported",
+              field: "mcp",
+            })
           return {
-            data: yield* session
-              .prompt({
+            data: yield* Effect.gen(function* () {
+              const admitted = yield* session.prompt({
                 sessionID: ctx.params.sessionID,
                 id: ctx.payload.id,
                 text: ctx.payload.text,
@@ -317,8 +323,18 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
                 skills: ctx.payload.skills,
                 metadata: ctx.payload.metadata,
                 delivery: ctx.payload.delivery,
-                resume: ctx.payload.resume,
+                resume: ctx.payload.mcp ? false : ctx.payload.resume,
+                executionCapabilities: ctx.payload.mcp ? ["mcp"] : undefined,
               })
+              if (ctx.payload.mcp) {
+                yield* SessionExecutionCapability.set(ctx.params.sessionID, {
+                  inputID: admitted.id,
+                  mcp: ctx.payload.mcp,
+                })
+                yield* session.wake(ctx.params.sessionID)
+              }
+              return admitted
+            })
               .pipe(
                 Effect.catchTag("Session.NotFoundError", (error) =>
                   Effect.fail(

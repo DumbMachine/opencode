@@ -52,3 +52,12 @@ export class UserInterruptedError extends Schema.TaggedErrorClass<UserInterrupte
     return "Session interrupted by user"
   }
 }
+
+export class ExecutionCapabilityUnavailableError extends Schema.TaggedErrorClass<ExecutionCapabilityUnavailableError>()(
+  "Session.ExecutionCapabilityUnavailableError",
+  { sessionID: SessionSchema.ID, inputID: SessionMessage.ID },
+) {
+  override get message() {
+    return `Execution capability for input ${this.inputID} is unavailable; retry the prompt with a fresh grant`
+  }
+}

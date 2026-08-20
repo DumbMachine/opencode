@@ -239,6 +239,26 @@ describe("Session.prompt", () => {
     }),
   )
 
+  it.effect("persists only the non-secret execution capability manifest", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* Session.Service
+
+      const message = yield* session.prompt({
+        sessionID,
+        text: "Use tenant tools",
+        executionCapabilities: ["mcp"],
+        resume: false,
+      })
+
+      expect(message.payload.capabilities).toEqual(["mcp"])
+      const stored = yield* admitted(message.id)
+      expect(stored?.type === "user" ? stored.payload.capabilities : undefined).toEqual(["mcp"])
+      expect(JSON.stringify(stored)).not.toContain("authorization")
+      expect(JSON.stringify(stored)).not.toContain("Bearer")
+    }),
+  )
+
   it.effect("commits a staged revert before admitting a new prompt", () =>
     Effect.gen(function* () {
       yield* setup

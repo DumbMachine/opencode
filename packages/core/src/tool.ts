@@ -1,6 +1,6 @@
 export * as Tool from "./tool.js"
 export { CallID, Content, Error, FileContent, TextContent } from "@opencode-ai/schema/tool"
-export type { Context, Metadata, Options, Result } from "@opencode-ai/schema/tool"
+export type { Context, Info, Metadata, Options, Result } from "@opencode-ai/schema/tool"
 
 import { ToolDefinition, type ToolCall } from "@opencode-ai/ai"
 import { Tool } from "@opencode-ai/schema/tool"
@@ -26,7 +26,12 @@ export interface Interface {
   readonly transform: (
     callback: (draft: { readonly add: (tool: Tool.Info) => void }) => void,
   ) => Effect.Effect<void, RegistrationError, Scope.Scope>
-  readonly snapshot: (permissions?: Permission.Ruleset) => Effect.Effect<Snapshot>
+  readonly snapshot: (permissions?: Permission.Ruleset, options?: SnapshotOptions) => Effect.Effect<Snapshot>
+}
+
+export interface SnapshotOptions {
+  readonly excludeGroups?: ReadonlyArray<string>
+  readonly tools?: ReadonlyArray<Tool.Info>
 }
 
 export interface Snapshot {
@@ -202,16 +207,24 @@ const layer = Layer.effect(
 
     return Service.of({
       transform,
-      snapshot: Effect.fn("Tool.snapshot")((permissions) =>
+      snapshot: Effect.fn("Tool.snapshot")((permissions, options) =>
         lock.withPermit(
           Effect.gen(function* () {
             const active = new Map<string, Tool.Info>()
             const rules = permissions ?? []
+            const excluded = new Set(options?.excludeGroups ?? [])
             for (const [name, entries] of local) {
               const tool = entries.at(-1)?.tool
               if (!tool) continue
+              if (tool.options?.group && excluded.has(tool.options.group)) continue
               if (whollyDisabled(tool.options?.permission ?? name, rules)) continue
               active.set(name, tool)
+            }
+            for (const entry of normalizedEntries(options?.tools ?? [])) {
+              yield* validateName(entry.key).pipe(Effect.orDie)
+              if (entry.tool.options?.namespace) yield* validateNamespace(entry.tool.options.namespace).pipe(Effect.orDie)
+              if (whollyDisabled(entry.tool.options?.permission ?? entry.key, rules)) continue
+              active.set(entry.key, entry.tool)
             }
             const direct = new Map(Array.from(active).filter(([, tool]) => tool.options?.codemode === false))
             const codemode = new Map(Array.from(active).filter(([, tool]) => tool.options?.codemode !== false))

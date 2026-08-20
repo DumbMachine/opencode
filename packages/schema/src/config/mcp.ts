@@ -12,6 +12,10 @@ export const OAuth = Mcp.OAuthConfig
 export type OAuth = Mcp.OAuthConfig
 export const Remote = Mcp.RemoteConfig
 export type Remote = Mcp.RemoteConfig
+export const RequestRemote = Mcp.RequestRemoteConfig
+export type RequestRemote = Mcp.RequestRemoteConfig
+export const RequestServers = Mcp.RequestServers
+export type RequestServers = Mcp.RequestServers
 export const Server = Mcp.ServerConfig
 
 export class Info extends Schema.Class<Info>("Config.MCP")({

@@ -579,6 +579,24 @@ describe("Tool", () => {
     }),
   )
 
+  it.effect("replaces one tool group in a request snapshot without mutating the registry", () =>
+    Effect.gen(function* () {
+      const service = yield* Tool.Service
+      yield* transform(service, { configured: constant("configured") }, { codemode: false, group: "mcp" })
+      yield* transform(service, { builtin: constant("builtin") }, { codemode: false })
+      const requestTool = { ...constant("request"), name: "request", options: { codemode: false, group: "mcp" } }
+
+      const request = yield* service.snapshot(undefined, { excludeGroups: ["mcp"], tools: [requestTool] })
+      expect(request.definitions.map((tool) => tool.name)).toEqual(["builtin", "request", "execute"])
+      expect((yield* request.execute(call("request"))).content).toEqual([{ type: "text", text: "request" }])
+      expect((yield* service.snapshot()).definitions.map((tool) => tool.name)).toEqual([
+        "builtin",
+        "configured",
+        "execute",
+      ])
+    }),
+  )
+
   it.effect("executes and reports progress for codemode tools advertised in a model request", () =>
     Effect.gen(function* () {
       const service = yield* Tool.Service

@@ -56,6 +56,8 @@ const update = (previous: ReadonlyArray<Summary>, current: ReadonlyArray<Summary
 
 export interface Interface {
   readonly load: (agent: Agent.Selection) => Effect.Effect<Instructions.List>
+  /** Renders guidance for an execution-scoped MCP set without entering durable instruction state. */
+  readonly ephemeral: (mcp: MCP.Execution, agent: Agent.Selection) => Effect.Effect<string | undefined>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/McpInstructions") {}
@@ -65,7 +67,45 @@ export const layer = Layer.effect(
   Effect.gen(function* () {
     const mcp = yield* MCP.Service
 
+    const visible = Effect.fn("McpInstructions.visible")(function* (
+      execution: MCP.Execution,
+      selection: Agent.Selection,
+    ) {
+      const agent = selection.info
+      if (!agent) return []
+      const [instructions, tools] = yield* Effect.all([execution.instructions(), execution.tools()], {
+        concurrency: "unbounded",
+      })
+      const canExecute = Permission.evaluate("execute", "*", agent.permissions).effect !== "deny"
+      return instructions
+        .flatMap((item) => {
+          const owned = tools.filter((tool) => tool.server === item.server)
+          const codemode = owned[0]?.codemode !== false
+          if (codemode && !canExecute) return []
+          if (
+            !owned.some(
+              (tool) =>
+                Permission.evaluate(McpTool.name(tool.server, tool.name), "*", agent.permissions).effect !== "deny",
+            )
+          )
+            return []
+          return [
+            codemode
+              ? { server: item.server, instructions: item.instructions }
+              : { server: item.server, instructions: item.instructions, codemode: false as const },
+          ]
+        })
+        .toSorted((a, b) => a.server.localeCompare(b.server))
+    })
+
     return Service.of({
+      ephemeral: Effect.fn("McpInstructions.ephemeral")(function* (execution, selection) {
+        const summaries = yield* visible(execution, selection)
+        return [
+          "The request-scoped MCP server set replaces all configured MCP servers for this execution. Ignore prior MCP server guidance for servers not listed here.",
+          summaries.length === 0 ? "No request-scoped MCP server supplied additional instructions." : render(summaries),
+        ].join("\n")
+      }),
       load: Effect.fn("McpInstructions.load")(function* (selection) {
         const agent = selection.info
         if (!agent) return Instructions.empty
@@ -80,31 +120,8 @@ export const layer = Layer.effect(
               removed: () => "MCP server instructions are no longer available.",
             },
           })
-        const [instructions, tools] = yield* Effect.all([mcp.instructions(), mcp.tools()], {
-          concurrency: "unbounded",
-        })
-        const canExecute = Permission.evaluate("execute", "*", agent.permissions).effect !== "deny"
-        // Instructions are useful only when this agent can reach at least one server tool.
-        const visible = instructions
-          .flatMap((item) => {
-            const owned = tools.filter((tool) => tool.server === item.server)
-            const codemode = owned[0]?.codemode !== false
-            if (codemode && !canExecute) return []
-            if (
-              !owned.some(
-                (tool) =>
-                  Permission.evaluate(McpTool.name(tool.server, tool.name), "*", agent.permissions).effect !== "deny",
-              )
-            )
-              return []
-            return [
-              codemode
-                ? { server: item.server, instructions: item.instructions }
-                : { server: item.server, instructions: item.instructions, codemode: false as const },
-            ]
-          })
-          .toSorted((a, b) => a.server.localeCompare(b.server))
-        return source(visible.length === 0 ? Instructions.removed : visible)
+        const summaries = yield* visible(mcp, selection)
+        return source(summaries.length === 0 ? Instructions.removed : summaries)
       }),
     })
   }),

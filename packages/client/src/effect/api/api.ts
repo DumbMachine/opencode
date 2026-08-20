@@ -14,6 +14,7 @@ import type { SessionMessage } from "@opencode-ai/schema/session-message"
 import type { SessionInbox } from "@opencode-ai/schema/session-inbox"
 import type { PromptInput } from "@opencode-ai/schema/prompt-input"
 import type { AgentAttachment } from "@opencode-ai/schema/prompt"
+import type { Mcp } from "@opencode-ai/schema/mcp"
 import type { Skill } from "@opencode-ai/schema/skill"
 import type { Event } from "@opencode-ai/schema/event"
 import type { InstructionEntry } from "@opencode-ai/schema/instruction-entry"
@@ -24,7 +25,6 @@ import type { DateTime } from "effect"
 import type { Provider } from "@opencode-ai/schema/provider"
 import type { Integration } from "@opencode-ai/schema/integration"
 import type { Form } from "@opencode-ai/schema/form"
-import type { Mcp } from "@opencode-ai/schema/mcp"
 import type { Credential } from "@opencode-ai/schema/credential"
 import type { Permission } from "@opencode-ai/schema/permission"
 import type { PermissionSaved } from "@opencode-ai/schema/permission-saved"
@@ -181,6 +181,7 @@ export type Endpoint5_12Input = {
   readonly files?: ReadonlyArray<PromptInput.FileAttachment> | undefined
   readonly agents?: ReadonlyArray<AgentAttachment> | undefined
   readonly skills?: ReadonlyArray<PromptInput.SkillAttachment> | undefined
+  readonly mcp?: Mcp.RequestServers | undefined
   readonly metadata?: { readonly [x: string]: unknown } | undefined
   readonly delivery?: SessionInbox.Delivery | undefined
   readonly resume?: boolean | undefined

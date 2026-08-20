@@ -4,7 +4,7 @@ import path from "node:path"
 import { pathToFileURL } from "node:url"
 import { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js"
-import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js"
+import type { FetchLike, Transport } from "@modelcontextprotocol/sdk/shared/transport.js"
 import { UnauthorizedError, type OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js"
 import {
   CallToolResultSchema,
@@ -139,6 +139,11 @@ export interface LogMessage {
   readonly data: LoggingMessageNotification["params"]["data"]
 }
 
+export interface ConnectOptions {
+  /** Reject MCP session negotiation and any request carrying an MCP session identifier. */
+  readonly stateless?: boolean
+}
+
 /** Handle over a connected MCP server that keeps the SDK `Client` out of the rest of core. */
 export interface Connection {
   /** Server-supplied usage instructions from the initialize result, if any. */
@@ -189,6 +194,7 @@ export const connect = Effect.fnUntraced(function* (
   authProvider?: OAuthClientProvider,
   elicitation?: ElicitationHandler,
   clientInfo: Implementation = { name: "opencode", version: "unknown" },
+  options?: ConnectOptions,
 ) {
   const transport: Transport = yield* Effect.gen(function* () {
     if (config.type === "local") {
@@ -206,9 +212,20 @@ export const connect = Effect.fnUntraced(function* (
     }
     if (!URL.canParse(config.url))
       return yield* new ConnectError({ server, message: `Invalid MCP URL for "${server}"` })
+    const statelessFetch: FetchLike | undefined = options?.stateless
+      ? async (url, init) => {
+          if (new Headers(init?.headers).has("mcp-session-id"))
+            throw new Error(`Stateless MCP server "${server}" attempted to reuse a session`)
+          const response = await globalThis.fetch(url, init)
+          if (response.headers.has("mcp-session-id"))
+            throw new Error(`MCP server "${server}" negotiated a session for a stateless connection`)
+          return response
+        }
+      : undefined
     return new StreamableHTTPClientTransport(new URL(config.url), {
       requestInit: config.headers ? { headers: config.headers } : undefined,
       authProvider,
+      fetch: statelessFetch,
     })
   })
   const client = new Client(clientInfo, {

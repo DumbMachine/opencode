@@ -73,7 +73,7 @@ async function publishDistribution(input: { root: string; name: string; binary: 
 await publishDistribution({
   root: "./dist",
   name: pkg.name,
-  binary: "opencode2",
+  binary: "opencodepg",
   packagePrefix: "@opencode-ai/cli-",
 })
 await publishDistribution({

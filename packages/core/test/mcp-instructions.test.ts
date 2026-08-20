@@ -33,6 +33,22 @@ const layer = (catalog: () => MCP.ServerInstructions[], tools: () => MCP.Tool[])
   ])
 
 describe("McpInstructions", () => {
+  it.effect("marks request guidance as a replacement without mutating durable instruction state", () =>
+    Effect.gen(function* () {
+      const service = yield* McpInstructions.Service
+      const request: MCP.Execution = {
+        instructions: () => Effect.succeed([instructions("tenant", "Tenant-only guidance")]),
+        tools: () => Effect.succeed([tool("tenant")]),
+        callTool: () => Effect.die("unused request MCP tool"),
+      }
+
+      expect(yield* service.ephemeral(request, selection())).toContain(
+        "The request-scoped MCP server set replaces all configured MCP servers for this execution.",
+      )
+      expect(yield* service.ephemeral(request, selection())).toContain("Tenant-only guidance")
+    }).pipe(Effect.provide(layer(() => [], () => []))),
+  )
+
   it.effect("renders instructions for servers with at least one permitted tool", () =>
     Effect.gen(function* () {
       const service = yield* McpInstructions.Service

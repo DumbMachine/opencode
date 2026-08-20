@@ -111,6 +111,11 @@ export class ToolCallError extends Schema.TaggedErrorClass<ToolCallError>()("MCP
   message: Schema.String,
 }) {}
 
+export class RequestConnectError extends Schema.TaggedErrorClass<RequestConnectError>()("MCP.RequestConnectError", {
+  server: ServerName,
+  message: Schema.String,
+}) {}
+
 type ServerEntry = {
   readonly config: typeof ConfigMCP.Server.Type
   status: Status
@@ -129,12 +134,7 @@ type ServerEntry = {
 const GLOBAL_ELICITATION_SESSION_ID = "global"
 const URL_ELICITATION_FIELD_KEY = "elicitation"
 
-export interface Interface {
-  readonly servers: () => Effect.Effect<ServerInfo[]>
-  readonly add: (server: ServerName | string, config: typeof ConfigMCP.Server.Type) => Effect.Effect<void>
-  readonly connect: (server: ServerName | string) => Effect.Effect<void, NotFoundError>
-  readonly disconnect: (server: ServerName | string) => Effect.Effect<void, NotFoundError>
-  readonly remove: (server: ServerName | string) => Effect.Effect<void, NotFoundError>
+export interface Execution {
   readonly tools: () => Effect.Effect<Tool[]>
   readonly callTool: (input: {
     readonly server: ServerName | string
@@ -142,6 +142,16 @@ export interface Interface {
     readonly args?: Record<string, unknown>
   }) => Effect.Effect<ToolResult, NotFoundError | ToolCallError>
   readonly instructions: () => Effect.Effect<ServerInstructions[]>
+}
+
+export interface Interface extends Execution {
+  readonly servers: () => Effect.Effect<ServerInfo[]>
+  readonly add: (server: ServerName | string, config: typeof ConfigMCP.Server.Type) => Effect.Effect<void>
+  readonly connect: (server: ServerName | string) => Effect.Effect<void, NotFoundError>
+  readonly disconnect: (server: ServerName | string) => Effect.Effect<void, NotFoundError>
+  readonly remove: (server: ServerName | string) => Effect.Effect<void, NotFoundError>
+  /** Connects remote MCP servers for one execution scope without mutating configured servers. */
+  readonly request: (servers: Mcp.RequestServers) => Effect.Effect<Execution, RequestConnectError, Scope.Scope>
   readonly prompts: () => Effect.Effect<Prompt[]>
   readonly prompt: (input: {
     readonly server: ServerName | string
@@ -674,7 +684,99 @@ export const layer = (options?: Options) =>
           discard: true,
         }),
       )
+      const request: Interface["request"] = Effect.fn("MCP.request")(function* (servers) {
+        const connections = new Map<
+          ServerName,
+          { readonly client: MCPClient.Connection; readonly tools: Tool[] }
+        >()
+        yield* Effect.forEach(
+          Object.entries(servers),
+          ([rawName, requestConfig]) =>
+            Effect.gen(function* () {
+              const name = ServerName.make(rawName)
+              const { MCPClient } = yield* Effect.promise(() => import("./client.js"))
+              const result = yield* MCPClient.connect(
+                name,
+                new ConfigMCP.Remote({
+                  type: "remote",
+                  url: requestConfig.url,
+                  headers: requestConfig.headers,
+                  oauth: false,
+                  codemode: requestConfig.codemode,
+                  timeout: requestConfig.timeout,
+                }),
+                location.directory,
+                undefined,
+                undefined,
+                options?.clientInfo,
+                { stateless: true },
+              ).pipe(
+                Effect.flatMap((client) => client.tools().pipe(Effect.map((tools) => ({ client, tools })))),
+                Effect.provideService(Environment.Service, environment),
+                Effect.exit,
+              )
+              if (Exit.isFailure(result)) {
+                const message = Cause.pretty(result.cause)
+                yield* Effect.logWarning("request MCP server unavailable", { server: name, cause: message })
+                return yield* new RequestConnectError({ server: name, message })
+              }
+              connections.set(name, {
+                client: result.value.client,
+                tools: result.value.tools.map(
+                  (definition) =>
+                    new Tool({
+                      server: name,
+                      name: definition.name,
+                      codemode: requestConfig.codemode,
+                      description: definition.description,
+                      inputSchema: definition.inputSchema,
+                      outputSchema: definition.outputSchema,
+                    }),
+                ),
+              })
+              return undefined
+            }),
+          { concurrency: "unbounded", discard: true },
+        )
+        const requireConnection = (server: ServerName | string) => {
+          const name = ServerName.make(server)
+          const entry = connections.get(name)
+          return entry ? Effect.succeed({ name, entry }) : Effect.fail(new NotFoundError({ server: name }))
+        }
+        return {
+          tools: Effect.fn("MCP.request.tools")(function* () {
+            return Array.from(connections.values())
+              .flatMap((entry) => entry.tools)
+              .toSorted((a, b) => a.server.localeCompare(b.server) || a.name.localeCompare(b.name))
+          }),
+          callTool: Effect.fn("MCP.request.callTool")(function* (input) {
+            const target = yield* requireConnection(input.server)
+            const result = yield* target.entry.client.callTool({ name: input.name, args: input.args }).pipe(
+              Effect.mapError(
+                (error) => new ToolCallError({ server: target.name, tool: input.name, message: error.message }),
+              ),
+            )
+            return new ToolResult({
+              server: target.name,
+              tool: input.name,
+              isError: result.isError,
+              structured: result.structured,
+              content: result.content,
+            })
+          }),
+          instructions: Effect.fn("MCP.request.instructions")(function* () {
+            return Array.from(connections)
+              .flatMap(([server, entry]) =>
+                entry.client.instructions
+                  ? [new ServerInstructions({ server, instructions: entry.client.instructions })]
+                  : [],
+              )
+              .toSorted((a, b) => a.server.localeCompare(b.server))
+          }),
+        }
+      })
       return Service.of({
+        request,
         servers: Effect.fn("MCP.servers")(function* () {
           return Array.from(runtime)
             .toSorted(([a], [b]) => a.localeCompare(b))
