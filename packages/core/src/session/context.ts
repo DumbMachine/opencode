@@ -11,6 +11,7 @@ import { InstructionBuiltIns } from "../instructions/builtins.js"
 import { Location } from "../location.js"
 import { McpInstructions } from "../mcp/instructions.js"
 import { MCP } from "../mcp/index.js"
+import { PluginHooks } from "../plugin/hooks.js"
 import { McpTool } from "../tool/mcp.js"
 import { PluginSupervisor } from "../plugin/supervisor.js"
 import { ReferenceInstructions } from "../reference/instructions.js"
@@ -73,6 +74,7 @@ const layer = Layer.effect(
     const mcpInstructions = yield* McpInstructions.Service
     const mcpTools = yield* McpTool.Service
     const models = yield* SessionRunnerModel.Service
+    const hooks = yield* PluginHooks.Service
     const plugins = yield* PluginSupervisor.Service
     const referenceInstructions = yield* ReferenceInstructions.Service
     const skillInstructions = yield* SkillInstructions.Service
@@ -93,11 +95,28 @@ const layer = Layer.effect(
       const agent = yield* agents.select(session.agent)
       if (!agent.info) return yield* new AgentNotFoundError({ sessionID: session.id, agent: session.agent ?? agent.id })
       const requestTools = executionMcp ? yield* mcpTools.tools(executionMcp) : undefined
+      const resolvedTools = yield* hooks.trigger("tool", "resolve", {
+        sessionID,
+        agent: agent.id,
+        tools: (requestTools ?? []).map((tool) => ({
+          name: tool.name,
+          namespace: tool.options?.namespace,
+          effectiveName: Tool.effectiveName(tool),
+          group: tool.options?.group,
+        })),
+        renames: [],
+      })
+      const renames = new Map(resolvedTools.renames.map((rename) => [rename.from, rename.to]))
+      const executionTools = (requestTools ?? []).map((tool) => {
+        const name = renames.get(Tool.effectiveName(tool))
+        if (!name) return tool
+        return Tool.rename(tool, name)
+      })
       const loaded = yield* Effect.all(
         {
           tools: registry.snapshot(
             agent.info.permissions,
-            executionMcp ? { excludeGroups: ["mcp"], tools: requestTools } : undefined,
+            executionMcp ? { excludeGroups: ["mcp"], tools: executionTools } : undefined,
           ),
           builtins: builtins.load(sessionID),
           discovery: discovery.load(),
@@ -156,6 +175,7 @@ export const node = makeLocationNode({
     Location.node,
     McpInstructions.node,
     McpTool.node,
+    PluginHooks.node,
     PluginSupervisor.node,
     ReferenceInstructions.node,
     SessionRunnerModel.node,

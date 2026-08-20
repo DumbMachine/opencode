@@ -222,7 +222,8 @@ const layer = Layer.effect(
             }
             for (const entry of normalizedEntries(options?.tools ?? [])) {
               yield* validateName(entry.key).pipe(Effect.orDie)
-              if (entry.tool.options?.namespace) yield* validateNamespace(entry.tool.options.namespace).pipe(Effect.orDie)
+              if (entry.tool.options?.namespace)
+                yield* validateNamespace(entry.tool.options.namespace).pipe(Effect.orDie)
               if (whollyDisabled(entry.tool.options?.permission ?? entry.key, rules)) continue
               active.set(entry.key, entry.tool)
             }
@@ -292,10 +293,21 @@ const validateNamespace = (namespace: string) =>
 
 const normalizedName = (tool: Tool.Info) => tool.name.replace(/[^a-zA-Z0-9_-]/g, "_")
 
-const effectiveName = (tool: Tool.Info) =>
+export const effectiveName = (tool: Tool.Info) =>
   tool.options?.namespace === undefined
     ? normalizedName(tool)
     : `${tool.options.namespace.replaceAll(".", "_")}_${normalizedName(tool)}`
+
+/** Renames an execution overlay while retaining the source tool's permission action. */
+export const rename = (tool: Tool.Info, name: string): Tool.Info => ({
+  ...tool,
+  name,
+  options: {
+    ...tool.options,
+    namespace: undefined,
+    permission: tool.options?.permission ?? effectiveName(tool),
+  },
+})
 
 const normalizedEntries = (tools: ReadonlyArray<Tool.Info>) =>
   tools.map((tool) => ({

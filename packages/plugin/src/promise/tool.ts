@@ -28,6 +28,18 @@ interface ToolDraft {
 }
 
 interface ToolHooks {
+  /** Declaratively rename execution-scoped tools before the request snapshot is built. */
+  readonly resolve: {
+    readonly sessionID: Session.ID
+    readonly agent: Agent.ID
+    readonly tools: ReadonlyArray<{
+      readonly name: string
+      readonly namespace?: string
+      readonly effectiveName: string
+      readonly group?: string
+    }>
+    renames: Array<{ readonly from: string; readonly to: string }>
+  }
   readonly "execute.before": {
     readonly tool: string
     readonly sessionID: Session.ID

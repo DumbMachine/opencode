@@ -68,6 +68,7 @@ import { WebSearchPlugins } from "./websearch/index.js"
 import { PluginRuntime } from "./runtime.js"
 import { SkillPlugin } from "./skill.js"
 import { SystemPromptPlugin } from "./system-prompt.js"
+import { ToolRenamePlugin } from "./tool-rename.js"
 import { VariantPlugin } from "./variant.js"
 import { WarmingPlugin } from "./warming.js"
 import { WellKnownPlugin } from "../wellknown/plugin.js"
@@ -216,6 +217,7 @@ const pre = [
   WebFetchTool.Plugin,
   WebSearchTool.Plugin,
   WriteTool.Plugin,
+  ToolRenamePlugin.Plugin,
   WarmingPlugin.Plugin,
 ] as const satisfies readonly InternalPlugin[]
 

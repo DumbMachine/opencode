@@ -37,6 +37,26 @@ const staticIt = testEffect(
 )
 
 describe("PluginSupervisor config", () => {
+  it.live("passes configured options to an SDK plugin", () =>
+    Effect.gen(function* () {
+      const sdk = yield* SdkPlugins.Service
+      let mode: unknown
+      yield* sdk.register(
+        EffectPlugin.define({
+          id: "configured-sdk",
+          effect: (ctx) => Effect.sync(() => (mode = ctx.options.mode)),
+        }),
+      )
+      yield* withLocation(
+        { plugins: [{ package: "configured-sdk", options: { mode: "strict" } }] },
+        Effect.gen(function* () {
+          yield* ready()
+          expect(mode).toBe("strict")
+        }),
+      )
+    }),
+  )
+
   it.live("applies selectors in order", () =>
     withLocation(
       { plugins: ["-opencode.provider.*", "opencode.provider.openai"] },

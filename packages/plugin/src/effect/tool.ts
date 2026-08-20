@@ -11,6 +11,18 @@ export interface ToolDraft {
 }
 
 export interface ToolHooks {
+  /** Declaratively rename execution-scoped tools before the request snapshot is built. */
+  readonly resolve: {
+    readonly sessionID: Session.ID
+    readonly agent: Agent.ID
+    readonly tools: ReadonlyArray<{
+      readonly name: string
+      readonly namespace?: string
+      readonly effectiveName: string
+      readonly group?: string
+    }>
+    renames: Array<{ readonly from: string; readonly to: string }>
+  }
   readonly "execute.before": {
     readonly tool: string
     readonly sessionID: Session.ID
@@ -40,6 +52,7 @@ export interface ToolHooks {
 
 // Only execute.before may fail: a Tool.Error rejects the call before the tool runs.
 export interface ToolFailures extends Record<keyof ToolHooks, unknown> {
+  readonly resolve: never
   readonly "execute.before": Tool.Error
   readonly "execute.after": never
 }

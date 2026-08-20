@@ -597,6 +597,27 @@ describe("Tool", () => {
     }),
   )
 
+  it.effect("renames an execution tool over a native tool without losing source permission identity", () =>
+    Effect.gen(function* () {
+      const service = yield* Tool.Service
+      yield* transform(service, { read: constant("native") }, { codemode: false })
+      const source = {
+        ...constant("workspace"),
+        name: "files_read",
+        options: { namespace: "access", codemode: false, group: "mcp" },
+      } satisfies Info
+      const renamed = Tool.rename(source, "read")
+
+      const request = yield* service.snapshot(undefined, { tools: [renamed] })
+
+      expect(request.definitions.map((tool) => tool.name)).toEqual(["read", "execute"])
+      expect((yield* request.execute(call("read"))).content).toEqual([{ type: "text", text: "workspace" }])
+      expect(renamed.options?.permission).toBe("access_files_read")
+      expect((yield* service.snapshot()).definitions.map((tool) => tool.name)).toEqual(["read", "execute"])
+      expect((yield* executeTool(service, call("read"))).content).toEqual([{ type: "text", text: "native" }])
+    }),
+  )
+
   it.effect("executes and reports progress for codemode tools advertised in a model request", () =>
     Effect.gen(function* () {
       const service = yield* Tool.Service

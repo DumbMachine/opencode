@@ -394,6 +394,42 @@ describe("fromPromise", () => {
     }),
   )
 
+  it.effect("adapts execution-scoped tool rename hooks", () =>
+    Effect.gen(function* () {
+      const plugins = yield* Plugin.Service
+      const hooks = yield* PluginHooks.Service
+      const host = yield* PluginHost.make(plugins)
+      yield* PluginPromise.fromPromise(
+        define({
+          id: "promise-tool-resolve",
+          setup: async (ctx) => {
+            await ctx.tool.hook("resolve", (event) => {
+              const file = event.tools.find((tool) => tool.effectiveName === "access_files_read")
+              if (file) event.renames.push({ from: file.effectiveName, to: "read" })
+            })
+          },
+        }),
+      ).effect(host)
+      const event = {
+        sessionID: Session.ID.make("ses_promise_tool_resolve"),
+        agent: Agent.ID.make("build"),
+        tools: [
+          {
+            name: "files_read",
+            namespace: "access",
+            effectiveName: "access_files_read",
+            group: "mcp",
+          },
+        ],
+        renames: [] as Array<{ from: string; to: string }>,
+      }
+
+      yield* hooks.trigger("tool", "resolve", event)
+
+      expect(event.renames).toEqual([{ from: "access_files_read", to: "read" }])
+    }),
+  )
+
   it.effect("returns content-only plugin results through Code Mode", () =>
     Effect.gen(function* () {
       const plugins = yield* Plugin.Service

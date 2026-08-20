@@ -41,6 +41,7 @@ const resolve = Effect.fn("PluginSupervisor.resolve")(function* (
     selector === "*" || (selector.endsWith(".*") ? target.startsWith(selector.slice(0, -1)) : selector === target)
   const definitions = [...pre, ...post]
   const enabled = new Set(definitions.map((plugin) => plugin.id))
+  const configured = new Map<string, Record<string, unknown>>()
   const packages = new Map<string, Plugin.Versioned>()
   const plugins = () => [...definitions, ...packages.values()]
 
@@ -59,7 +60,10 @@ const resolve = Effect.fn("PluginSupervisor.resolve")(function* (
       operation.target.endsWith(".*") ||
       operation.target.startsWith("opencode.")
     if (selectsPlugins) {
-      matched.forEach((plugin) => enabled.add(plugin.id))
+      matched.forEach((plugin) => {
+        enabled.add(plugin.id)
+        configured.set(plugin.id, operation.options)
+      })
       continue
     }
 
@@ -79,7 +83,15 @@ const resolve = Effect.fn("PluginSupervisor.resolve")(function* (
     ...pre.filter((plugin) => enabled.has(plugin.id)),
     ...Array.from(packages.values()).filter((plugin) => enabled.has(plugin.id)),
     ...post.filter((plugin) => enabled.has(plugin.id)),
-  ]
+  ].map((plugin) => {
+    const options = configured.get(plugin.id)
+    if (!options) return plugin
+    return {
+      ...plugin,
+      version: JSON.stringify([plugin.version, options]),
+      effect: (host) => plugin.effect({ ...host, options }),
+    }
+  })
 })
 
 const load = Effect.fn("PluginSupervisor.load")(function* (
