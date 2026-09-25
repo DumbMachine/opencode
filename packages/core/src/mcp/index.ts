@@ -43,6 +43,7 @@ export class Tool extends Schema.Class<Tool>("MCP.Tool")({
   server: ServerName,
   name: Schema.String,
   codemode: Schema.Boolean.pipe(Schema.optional),
+  approvalBridge: Schema.Boolean.pipe(Schema.optional),
   description: Schema.String.pipe(Schema.optional),
   inputSchema: Schema.Unknown.pipe(Schema.optional),
   outputSchema: Schema.Unknown.pipe(Schema.optional),
@@ -59,6 +60,7 @@ export class ToolResult extends Schema.Class<ToolResult>("MCP.ToolResult")({
   tool: Schema.String,
   isError: Schema.Boolean,
   structured: Schema.Unknown.pipe(Schema.optional),
+  meta: Schema.Record(Schema.String, Schema.Unknown).pipe(Schema.optional),
   content: Schema.Array(ToolResultContent),
 }) {}
 
@@ -140,6 +142,7 @@ export interface Execution {
     readonly server: ServerName | string
     readonly name: string
     readonly args?: Record<string, unknown>
+    readonly meta?: Readonly<Record<string, unknown>>
   }) => Effect.Effect<ToolResult, NotFoundError | ToolCallError>
   readonly instructions: () => Effect.Effect<ServerInstructions[]>
 }
@@ -685,10 +688,7 @@ export const layer = (options?: Options) =>
         }),
       )
       const request: Interface["request"] = Effect.fn("MCP.request")(function* (servers) {
-        const connections = new Map<
-          ServerName,
-          { readonly client: MCPClient.Connection; readonly tools: Tool[] }
-        >()
+        const connections = new Map<ServerName, { readonly client: MCPClient.Connection; readonly tools: Tool[] }>()
         yield* Effect.forEach(
           Object.entries(servers),
           ([rawName, requestConfig]) =>
@@ -728,6 +728,7 @@ export const layer = (options?: Options) =>
                       server: name,
                       name: definition.name,
                       codemode: requestConfig.codemode,
+                      approvalBridge: requestConfig.approval_bridge?.some((entry) => entry === "*" || entry === definition.name) === true,
                       description: definition.description,
                       inputSchema: definition.inputSchema,
                       outputSchema: definition.outputSchema,
@@ -751,16 +752,19 @@ export const layer = (options?: Options) =>
           }),
           callTool: Effect.fn("MCP.request.callTool")(function* (input) {
             const target = yield* requireConnection(input.server)
-            const result = yield* target.entry.client.callTool({ name: input.name, args: input.args }).pipe(
-              Effect.mapError(
-                (error) => new ToolCallError({ server: target.name, tool: input.name, message: error.message }),
-              ),
-            )
+            const result = yield* target.entry.client
+              .callTool({ name: input.name, args: input.args, meta: input.meta })
+              .pipe(
+                Effect.mapError(
+                  (error) => new ToolCallError({ server: target.name, tool: input.name, message: error.message }),
+                ),
+              )
             return new ToolResult({
               server: target.name,
               tool: input.name,
               isError: result.isError,
               structured: result.structured,
+              meta: result.meta,
               content: result.content,
             })
           }),
@@ -828,7 +832,7 @@ export const layer = (options?: Options) =>
               message: "MCP server is not connected",
             })
           const result = yield* target.entry.client
-            .callTool({ name: input.name, args: input.args })
+            .callTool({ name: input.name, args: input.args, meta: input.meta })
             .pipe(
               Effect.mapError(
                 (error) => new ToolCallError({ server: target.name, tool: input.name, message: error.message }),
@@ -839,6 +843,7 @@ export const layer = (options?: Options) =>
             tool: input.name,
             isError: result.isError,
             structured: result.structured,
+            meta: result.meta,
             content: result.content,
           })
         }),

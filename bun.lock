@@ -118,6 +118,7 @@
       "name": "@opencode-ai/cli",
       "version": "1.18.4",
       "bin": {
+        "opencodepg": "./bin/opencodepg.cjs",
         "opencode2": "./bin/opencode2.cjs",
       },
       "dependencies": {
@@ -338,6 +339,10 @@
     "packages/core": {
       "name": "@opencode-ai/core",
       "version": "1.18.4",
+      "bin": {
+        "opencodepg": "./bin/opencodepg",
+        "opencode": "./bin/opencode",
+      },
       "dependencies": {
         "@ai-sdk/alibaba": "1.0.17",
         "@ai-sdk/amazon-bedrock": "4.0.112",

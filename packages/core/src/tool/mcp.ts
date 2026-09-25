@@ -16,6 +16,37 @@ import { Tool } from "../tool.js"
 export const namespace = (server: string) => server.replace(/[^a-zA-Z0-9_-]/g, "_")
 export const name = (server: string, tool: string) => `${namespace(server)}_${tool.replace(/[^a-zA-Z0-9_-]/g, "_")}`
 
+const APPROVAL_REQUEST_META = "access.dev/approval"
+const APPROVAL_CONTINUATION_META = "access.dev/approval-continuation"
+
+interface ApprovalRequest {
+  readonly version: 1
+  readonly runId: string
+  readonly action: string
+  readonly resources: ReadonlyArray<string>
+  readonly metadata: Record<string, unknown>
+}
+
+function approvalRequest(meta: Readonly<Record<string, unknown>> | undefined): ApprovalRequest | undefined {
+  const value = meta?.[APPROVAL_REQUEST_META]
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined
+  const request = value as Record<string, unknown>
+  if (
+    request.version !== 1 ||
+    typeof request.runId !== "string" ||
+    request.runId.trim() === "" ||
+    typeof request.action !== "string" ||
+    request.action.trim() === "" ||
+    !Array.isArray(request.resources) ||
+    !request.resources.every((resource) => typeof resource === "string") ||
+    !request.metadata ||
+    typeof request.metadata !== "object" ||
+    Array.isArray(request.metadata)
+  )
+    return undefined
+  return request as unknown as ApprovalRequest
+}
+
 export interface Interface {
   /** Wait for the initial MCP tool registration to settle. */
   readonly flush: Effect.Effect<void>
@@ -53,29 +84,78 @@ export const layer = Layer.effect(
           output: (tool.outputSchema ?? {}) as JsonSchema.JsonSchema,
           execute: (input, context) =>
             Effect.gen(function* () {
-              yield* permission.assert({
-                action: name(tool.server, tool.name),
-                resources: ["*"],
-                save: ["*"],
-                metadata: {},
-                sessionID: context.sessionID,
-                agent: context.agent,
-                source: { type: "tool", messageID: context.messageID, id: context.id },
-              })
-              const result = yield* execution
-                .callTool({ server: tool.server, name: tool.name, args: (input ?? {}) as Record<string, unknown> })
-                .pipe(
-                  Effect.catchTags({
-                    "MCP.NotFoundError": (error) =>
-                      new ToolFailure({ message: `MCP server "${error.server}" is not available` }),
-                    "MCP.ToolCallError": (error) => new ToolFailure({ message: error.message }),
-                  }),
-                )
+              const args = (input ?? {}) as Record<string, unknown>
+              if (!tool.approvalBridge)
+                yield* permission.assert({
+                  action: name(tool.server, tool.name),
+                  resources: ["*"],
+                  save: ["*"],
+                  metadata: {},
+                  sessionID: context.sessionID,
+                  agent: context.agent,
+                  source: { type: "tool", messageID: context.messageID, id: context.id },
+                })
+              let result = yield* execution.callTool({ server: tool.server, name: tool.name, args }).pipe(
+                Effect.catchTags({
+                  "MCP.NotFoundError": (error) =>
+                    new ToolFailure({ message: `MCP server "${error.server}" is not available` }),
+                  "MCP.ToolCallError": (error) => new ToolFailure({ message: error.message }),
+                }),
+              )
+              const approval = tool.approvalBridge ? approvalRequest(result.meta) : undefined
+              if (
+                tool.approvalBridge &&
+                ((result.meta && APPROVAL_REQUEST_META in result.meta && !approval) ||
+                  (result.structured &&
+                    typeof result.structured === "object" &&
+                    "kind" in result.structured &&
+                    result.structured.kind === "approval_required" &&
+                    !approval))
+              )
+                return yield* new ToolFailure({ message: "MCP approval response is missing a valid host continuation" })
+              if (approval) {
+                const permissionID = Permission.ID.create()
+                yield* permission.assert({
+                  id: permissionID,
+                  action: approval.action,
+                  resources: [...approval.resources],
+                  save: [],
+                  metadata: approval.metadata,
+                  sessionID: context.sessionID,
+                  agent: context.agent,
+                  source: { type: "tool", messageID: context.messageID, id: context.id },
+                })
+                result = yield* execution
+                  .callTool({
+                    server: tool.server,
+                    name: tool.name,
+                    args,
+                    meta: {
+                      [APPROVAL_CONTINUATION_META]: {
+                        version: 1,
+                        runId: approval.runId,
+                        permissionId: permissionID,
+                        sessionId: context.sessionID,
+                        messageId: context.messageID,
+                        toolCallId: context.id,
+                      },
+                    },
+                  })
+                  .pipe(
+                    Effect.catchTags({
+                      "MCP.NotFoundError": (error) =>
+                        new ToolFailure({ message: `MCP server "${error.server}" is not available` }),
+                      "MCP.ToolCallError": (error) => new ToolFailure({ message: error.message }),
+                    }),
+                  )
+              }
               if (result.isError)
                 return yield* new ToolFailure({
                   message:
-                    result.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n").trim() ||
-                    "MCP tool returned an error",
+                    result.content
+                      .flatMap((part) => (part.type === "text" ? [part.text] : []))
+                      .join("\n")
+                      .trim() || "MCP tool returned an error",
                 })
               const content = result.content.map((part) =>
                 part.type === "text"

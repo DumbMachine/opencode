@@ -63,6 +63,9 @@ export class RequestRemoteConfig extends Schema.Class<RequestRemoteConfig>("Mcp.
   codemode: Schema.Boolean.pipe(optional).annotate({
     description: "Expose this server's tools through Code Mode. Defaults to true.",
   }),
+  approval_bridge: Schema.Array(Schema.String).pipe(optional).annotate({
+    description: "Host-authorized tool names, or *, whose approval envelopes may resume on the same call.",
+  }),
   timeout: TimeoutConfig.pipe(optional),
 }) {}
 

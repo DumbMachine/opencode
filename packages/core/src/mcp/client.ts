@@ -115,6 +115,7 @@ export interface CallToolResult {
   readonly isError: boolean
   readonly structured: unknown
   readonly content: ReadonlyArray<CallToolContent>
+  readonly meta?: Readonly<Record<string, unknown>>
 }
 
 export type ElicitationFormParams = ElicitRequestFormParams
@@ -167,6 +168,7 @@ export interface Connection {
   readonly callTool: (input: {
     readonly name: string
     readonly args?: Record<string, unknown>
+    readonly meta?: Readonly<Record<string, unknown>>
   }) => Effect.Effect<CallToolResult, Error>
   readonly onClose: (callback: () => void) => void
   /** Registers a callback fired when the server emits an MCP logging notification. */
@@ -405,7 +407,7 @@ export const connect = Effect.fnUntraced(function* (
         Effect.tryPromise({
           try: (signal) =>
             client.callTool(
-              { name: input.name, arguments: input.args ?? {} },
+              { name: input.name, arguments: input.args ?? {}, ...(input.meta ? { _meta: input.meta } : {}) },
               CallToolResultSchema,
               // Keep progress tokens available while enforcing a hard wall-clock execution timeout.
               { signal, timeout: executionTimeout, onprogress: () => {} },
@@ -415,6 +417,7 @@ export const connect = Effect.fnUntraced(function* (
           Effect.map((result) => ({
             isError: result.isError === true,
             structured: result.structuredContent,
+            meta: result._meta,
             content: result.content.flatMap((part): CallToolContent[] => {
               if (part.type === "text") return [{ type: "text", text: part.text }]
               if (part.type === "image" || part.type === "audio")

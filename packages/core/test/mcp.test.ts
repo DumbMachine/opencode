@@ -46,6 +46,10 @@ import { executeTool, toolDefinitions, toolIdentity, waitForCodeModeTool, waitFo
 let assertion: Deferred.Deferred<Permission.AssertInput> | undefined
 let decision: Effect.Effect<void, Permission.Error> = Effect.void
 let calls = 0
+let bridgeCalls: Array<{
+  readonly args?: Record<string, unknown>
+  readonly meta?: Readonly<Record<string, unknown>>
+}> = []
 
 type ResourcePage = {
   items: Array<{ name: string; uri: string; description?: string; mimeType?: string }>
@@ -175,6 +179,7 @@ function statelessServer(tool: string) {
   return Effect.acquireRelease(
     Effect.sync(() => {
       const headers: Array<{ authorization: string | null; session: string | null }> = []
+      const callMeta: Array<Record<string, unknown> | undefined> = []
       const http = Bun.serve({
         port: 0,
         fetch: async (request) => {
@@ -183,7 +188,11 @@ function statelessServer(tool: string) {
             session: request.headers.get("mcp-session-id"),
           })
           if (request.method !== "POST") return new Response(null, { status: 405 })
-          const message = (await request.json()) as { id?: string | number; method?: string }
+          const message = (await request.json()) as {
+            id?: string | number
+            method?: string
+            params?: { _meta?: Record<string, unknown> }
+          }
           if (message.id === undefined) return new Response(null, { status: 202 })
           const result =
             message.method === "initialize"
@@ -194,11 +203,15 @@ function statelessServer(tool: string) {
                 }
               : message.method === "tools/list"
                 ? { tools: [{ name: tool, inputSchema: { type: "object", properties: {} } }] }
-                : { content: [{ type: "text", text: tool }] }
+                : (callMeta.push(message.params?._meta),
+                  {
+                    _meta: { "fixture/result": tool },
+                    content: [{ type: "text", text: tool }],
+                  })
           return Response.json({ jsonrpc: "2.0", id: message.id, result })
         },
       })
-      return { url: http.url.toString(), headers, close: () => http.stop(true) }
+      return { url: http.url.toString(), headers, callMeta, close: () => http.stop(true) }
     }),
     (server) => Effect.promise(server.close),
   )
@@ -324,10 +337,44 @@ const mcp = Layer.mock(MCP.Service, {
         description: "Returns text and an image",
         inputSchema: { type: "object", properties: {} },
       }),
+      new MCP.Tool({
+        server: MCP.ServerName.make("direct"),
+        name: "bridge",
+        codemode: false,
+        approvalBridge: true,
+        description: "Approval bridge fixture",
+        inputSchema: { type: "object", properties: { value: { type: "string" } } },
+      }),
     ]),
   callTool: (input) =>
     Effect.sync(() => {
       calls += 1
+      if (input.name === "bridge") {
+        bridgeCalls.push({ args: input.args, meta: input.meta })
+        if (bridgeCalls.length === 1)
+          return new MCP.ToolResult({
+            server: MCP.ServerName.make(input.server),
+            tool: input.name,
+            isError: false,
+            meta: {
+              "access.dev/approval": {
+                version: 1,
+                runId: "run-1",
+                action: "resource_role",
+                resources: ["gmail"],
+                metadata: { runId: "run-1", operation: "messages.list" },
+              },
+            },
+            content: [{ type: "text", text: "approval required" }],
+          })
+        return new MCP.ToolResult({
+          server: MCP.ServerName.make(input.server),
+          tool: input.name,
+          isError: false,
+          structured: { ok: true },
+          content: [],
+        })
+      }
       if (input.name === "fail")
         return new MCP.ToolResult({
           server: MCP.ServerName.make(input.server),
@@ -403,7 +450,12 @@ test("request MCP uses isolated stateless transports and caller authorization", 
         const beta = yield* statelessServer("beta-tool")
         const service = yield* MCP.Service
         const request = yield* service.request({
-          alpha: { type: "remote", url: alpha.url, headers: { authorization: "Bearer alpha" } },
+          alpha: {
+            type: "remote",
+            url: alpha.url,
+            headers: { authorization: "Bearer alpha" },
+            approval_bridge: ["*"],
+          },
           beta: { type: "remote", url: beta.url, headers: { authorization: "Bearer beta" } },
         })
 
@@ -411,9 +463,18 @@ test("request MCP uses isolated stateless transports and caller authorization", 
           "alpha:alpha-tool",
           "beta:beta-tool",
         ])
-        expect((yield* request.callTool({ server: "alpha", name: "alpha-tool" })).content).toEqual([
-          { type: "text", text: "alpha-tool" },
-        ])
+        const alphaTools = yield* request.tools()
+        expect(alphaTools.find((tool) => tool.name === "alpha-tool")?.approvalBridge).toBe(true)
+        expect(alphaTools.find((tool) => tool.name === "beta-tool")?.approvalBridge).not.toBe(true)
+        const alphaResult = yield* request.callTool({
+          server: "alpha",
+          name: "alpha-tool",
+          meta: { "fixture/request": "bound" },
+        })
+        expect(alphaResult.content).toEqual([{ type: "text", text: "alpha-tool" }])
+        expect(alphaResult.meta).toEqual({ "fixture/result": "alpha-tool" })
+        expect(alpha.callMeta).toHaveLength(1)
+        expect(alpha.callMeta[0]).toMatchObject({ "fixture/request": "bound" })
         expect(alpha.headers.every((headers) => headers.authorization === "Bearer alpha")).toBe(true)
         expect(beta.headers.every((headers) => headers.authorization === "Bearer beta")).toBe(true)
         expect([...alpha.headers, ...beta.headers].every((headers) => headers.session === null)).toBe(true)
@@ -454,9 +515,7 @@ test("request MCP rejects servers that negotiate stateful sessions", async () =>
       Effect.gen(function* () {
         const stateful = yield* resourceServer()
         const service = yield* MCP.Service
-        const error = yield* service
-          .request({ stateful: { type: "remote", url: stateful.url } })
-          .pipe(Effect.flip)
+        const error = yield* service.request({ stateful: { type: "remote", url: stateful.url } }).pipe(Effect.flip)
 
         expect(error).toBeInstanceOf(MCP.RequestConnectError)
         expect(error.message).toContain("negotiated a session for a stateless connection")
@@ -1261,6 +1320,7 @@ it.effect("advertises MCP output schemas to Code Mode", () =>
     const execute = toolSet.definitions.find((tool) => tool.name === "execute")
 
     expect(toolSet.definitions.map((tool) => tool.name)).toEqual([
+      "direct_bridge",
       "direct_fail",
       "direct_lookup",
       "direct_media",
@@ -1346,6 +1406,61 @@ it.effect("preserves MCP text and media content for the model", () =>
       { type: "text", text: "rendered chart" },
       { type: "file", mime: "image/png" },
     ])
+  }),
+)
+
+it.effect("resumes an approval-bridge MCP tool with the same input and native identity", () =>
+  Effect.gen(function* () {
+    bridgeCalls = []
+    assertion = yield* Deferred.make<Permission.AssertInput>()
+    decision = Effect.void
+    const registry = yield* Tool.Service
+    yield* waitForTool(registry, "direct_bridge")
+
+    const execution = yield* executeTool(registry, {
+      sessionID: Session.ID.make("ses_mcp_bridge"),
+      ...toolIdentity,
+      call: { type: "tool-call", id: "call_mcp_bridge", name: "direct_bridge", input: { value: "same" } },
+    })
+    const asked = yield* Deferred.await(assertion)
+
+    expect(asked).toMatchObject({
+      action: "resource_role",
+      resources: ["gmail"],
+      save: [],
+      metadata: { runId: "run-1", operation: "messages.list" },
+      source: { type: "tool", id: "call_mcp_bridge" },
+    })
+    expect(bridgeCalls).toHaveLength(2)
+    expect(bridgeCalls[0]?.args).toEqual({ value: "same" })
+    expect(bridgeCalls[1]?.args).toEqual({ value: "same" })
+    expect(bridgeCalls[1]?.meta?.["access.dev/approval-continuation"]).toMatchObject({
+      version: 1,
+      runId: "run-1",
+      permissionId: asked.id,
+      sessionId: "ses_mcp_bridge",
+      toolCallId: "call_mcp_bridge",
+    })
+    expect(execution).toMatchObject({ status: "completed", output: { ok: true } })
+  }),
+)
+
+it.effect("does not re-enter an approval-bridge MCP tool after rejection", () =>
+  Effect.gen(function* () {
+    bridgeCalls = []
+    assertion = yield* Deferred.make<Permission.AssertInput>()
+    decision = Effect.fail(new Permission.CorrectedError({ feedback: "The user denied this action" }))
+    const registry = yield* Tool.Service
+    yield* waitForTool(registry, "direct_bridge")
+
+    const execution = yield* executeTool(registry, {
+      sessionID: Session.ID.make("ses_mcp_bridge_reject"),
+      ...toolIdentity,
+      call: { type: "tool-call", id: "call_mcp_bridge_reject", name: "direct_bridge", input: { value: "same" } },
+    })
+
+    expect(execution).toMatchObject({ status: "error" })
+    expect(bridgeCalls).toHaveLength(1)
   }),
 )
 
