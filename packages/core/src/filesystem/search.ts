@@ -1,11 +1,11 @@
 export * as FileSystemSearch from "./search.js"
 
-import { makeLocationNode } from "@opencode-ai/util/effect/app-node"
+import { makeLocationNode } from "@opencode/util/effect/app-node"
 import path from "path"
-import { Clock, Context, Duration, Effect, Layer, Schema, Scope } from "effect"
+import { Clock, Context, Deferred, Duration, Effect, Layer, Schema, Scope } from "effect"
 import { Fff } from "#fff"
 import fuzzysort from "fuzzysort"
-import { FileSystem } from "../filesystem.js"
+import { FileSystem } from "@opencode/schema/filesystem"
 import { Location } from "../location.js"
 import { Ripgrep } from "../ripgrep.js"
 import { RelativePath } from "../schema.js"
@@ -23,6 +23,32 @@ export type Options = typeof Options.Type
 export class Service extends Context.Service<Service, Interface>()("@opencode/FileSystem/Search") {}
 
 const REFRESH_INTERVAL = Duration.toMillis("10 seconds")
+type Prepared = ReturnType<typeof fuzzysort.prepare>
+
+function emptyIndex() {
+  return { files: new Map<string, Prepared>(), directories: new Map<string, Prepared>() }
+}
+
+function search(index: ReturnType<typeof emptyIndex>, input: FileSystem.FindInput) {
+  const items =
+    input.type === "file"
+      ? Array.from(index.files.values())
+      : input.type === "directory"
+        ? Array.from(index.directories.values())
+        : [...index.files.values(), ...index.directories.values()]
+  const result = fuzzysort.go(input.query, items, { limit: input.limit ?? 50 })
+  // Targets are owned by the current location index. The only global fuzzysort
+  // state left is its query cache, which must not retain every query forever.
+  fuzzysort.cleanup()
+  return result.map((item) => {
+    const relative = item.target
+    const type = relative.endsWith(path.sep) ? ("directory" as const) : ("file" as const)
+    return FileSystem.Entry.make({
+      path: RelativePath.make(relative),
+      type,
+    })
+  })
+}
 
 export const ripgrepLayer = Layer.effect(
   Service,
@@ -32,12 +58,13 @@ export const ripgrepLayer = Layer.effect(
     const scope = yield* Scope.Scope
     const clock = yield* Clock.Clock
     const home = Protected.isHome(location.directory)
-    let index = { files: [] as string[], directories: new Set<string>() }
+    let index = emptyIndex()
     let initialized = false
     let settledAt = Number.NEGATIVE_INFINITY
-    let refreshing = false
+    let refreshing: Deferred.Deferred<void> | undefined
     const scan = Effect.gen(function* () {
-      const next = { files: [] as string[], directories: new Set<string>() }
+      const next = emptyIndex()
+      const previous = index
       if (!initialized) index = next
       yield* ripgrep.find({
         cwd: location.directory,
@@ -46,48 +73,41 @@ export const ripgrepLayer = Layer.effect(
         exclude: home ? [...Protected.names()].map((name) => `${name}/**`) : undefined,
         onEntry: (entry) =>
           Effect.sync(() => {
-            next.files.push(entry.path)
+            next.files.set(entry.path, previous.files.get(entry.path) ?? fuzzysort.prepare(entry.path))
             const parts = entry.path.split("/")
-            parts
-              .slice(0, -1)
-              .forEach((_, offset) => next.directories.add(parts.slice(0, offset + 1).join("/") + path.sep))
+            parts.slice(0, -1).forEach((_, offset) => {
+              const directory = parts.slice(0, offset + 1).join("/") + path.sep
+              if (!next.directories.has(directory))
+                next.directories.set(directory, previous.directories.get(directory) ?? fuzzysort.prepare(directory))
+            })
           }),
       })
       index = next
       initialized = true
-    }).pipe(
-      Effect.orDie,
-      Effect.ensuring(
-        Effect.sync(() => {
-          settledAt = clock.currentTimeMillisUnsafe()
-          refreshing = false
-        }),
-      ),
-    )
-    const refresh = Effect.sync(() => {
-      if (refreshing || clock.currentTimeMillisUnsafe() < settledAt + REFRESH_INTERVAL) return
-      refreshing = true
-      return scan
-    }).pipe(Effect.flatMap((effect) => (effect ? effect.pipe(Effect.forkIn(scope)) : Effect.void)))
-    yield* refresh
+    }).pipe(Effect.orDie)
+    const refresh = Effect.suspend(() => {
+      if (refreshing) return initialized ? Effect.void : Deferred.await(refreshing)
+      if (initialized && clock.currentTimeMillisUnsafe() < settledAt + REFRESH_INTERVAL) return Effect.void
+
+      const attempt = Deferred.makeUnsafe<void>()
+      refreshing = attempt
+      return scan.pipe(
+        Effect.onExit((exit) =>
+          Effect.sync(() => {
+            settledAt = clock.currentTimeMillisUnsafe()
+            if (refreshing === attempt) refreshing = undefined
+            Deferred.doneUnsafe(attempt, exit)
+          }),
+        ),
+        Effect.forkIn(scope),
+        Effect.flatMap(() => (initialized ? Effect.void : Deferred.await(attempt))),
+      )
+    })
     return Service.of({
       find: (input) =>
         Effect.gen(function* () {
           yield* refresh
-          const items =
-            input.type === "file"
-              ? index.files
-              : input.type === "directory"
-                ? Array.from(index.directories)
-                : [...index.files, ...index.directories]
-          return fuzzysort.go(input.query, items, { limit: input.limit ?? 50 }).map((item) => {
-            const relative = item.target
-            const type = relative.endsWith(path.sep) ? ("directory" as const) : ("file" as const)
-            return FileSystem.Entry.make({
-              path: RelativePath.make(relative),
-              type,
-            })
-          })
+          return search(index, input)
         }),
     })
   }),
@@ -115,7 +135,7 @@ export const fffLayer = Layer.effect(
         find: () => Effect.succeed([]),
       })
     }
-    yield* Effect.addFinalizer(() => Effect.sync(() => result.value.destroy()).pipe(Effect.ignore))
+    yield* Effect.addFinalizer(() => Effect.sync(() => result.value.destroy()))
     return Service.of({
       find: (input) =>
         Effect.sync(() => {
@@ -164,9 +184,12 @@ export const fffLayer = Layer.effect(
 export const layer = (options?: Options) =>
   Layer.unwrap(
     Effect.gen(function* () {
+      const location = yield* Location.Service
+      // Workspace-backed Locations resolve in a remote sandbox; fff would index the local server directory
+      // in-process and serve wrong results. Ripgrep routes through the Location environment spawner.
+      if (location.workspaceID) return ripgrepLayer
       if (options?.fff === false || (options?.fff === undefined && process.platform === "win32") || !Fff.available())
         return ripgrepLayer
-      const location = yield* Location.Service
       // Non-VCS locations can contain many repositories, so avoid eagerly content-indexing the entire aggregate tree.
       return location.vcs && !Protected.isHome(location.directory) ? fffLayer : ripgrepLayer
     }),

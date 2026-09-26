@@ -1,19 +1,18 @@
 import { EOL } from "os"
 import { Effect } from "effect"
-import { OpenCode } from "@opencode-ai/client"
-import { Service } from "@opencode-ai/client/effect/service"
+import { OpenCode } from "@opencode/client"
+import { Service } from "@opencode/client/effect/service"
 import { Commands } from "../../commands"
 import { Runtime } from "../../../framework/runtime"
 import { ServiceConfig } from "../../../services/service-config"
+import { redactConfig } from "./redact"
 
 export default Runtime.handler(
   Commands.commands.debug.commands.config,
   Effect.fn("cli.debug.config")(function* () {
-    const options = yield* ServiceConfig.options()
-    const found = yield* Service.discover(options)
-    const endpoint = found ?? (yield* Service.ensure(options))
+    const endpoint = yield* Service.ensure(yield* ServiceConfig.options())
     const client = OpenCode.make({ baseUrl: endpoint.url, headers: Service.headers(endpoint) })
     const entries = yield* Effect.promise(() => client.config.get({ location: { directory: process.cwd() } }))
-    process.stdout.write(JSON.stringify(entries, null, 2) + EOL)
+    process.stdout.write(JSON.stringify(redactConfig(entries), null, 2) + EOL)
   }),
 )

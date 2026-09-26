@@ -1,8 +1,8 @@
 import { describe, expect } from "bun:test"
 import { Effect, Layer } from "effect"
-import { SessionRunnerLLM } from "@opencode-ai/core/session/runner/llm"
-import { Session } from "@opencode-ai/core/session"
-import { SessionMessage } from "@opencode-ai/core/session/message"
+import { SessionRunnerLLM } from "@opencode/core/session/runner/llm"
+import { Session } from "@opencode/core/session"
+import { SessionMessage } from "@opencode/core/session/message"
 import { testEffect } from "./lib/effect"
 
 const it = testEffect(Layer.empty)

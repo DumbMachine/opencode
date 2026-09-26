@@ -1,17 +1,17 @@
 export * as PatchTool from "./patch.js"
 
-import type { Context as PluginContext } from "@opencode-ai/plugin/effect/plugin"
-import { ToolFailure } from "@opencode-ai/ai"
-import { FileDiff } from "@opencode-ai/schema/file-diff"
+import type { Context } from "@opencode/plugin/effect/plugin"
+import type { SessionHooks } from "@opencode/plugin/effect/session"
+import { ToolFailure } from "@opencode/ai"
+import { FileDiff } from "@opencode/schema/file-diff"
 import { Effect, Result, Schema } from "effect"
-import path from "path"
-import { Bom } from "@opencode-ai/util/bom"
-import { FSUtil } from "@opencode-ai/util/fs-util"
+import { Bom } from "@opencode/util/bom"
 import { Environment } from "../../environment/index.js"
 import { Formatter } from "../../formatter.js"
 import { FileMutation } from "../../file-mutation.js"
 import { Location } from "../../location.js"
-import { Patch } from "@opencode-ai/util/patch"
+import { FileAccess } from "../../file-access.js"
+import { Patch } from "@opencode/util/patch"
 import { Permission } from "../../permission.js"
 import DESCRIPTION from "../patch.txt"
 import { fileDiff } from "./file-diff.js"
@@ -36,7 +36,7 @@ export const Output = Schema.Struct({
 })
 export type Output = typeof Output.Type
 
-export const toModelOutput = (output: Output) =>
+export const toModelContent = (output: Output) =>
   [
     "Success. Updated the following files:",
     ...output.applied.map(
@@ -46,45 +46,37 @@ export const toModelOutput = (output: Output) =>
 
 type Prepared =
   | (Extract<Patch.Hunk, { readonly type: "add" }> & {
-      readonly target: Target
+      readonly target: FileAccess.Target
       readonly content: string
       readonly before: string
       readonly after: string
     })
   | (Extract<Patch.Hunk, { readonly type: "delete" }> & {
-      readonly target: Target
+      readonly target: FileAccess.Target
       readonly before: string
       readonly after: string
     })
   | (Extract<Patch.Hunk, { readonly type: "update" }> & {
-      readonly target: Target
+      readonly target: FileAccess.Target
       readonly content: string
       readonly before: string
       readonly after: string
-      readonly moveTarget?: Target
+      readonly moveTarget?: FileAccess.Target
     })
-
-interface Target {
-  readonly absolute: string
-  readonly resource: string
-  readonly externalDirectory?: {
-    readonly directory: string
-    readonly resource: string
-  }
-}
 
 export const Plugin = {
   id: "opencode.tool.patch",
-  effect: Effect.fn("PatchTool.Plugin")(function* (ctx: PluginContext) {
+  effect: Effect.fn("PatchTool.Plugin")(function* (ctx: Context) {
     const environment = yield* Environment.Service
-    const mutation = yield* FileMutation.Service
+    const access = yield* FileAccess.Service
+    const fileMutation = yield* FileMutation.Service
     const formatter = yield* Formatter.Service
     const location = yield* Location.Service
     const permission = yield* Permission.Service
 
     yield* ctx.tool
-      .transform((draft) =>
-        draft.add({
+      .transform((editor) =>
+        editor.add({
           name,
           options: { codemode: false, permission: "edit" },
           description: DESCRIPTION,
@@ -95,8 +87,10 @@ export const Plugin = {
             const parsed = Patch.parse(input.patchText)
             const lockTargets = Result.isSuccess(parsed)
               ? parsed.success.flatMap((hunk) => [
-                  path.resolve(location.directory, hunk.path),
-                  ...(hunk.type === "update" && hunk.movePath ? [path.resolve(location.directory, hunk.movePath)] : []),
+                  FileAccess.resolvePath(location.directory, hunk.path),
+                  ...(hunk.type === "update" && hunk.movePath
+                    ? [FileAccess.resolvePath(location.directory, hunk.movePath)]
+                    : []),
                 ])
               : []
             const fail = (operation: string, error: unknown) => {
@@ -119,26 +113,19 @@ export const Plugin = {
                 return yield* new ToolFailure({ message: "patch rejected: empty patch" })
               }
               const prepared: Prepared[] = []
-              const targets: Target[] = []
               const updates = new Map<string, string>()
+              const resolveTarget = Effect.fnUntraced(function* (value: string) {
+                const target = yield* access.resolve({ path: value, kind: "file" })
+                if (!target.externalDirectory) return target
+                yield* access.authorizeExternal([target], context, {
+                  filepath: target.absolute,
+                  parentDir: target.externalDirectory.directory,
+                })
+                return target
+              })
               for (const hunk of hunks) {
                 yield* Effect.gen(function* () {
-                  const target = resolveTarget(location, hunk.path)
-                  targets.push(target)
-                  if (target.externalDirectory) {
-                    yield* permission.assert({
-                      action: "external_directory",
-                      resources: [target.externalDirectory.resource],
-                      save: [target.externalDirectory.resource],
-                      metadata: {
-                        filepath: target.absolute,
-                        parentDir: target.externalDirectory.directory,
-                      },
-                      sessionID: context.sessionID,
-                      agent: context.agent,
-                      source,
-                    })
-                  }
+                  const target = yield* resolveTarget(hunk.path)
                   if (hunk.type === "add") {
                     const content =
                       hunk.contents.endsWith("\n") || hunk.contents === "" ? hunk.contents : `${hunk.contents}\n`
@@ -182,22 +169,7 @@ export const Plugin = {
                     try: () => Patch.derive(hunk.path, hunk.chunks, original),
                     catch: (error) => new ToolFailure({ message: `patch verification failed: ${errorMessage(error)}` }),
                   })
-                  const moveTarget = hunk.movePath ? resolveTarget(location, hunk.movePath) : undefined
-                  if (moveTarget) targets.push(moveTarget)
-                  if (moveTarget?.externalDirectory) {
-                    yield* permission.assert({
-                      action: "external_directory",
-                      resources: [moveTarget.externalDirectory.resource],
-                      save: [moveTarget.externalDirectory.resource],
-                      metadata: {
-                        filepath: moveTarget.absolute,
-                        parentDir: moveTarget.externalDirectory.directory,
-                      },
-                      sessionID: context.sessionID,
-                      agent: context.agent,
-                      source,
-                    })
-                  }
+                  const moveTarget = hunk.movePath ? yield* resolveTarget(hunk.movePath) : undefined
                   prepared.push({
                     ...hunk,
                     target,
@@ -217,6 +189,10 @@ export const Plugin = {
               }
 
               const patchFiles = prepared.map((change) => patchFile(change))
+              const targets = prepared.flatMap((change) => [
+                change.target,
+                ...(change.type === "update" && change.moveTarget ? [change.moveTarget] : []),
+              ])
               yield* permission.assert({
                 action: "edit",
                 resources: [...new Set(targets.map((target) => target.resource))],
@@ -235,17 +211,6 @@ export const Plugin = {
                 prepared,
                 (change) =>
                   Effect.gen(function* () {
-                    if (change.type === "add") {
-                      yield* environment.files
-                        .write(change.target.absolute, new TextEncoder().encode(change.content))
-                        .pipe(Effect.mapError((error) => fail(`Failed to write ${change.target.resource}`, error)))
-                      applied.push({
-                        type: change.type,
-                        resource: change.target.resource,
-                        target: change.target.absolute,
-                      })
-                      return
-                    }
                     if (change.type === "delete") {
                       yield* environment.files
                         .remove(change.target.absolute)
@@ -257,7 +222,7 @@ export const Plugin = {
                       })
                       return
                     }
-                    if (change.moveTarget) {
+                    if (change.type === "update" && change.moveTarget) {
                       const moveTarget = change.moveTarget
                       yield* environment.files
                         .write(moveTarget.absolute, new TextEncoder().encode(change.content))
@@ -306,17 +271,17 @@ export const Plugin = {
                   }),
                 { discard: true },
               )
-              const files = yield* Effect.forEach(prepared, (change) => {
-                if (change.type === "delete") return Effect.succeed(patchFile(change))
+              const files = prepared.map((change) => {
+                if (change.type === "delete") return patchFile(change)
                 const target = change.type === "update" && change.moveTarget ? change.moveTarget : change.target
-                return Effect.succeed(patchFile(change, formatted.get(target.absolute)))
+                return patchFile(change, formatted.get(target.absolute))
               })
               return { applied, files }
             }).pipe(
-              mutation.withLock(lockTargets),
+              fileMutation.withLock(lockTargets),
               Effect.map((output) => ({
                 output,
-                content: toModelOutput(output),
+                content: toModelContent(output),
                 metadata: { files: output.files },
               })),
               Effect.mapError((error) =>
@@ -328,7 +293,7 @@ export const Plugin = {
       )
       .pipe(Effect.orDie)
 
-    yield* ctx.session.hook("context", (event) =>
+    const hook = (event: SessionHooks["context"]) =>
       Effect.sync(() => {
         const usePatch =
           event.model.id.includes("gpt-") && !event.model.id.includes("oss") && !event.model.id.includes("gpt-4")
@@ -338,8 +303,10 @@ export const Plugin = {
           return
         }
         delete event.tools.patch
-      }),
-    )
+      })
+    yield* ctx.session.hook("context", hook)
+    yield* ctx.session.hook("compaction", hook)
+    yield* ctx.session.hook("generate", hook)
   }),
 }
 
@@ -393,25 +360,4 @@ function trimDiff(diff: string) {
       return line
     })
     .join("\n")
-}
-
-function resolveTarget(location: Location.Interface, value: string): Target {
-  const absolute =
-    process.platform === "win32"
-      ? FSUtil.normalizePath(path.resolve(location.directory, value))
-      : path.resolve(location.directory, value)
-  const projectRoot = path.parse(location.project.directory).root
-  const external =
-    !FSUtil.contains(location.directory, absolute) &&
-    (location.project.directory === projectRoot || !FSUtil.contains(location.project.directory, absolute))
-  const directory = path.dirname(absolute)
-  const resource =
-    process.platform === "win32"
-      ? FSUtil.normalizePathPattern(path.join(directory, "*"))
-      : path.join(directory, "*").replaceAll("\\", "/")
-  return {
-    absolute,
-    resource: path.relative(location.project.directory, absolute).replaceAll("\\", "/") || ".",
-    externalDirectory: external ? { directory, resource } : undefined,
-  }
 }

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { Schema } from "effect"
 import { Model } from "../src/model.js"
+import { Provider } from "../src/provider.js"
 
 describe("Model.Ref", () => {
   test("parses model references with optional variants", () => {
@@ -39,13 +40,45 @@ describe("Model.Compatibility", () => {
     expect(
       decode({
         reasoningField: "vendor_reasoning",
+        requireReasoning: true,
         maxTokensField: "max_completion_tokens",
         requireFinishReason: false,
+        requireAssistantAfterTool: true,
       }),
     ).toEqual({
       reasoningField: "vendor_reasoning",
+      requireReasoning: true,
       maxTokensField: "max_completion_tokens",
       requireFinishReason: false,
+      requireAssistantAfterTool: true,
+    })
+  })
+})
+
+describe("Model.Info", () => {
+  test("provider compaction policy is a typed setting", () => {
+    const model = Model.Info.default(Provider.ID.openai, Model.ID.make("gpt-5.4-mini"))
+    expect(Schema.encodeSync(Model.Info)({ ...model, settings: { compaction: undefined } }).settings).toEqual({})
+    expect(
+      Schema.decodeUnknownSync(Model.Info)({ ...model, settings: { compaction: { type: "native" } } }).settings,
+    ).toEqual({
+      compaction: { type: "native" },
+    })
+    expect(Schema.decodeUnknownSync(Provider.Compaction)({ type: "summary" })).toEqual({ type: "summary" })
+    expect(() => Schema.decodeUnknownSync(Provider.Compaction)({ type: "automatic" })).toThrow()
+  })
+
+  test("uses practical token limits for unknown models", () => {
+    const model = Model.Info.default(Provider.ID.make("custom"), Model.ID.make("gpt-5.6"))
+
+    expect(model.limit).toEqual({ context: 200_000, output: 32_000 })
+  })
+})
+
+describe("Model.Settings", () => {
+  test("preserves provider-specific model options", () => {
+    expect(Schema.decodeUnknownSync(Model.Settings)({ providerOption: true })).toEqual({
+      providerOption: true,
     })
   })
 })

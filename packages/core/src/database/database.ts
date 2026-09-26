@@ -4,29 +4,34 @@ import { EffectDrizzleSqlite } from "./drizzle.js"
 import { sqliteLayer, supportsForeignKeyToggle, supportsTuningPragmas } from "#sqlite"
 import { PgAsyncDatabase, PgAsyncSession, PgDialect } from "drizzle-orm/pg-core"
 import { PgClient } from "@effect/sql-pg"
-import { Config, Context, Effect, Layer, Redacted, Schema } from "effect"
+import { Config, Context, Effect, Layer, Redacted, Schema, Semaphore } from "effect"
 import { SqlClient } from "effect/unstable/sql/SqlClient"
-import { Global } from "@opencode-ai/util/global"
+import { Global } from "@opencode/util/global"
 import { isAbsolute, join } from "path"
 import { DatabaseMigration } from "./migration.js"
-import { makeGlobalNode } from "@opencode-ai/util/effect/app-node"
+import { makeGlobalNode } from "@opencode/util/effect/app-node"
 import * as DatabaseConfig from "./config.js"
 
-const makeSqliteDatabase = EffectDrizzleSqlite.makeWithDefaults()
-type DatabaseShape = Effect.Success<typeof makeSqliteDatabase>
+type Sql = SqlClient
+
+const makeDatabase = EffectDrizzleSqlite.makeWithDefaults()
+type DatabaseShape = Effect.Success<typeof makeDatabase>
 
 class EffectPgSession extends PgAsyncSession {
-  constructor(public client: SqlClient, dialect: PgDialect) {
+  constructor(public client: Sql, dialect: PgDialect) {
     super(dialect)
   }
-  prepareQuery(query: any, fields: any, name: any, customResultMapper: any) {
-    return new EffectPgPreparedQuery(this.client, query, fields, customResultMapper)
+  override prepareQuery(query: any, mode: any, _name?: any, mapper?: any): any {
+    return new EffectPgPreparedQuery(this.client, query, mode, mapper)
+  }
+  override transaction(): any {
+    return Promise.reject(new Error("PostgreSQL transactions run through the database client"))
   }
 }
 
 class EffectPgPreparedQuery {
   constructor(
-    public client: SqlClient,
+    public client: Sql,
     public query: any,
     public fields: any,
     public customResultMapper: any,
@@ -53,8 +58,11 @@ const numericPgFields = new Set([
   "position",
   "revision",
   "seq",
+  "time_active",
   "time_archived",
   "time_completed",
+  "time_idle",
+  "time_viewed",
   "time_created",
   "time_updated",
   "time_initialized",
@@ -104,7 +112,7 @@ function normalizePgRows(rows: unknown): unknown {
   return rows.map(normalizePgRow)
 }
 
-function compatPostgresDb(client: SqlClient): DatabaseShape {
+function compatPostgresDb(client: Sql): DatabaseShape {
   const dialect = new PgDialect()
   const session = new EffectPgSession(client, dialect)
   const pgDb = new PgAsyncDatabase(dialect, session, {}) as any
@@ -244,6 +252,7 @@ function compatPostgresDb(client: SqlClient): DatabaseShape {
   return pgDb as unknown as DatabaseShape
 }
 
+
 export interface Interface {
   db: DatabaseShape
   config?: DatabaseConfig.Config
@@ -256,16 +265,29 @@ export type Options = typeof Options.Type
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/storage/Database") {}
 
-const baseLayer = Layer.effect(
-  Service,
-  Effect.gen(function* () {
-    const config = yield* DatabaseConfig.loadEffect
-
-    if (config.dialect === "postgres") {
-      if (!config.postgresUrl) {
-        return yield* Effect.die("OPENCODE_DATABASE_DIALECT=postgres requires OPENCODE_DATABASE_URL")
+const sqliteService = (lock: Effect.Effect<Semaphore.Semaphore>) =>
+  Layer.effect(
+    Service,
+    Effect.gen(function* () {
+      const db = yield* makeDatabase
+      if (supportsTuningPragmas) {
+        yield* db.run("PRAGMA journal_mode = WAL")
+        yield* db.run("PRAGMA synchronous = NORMAL")
+        yield* db.run("PRAGMA busy_timeout = 5000")
+        yield* db.run("PRAGMA cache_size = -64000")
+        yield* db.run("PRAGMA wal_checkpoint(PASSIVE)")
       }
+      if (supportsForeignKeyToggle) yield* db.run("PRAGMA foreign_keys = ON")
+      const semaphore = yield* lock
+      yield* semaphore.withPermit(DatabaseMigration.apply(db))
+      return { db }
+    }).pipe(Effect.orDie),
+  )
 
+const postgresService = (url: string) =>
+  Layer.effect(
+    Service,
+    Effect.gen(function* () {
       const client = yield* SqlClient
       const db = compatPostgresDb(client)
       yield* client.unsafe(`
@@ -273,66 +295,48 @@ const baseLayer = Layer.effect(
           SELECT (doc::jsonb #>> string_to_array(trim(leading '$.' from path), '.'))
         $$;
       `).withoutTransform
-      yield* DatabaseMigration.apply(db, config.dialect)
+      const semaphore = yield* Effect.succeed(lockFor(url))
+      yield* semaphore.withPermit(DatabaseMigration.apply(db, "postgres"))
+      return {
+        db,
+        config: {
+          dialect: "postgres" as const,
+          sqliteFilename: DatabaseConfig.sqliteDefaultPath(),
+          postgresUrl: url,
+        },
+      }
+    }).pipe(Effect.orDie),
+  )
 
-      return { db, config }
-    }
+const locks = new Map<string, Semaphore.Semaphore>()
 
-    const db = yield* makeSqliteDatabase
-
-    if (supportsTuningPragmas) {
-      yield* db.run("PRAGMA journal_mode = WAL")
-      yield* db.run("PRAGMA synchronous = NORMAL")
-      yield* db.run("PRAGMA busy_timeout = 5000")
-      yield* db.run("PRAGMA cache_size = -64000")
-      yield* db.run("PRAGMA wal_checkpoint(PASSIVE)")
-    }
-    if (supportsForeignKeyToggle) yield* db.run("PRAGMA foreign_keys = ON")
-    yield* DatabaseMigration.apply(db, config.dialect)
-
-    return { db, config }
-  }).pipe(Effect.orDie),
-)
-
-export const layerFromClient: Layer.Layer<Service, never, SqlClient | Global.Service> = baseLayer
+function lockFor(filename: string) {
+  const existing = locks.get(filename)
+  if (existing) return existing
+  const lock = Semaphore.makeUnsafe(1)
+  locks.set(filename, lock)
+  return lock
+}
 
 export function sqliteDatabaseLayer(filename: string): Layer.Layer<Service> {
-  const config: DatabaseConfig.Config = {
-    dialect: "sqlite",
-    sqliteFilename: filename,
-  }
-  return baseLayer.pipe(
-    Layer.provide(sqliteLayer({ filename })),
-    Layer.provide(Layer.succeed(DatabaseConfig.ConfigService, config)),
-  ) as unknown as Layer.Layer<Service>
+  const lock = filename === ":memory:" ? Semaphore.make(1) : Effect.succeed(lockFor(filename))
+  return sqliteService(lock).pipe(Layer.provide(sqliteLayer({ filename }))) as unknown as Layer.Layer<Service>
 }
 
 export function postgresDatabaseLayer(url: string): Layer.Layer<Service> {
-  const config: DatabaseConfig.Config = {
-    dialect: "postgres",
-    sqliteFilename: DatabaseConfig.sqliteDefaultPath(),
-    postgresUrl: url,
-  }
   const pgClientLayer = PgClient.layerConfig({
     url: Config.succeed(Redacted.make(url)),
     ssl: Config.succeed(false),
     maxConnections: Config.succeed(10),
   }).pipe(Layer.orDie)
-
-  return baseLayer.pipe(
-    Layer.provide(pgClientLayer),
-    Layer.provide(Global.layerWith({})),
-    Layer.provide(Layer.succeed(DatabaseConfig.ConfigService, config)),
-  ) as unknown as Layer.Layer<Service>
+  return postgresService(url).pipe(Layer.provide(pgClientLayer)) as unknown as Layer.Layer<Service>
 }
 
 export function layer(options: Options = { path: ":memory:" }) {
   return Layer.unwrap(
     Effect.gen(function* () {
       const config = yield* DatabaseConfig.loadEffect
-      if (config.dialect === "postgres" && config.postgresUrl) {
-        return postgresDatabaseLayer(config.postgresUrl)
-      }
+      if (config.dialect === "postgres" && config.postgresUrl) return postgresDatabaseLayer(config.postgresUrl)
       const filename = options.path ?? config.sqliteFilename ?? ":memory:"
       if (filename === ":memory:" || isAbsolute(filename)) return sqliteDatabaseLayer(filename)
       const global = yield* Global.Service
@@ -341,22 +345,7 @@ export function layer(options: Options = { path: ":memory:" }) {
   )
 }
 
-export function layerFromPath(filename: string) {
-  return sqliteDatabaseLayer(filename)
-}
-
-export const defaultLayer = Layer.unwrap(
-  Effect.sync(() => {
-    const config = DatabaseConfig.load()
-    if (config.dialect === "postgres") {
-      if (!config.postgresUrl) {
-        throw new Error("OPENCODE_DATABASE_DIALECT=postgres requires OPENCODE_DATABASE_URL")
-      }
-      return postgresDatabaseLayer(config.postgresUrl)
-    }
-    return layer({ path: config.sqliteFilename })
-  }),
-)
+export const layerFromClient: Layer.Layer<Service, never, SqlClient | Global.Service> = sqliteService(Semaphore.make(1))
 
 export function configured(options?: Options) {
   return makeGlobalNode({ service: Service, layer: layer(options), deps: [Global.node] })
@@ -370,16 +359,4 @@ export function configuredClient(client: Layer.Layer<SqlClient>) {
   })
 }
 
-export const node = makeGlobalNode({
-  service: Service,
-  layer: defaultLayer,
-  deps: [Global.node],
-})
-
-export function nodeFromPath(filename: string) {
-  return makeGlobalNode({
-    service: Service,
-    layer: sqliteDatabaseLayer(filename),
-    deps: [Global.node],
-  })
-}
+export const node = configured({ path: ":memory:" })

@@ -1,12 +1,12 @@
-import { describe, expect } from "bun:test"
+import { describe, expect, test } from "bun:test"
 import { Effect } from "effect"
 import { HttpClientRequest } from "effect/unstable/http"
-import { LLM } from "../../src/index.js"
+import { LanguageModel, LLM, Message, ToolCallPart } from "../../src/index.js"
 import { GoogleVertex, GoogleVertexChat, GoogleVertexMessages, GoogleVertexResponses } from "../../src/providers.js"
 import { LLMClient } from "../../src/route.js"
 import { compileRequest } from "../../src/route/client.js"
 import { it } from "../lib/effect.js"
-import { dynamicResponse } from "../lib/http.js"
+import { dynamicResponse, fixedResponse } from "../lib/http.js"
 import { deltaChunk, finishChunk } from "../lib/openai-chunks.js"
 import { sseEvents } from "../lib/sse.js"
 
@@ -54,6 +54,208 @@ describe("Google Vertex providers", () => {
     }),
   )
 
+  it.effect("adds billing labels to Vertex Gemini requests", () =>
+    Effect.gen(function* () {
+      const prepared = yield* compileRequest(
+        LLM.request({
+          model: GoogleVertex.configure({
+            accessToken: "vertex-token",
+            project: "vertex-project",
+            providerOptions: {
+              labels: { component: "opencode", environment: "test" },
+            },
+          }).model("gemini-3.5-flash"),
+          prompt: "Say hello.",
+        }),
+      )
+
+      expect(prepared.body).toMatchObject({
+        labels: { component: "opencode", environment: "test" },
+      })
+    }),
+  )
+
+  it.effect("maps service tiers to the Vertex shared PayGo header", () =>
+    Effect.gen(function* () {
+      const response = yield* LLMClient.generate(
+        LLM.request({
+          model: GoogleVertex.configure({
+            accessToken: "vertex-token",
+            location: "global",
+            project: "vertex-project",
+            providerOptions: { serviceTier: "flex" },
+          }).model("gemini-2.5-flash"),
+          prompt: "Say hello.",
+        }),
+      ).pipe(
+        Effect.provide(
+          dynamicResponse((input) =>
+            Effect.gen(function* () {
+              const request = yield* HttpClientRequest.toWeb(input.request).pipe(Effect.orDie)
+              expect(request.headers.get("x-vertex-ai-llm-shared-request-type")).toBe("flex")
+              expect(yield* Effect.promise(() => request.json())).not.toHaveProperty("serviceTier")
+              return input.respond(
+                sseEvents({
+                  candidates: [
+                    {
+                      content: { role: "model", parts: [{ text: "Hello." }] },
+                      finishReason: "STOP",
+                    },
+                  ],
+                }),
+                { headers: { "content-type": "text/event-stream" } },
+              )
+            }),
+          ),
+        ),
+      )
+
+      expect(response.text).toBe("Hello.")
+    }),
+  )
+
+  it.effect("preserves function call ids in lowered Vertex bodies", () =>
+    Effect.gen(function* () {
+      const prepared = yield* compileRequest(
+        LLM.request({
+          model: GoogleVertex.configure({
+            accessToken: "vertex-token",
+            project: "vertex-project",
+          }).model("gemini-3.5-flash"),
+          messages: [
+            Message.assistant([
+              ToolCallPart.make({
+                id: "call_1",
+                name: "lookup",
+                input: { query: "weather" },
+                providerMetadata: { vertex: { functionCallId: "provider_call_1" } },
+              }),
+            ]),
+            Message.tool({
+              id: "call_1",
+              name: "lookup",
+              result: "sunny",
+              resultType: "text",
+              providerMetadata: { vertex: { functionCallId: "provider_call_1" } },
+            }),
+          ],
+        }),
+      )
+
+      expect(prepared.body.contents).toMatchObject([
+        { role: "model", parts: [{ functionCall: { id: "call_1", name: "lookup", args: { query: "weather" } } }] },
+        {
+          role: "user",
+          parts: [
+            {
+              functionResponse: {
+                id: "call_1",
+                name: "lookup",
+                response: { name: "lookup", content: "sunny" },
+              },
+            },
+          ],
+        },
+      ])
+    }),
+  )
+
+  it.effect("round-trips Vertex Gemini metadata through signed content, tool calls, and usage", () =>
+    Effect.gen(function* () {
+      const model = GoogleVertex.configure({
+        accessToken: "vertex-token",
+        project: "vertex-project",
+      }).model("gemini-3.5-flash")
+      const response = yield* LLMClient.generate(LLM.request({ model, prompt: "Check the weather." })).pipe(
+        Effect.provide(
+          fixedResponse(
+            sseEvents({
+              candidates: [
+                {
+                  content: {
+                    role: "model",
+                    parts: [
+                      { text: "Thinking.", thought: true, thoughtSignature: "reasoning_sig" },
+                      { text: "Checking.", thoughtSignature: "text_sig" },
+                      {
+                        functionCall: { id: "provider_call_1", name: "lookup", args: { query: "weather" } },
+                        thoughtSignature: "tool_sig",
+                      },
+                    ],
+                  },
+                  finishReason: "STOP",
+                },
+              ],
+              promptFeedback: { blockReasonMessage: "Reviewed" },
+              usageMetadata: { promptTokenCount: 5, candidatesTokenCount: 2, thoughtsTokenCount: 1 },
+            }),
+          ),
+        ),
+      )
+      const reasoning = response.events.find((event) => event.type === "reasoning-end")
+      const text = response.events.find((event) => event.type === "text-delta")
+      const toolCall = response.toolCalls[0]
+
+      expect(reasoning?.providerMetadata).toEqual({ vertex: { thoughtSignature: "reasoning_sig" } })
+      expect(text?.providerMetadata).toEqual({ vertex: { thoughtSignature: "text_sig" } })
+      expect(toolCall).toMatchObject({
+        id: "provider_call_1",
+        providerMetadata: { vertex: { thoughtSignature: "tool_sig" } },
+      })
+      expect(response.usage?.providerMetadata).toEqual({
+        vertex: { promptTokenCount: 5, candidatesTokenCount: 2, thoughtsTokenCount: 1 },
+      })
+      expect(response.events.at(-1)?.providerMetadata).toEqual({
+        vertex: { promptFeedback: { blockReasonMessage: "Reviewed" } },
+      })
+
+      const prepared = yield* compileRequest(
+        LLM.request({
+          model,
+          messages: [
+            Message.assistant([
+              { type: "reasoning", text: "Thinking.", providerMetadata: reasoning?.providerMetadata },
+              { type: "text", text: "Checking.", providerMetadata: text?.providerMetadata },
+              ToolCallPart.make({
+                id: toolCall.id,
+                name: toolCall.name,
+                input: toolCall.input,
+                providerMetadata: toolCall.providerMetadata,
+              }),
+            ]),
+            Message.tool({ id: toolCall.id, name: toolCall.name, result: "sunny", resultType: "text" }),
+          ],
+        }),
+      )
+
+      expect(prepared.body.contents).toEqual([
+        {
+          role: "model",
+          parts: [
+            { text: "Thinking.", thought: true, thoughtSignature: "reasoning_sig" },
+            { text: "Checking.", thoughtSignature: "text_sig" },
+            {
+              functionCall: { id: "provider_call_1", name: "lookup", args: { query: "weather" } },
+              thoughtSignature: "tool_sig",
+            },
+          ],
+        },
+        {
+          role: "user",
+          parts: [
+            {
+              functionResponse: {
+                id: "provider_call_1",
+                name: "lookup",
+                response: { name: "lookup", content: "sunny" },
+              },
+            },
+          ],
+        },
+      ])
+    }),
+  )
+
   it.effect("projects Anthropic Messages onto the Vertex raw-predict API", () =>
     Effect.gen(function* () {
       const model = GoogleVertexMessages.configure({
@@ -75,7 +277,7 @@ describe("Google Vertex providers", () => {
                 "https://aiplatform.eu.rep.googleapis.com/v1/projects/vertex-project/locations/eu/publishers/anthropic/models/claude-sonnet-4-6:streamRawPredict",
               )
               expect(request.headers.get("authorization")).toBe("Bearer vertex-token")
-              expect(request.headers.get("anthropic-version")).toBeNull()
+              expect(request.headers.get("anthropic-version")).toBe("2023-06-01")
               const body = yield* Effect.promise(() => request.json())
               expect(body).toMatchObject({
                 anthropic_version: "vertex-2023-10-16",
@@ -141,6 +343,34 @@ describe("Google Vertex providers", () => {
     }),
   )
 
+  // Captured from xai/grok-4.6 on Vertex: one keepalive every 15s until the first token.
+  it.effect("ignores keepalives sent as data while a partner model reasons", () =>
+    Effect.gen(function* () {
+      const response = yield* LLMClient.generate(
+        LLM.request({
+          model: GoogleVertexChat.configure({
+            accessToken: "vertex-token",
+            location: "global",
+            project: "vertex-project",
+          }).model("xai/grok-4.6"),
+          prompt: "Say hello.",
+        }),
+      ).pipe(
+        Effect.provide(
+          fixedResponse(
+            `data: : keepalive\n\ndata: : keepalive\n\n${sseEvents(
+              deltaChunk({ role: "assistant", content: "Hello." }),
+              finishChunk("stop"),
+            )}`,
+          ),
+        ),
+      )
+
+      expect(response.text).toBe("Hello.")
+      expect(response.finishReason).toEqual({ normalized: "stop", raw: "stop" })
+    }),
+  )
+
   it.effect("sends Grok requests through Vertex Responses", () =>
     Effect.gen(function* () {
       const response = yield* LLMClient.generate(
@@ -169,6 +399,7 @@ describe("Google Vertex providers", () => {
               })
               return input.respond(
                 sseEvents(
+                  { type: "response.output_item.added", item: { type: "message", id: "msg_1" } },
                   { type: "response.output_text.delta", item_id: "msg_1", delta: "Hello." },
                   { type: "response.completed", response: { id: "resp_1" } },
                 ),
@@ -180,6 +411,37 @@ describe("Google Vertex providers", () => {
       )
 
       expect(response.text).toBe("Hello.")
+    }),
+  )
+
+  it.effect("applies Gemini schema rules to the Gemini API and Gemini models unless opted out", () =>
+    Effect.gen(function* () {
+      const vertex = { accessToken: "vertex-token", location: "us-central1", project: "vertex-project" }
+      const inputSchema = { type: "object", required: ["query", "missing"], properties: { query: { type: "string" } } }
+      const request = (model: Parameters<typeof LLM.request>[0]["model"]) =>
+        compileRequest(
+          LLM.request({
+            model,
+            prompt: "Use the tool.",
+            tools: [{ name: "lookup", description: "Lookup.", inputSchema }],
+          }),
+        )
+
+      const normalized = { ...inputSchema, required: ["query"] }
+      const tunedModel = GoogleVertex.configure(vertex).model("endpoints/1234567890")
+      const tuned = yield* request(tunedModel)
+      expect(tuned.body.tools?.[0]?.functionDeclarations[0]?.parametersJsonSchema).toEqual(normalized)
+      const optedOut = yield* request(LanguageModel.update(tunedModel, { compatibility: { sanitizer: "none" } }))
+      expect(optedOut.body.tools?.[0]?.functionDeclarations[0]?.parametersJsonSchema).toEqual(inputSchema)
+      const geminiChat = yield* request(GoogleVertexChat.configure(vertex).model("google/gemini-3.8-flash"))
+      expect(geminiChat.body.tools?.[0]?.function.parameters).toEqual(normalized)
+
+      const chat = yield* request(GoogleVertexChat.configure(vertex).model("deepseek-ai/deepseek-v3.2-maas"))
+      expect(chat.body.tools?.[0]?.function.parameters).toEqual(inputSchema)
+      const responses = yield* request(GoogleVertexResponses.configure(vertex).model("xai/grok-4.20-reasoning"))
+      expect(responses.body.tools?.[0]).toMatchObject({ parameters: inputSchema })
+      const messages = yield* request(GoogleVertexMessages.configure(vertex).model("claude-sonnet-4-6"))
+      expect(messages.body.tools?.[0]).toMatchObject({ input_schema: inputSchema })
     }),
   )
 
@@ -222,11 +484,13 @@ describe("Google Vertex providers", () => {
     }),
   )
 
-  it.effect("rejects tuned Gemini models in express mode", () =>
-    Effect.sync(() => {
-      expect(() => GoogleVertex.configure({ apiKey: "fixture" }).model("endpoints/1234567890")).toThrow(
-        "Google Vertex tuned models do not support Express Mode API keys",
-      )
-    }),
-  )
+  test("rejects tuned Gemini models in express mode", () => {
+    expect(() => GoogleVertex.configure({ apiKey: "fixture" }).model("endpoints/1234567890")).toThrow(
+      expect.objectContaining({
+        _tag: "ProviderConfiguration",
+        provider: "google-vertex",
+        message: "Google Vertex tuned models do not support Express Mode API keys",
+      }),
+    )
+  })
 })

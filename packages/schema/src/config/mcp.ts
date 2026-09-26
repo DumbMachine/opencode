@@ -17,6 +17,8 @@ export type RequestRemote = Mcp.RequestRemoteConfig
 export const RequestServers = Mcp.RequestServers
 export type RequestServers = Mcp.RequestServers
 export const Server = Mcp.ServerConfig
+export const Protocol = Mcp.Protocol
+export type Protocol = Mcp.Protocol
 
 export class Info extends Schema.Class<Info>("Config.MCP")({
   timeout: Timeout.pipe(optional),

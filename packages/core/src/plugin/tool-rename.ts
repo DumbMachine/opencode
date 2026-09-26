@@ -1,6 +1,6 @@
 export * as ToolRenamePlugin from "./tool-rename.js"
 
-import type { Context as PluginContext } from "@opencode-ai/plugin/effect/plugin"
+import type { Context as PluginContext } from "@opencode/plugin/effect/plugin"
 import { Effect, Option, Schema } from "effect"
 
 const Options = Schema.Struct({

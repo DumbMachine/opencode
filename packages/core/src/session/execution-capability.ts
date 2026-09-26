@@ -1,7 +1,7 @@
 export * as SessionExecutionCapability from "./execution-capability.js"
 
 import { Effect } from "effect"
-import { Mcp } from "@opencode-ai/schema/mcp"
+import { Mcp } from "@opencode/schema/mcp"
 import { SessionMessage } from "./message.js"
 import { SessionSchema } from "./schema.js"
 

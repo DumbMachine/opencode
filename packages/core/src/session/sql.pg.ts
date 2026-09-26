@@ -4,16 +4,16 @@ import { directoryColumn, pathColumn } from "../database/path.pg.js"
 import { ProjectTable } from "../project/sql.pg.js"
 import type { SessionMessage } from "./message.js"
 import type { SessionInbox } from "./inbox.js"
-import type { FileDiff } from "@opencode-ai/schema/file-diff"
+import type { FileDiff } from "@opencode/schema/file-diff"
 import { PermissionV1 } from "../v1/permission.js"
 import { Project } from "../project.js"
 import type { SessionSchema } from "./schema.js"
 import { Workspace } from "../workspace.js"
 import { Timestamps } from "../database/schema.sql.pg.js"
-import type { Instruction } from "@opencode-ai/schema/instruction"
-import type { Session } from "@opencode-ai/schema/session"
-import type { CompactionPayload, MovePayload, SyntheticPayload, UserPayload } from "@opencode-ai/schema/session-inbox"
-import type { RevertV1 } from "@opencode-ai/schema/session-revert"
+import type { Instruction } from "@opencode/schema/instruction"
+import type { Session } from "@opencode/schema/session"
+import type { CompactionPayload, MovePayload, SyntheticPayload, UserPayload } from "@opencode/schema/session-inbox"
+import type { RevertV1 } from "@opencode/schema/session-revert"
 import type { Schema } from "effect"
 
 type SessionMessageData = Omit<(typeof SessionMessage.Info)["Encoded"], "type" | "id">
@@ -29,7 +29,7 @@ export const SessionTable = pgTable(
     workspace_id: text().$type<Workspace.ID>(),
     parent_id: text().$type<SessionSchema.ID>(),
     fork_session_id: text().$type<SessionSchema.ID>(),
-    fork_boundary: text({ mode: "json" }).$type<Session.ForkBoundary>(),
+    fork_boundary: text().$type<Session.ForkBoundary>(),
     slug: text().notNull(),
     directory: directoryColumn().notNull(),
     path: pathColumn(),
@@ -39,23 +39,26 @@ export const SessionTable = pgTable(
     summary_additions: integer(),
     summary_deletions: integer(),
     summary_files: integer(),
-    summary_diffs: text({ mode: "json" }).$type<FileDiff.LegacyInfo[]>(),
-    metadata: text({ mode: "json" }).$type<Record<string, unknown>>(),
+    summary_diffs: text().$type<FileDiff.LegacyInfo[]>(),
+    metadata: text().$type<Record<string, unknown>>(),
     cost: real().notNull().default(0),
     tokens_input: integer().notNull().default(0),
     tokens_output: integer().notNull().default(0),
     tokens_reasoning: integer().notNull().default(0),
     tokens_cache_read: integer().notNull().default(0),
     tokens_cache_write: integer().notNull().default(0),
-    revert: text({ mode: "json" }).$type<Session.Revert | RevertV1>(),
-    permission: text({ mode: "json" }).$type<PermissionV1.Ruleset>(),
+    revert: text().$type<Session.Revert | RevertV1>(),
+    permission: text().$type<PermissionV1.Ruleset>(),
     agent: text(),
-    model: text({ mode: "json" }).$type<{
+    model: text().$type<{
       id: string
       providerID: string
       variant?: string
     }>(),
     ...Timestamps,
+    time_idle: bigint({ mode: "number" }),
+    time_viewed: bigint({ mode: "number" }),
+    idle_outcome: text().$type<NonNullable<Session.Info["outcome"]>>(),
     time_compacting: bigint({ mode: "number" }),
     time_archived: bigint({ mode: "number" }),
     /** The execution claim timestamp (historical column name; see SessionStore.claim). */
@@ -83,7 +86,7 @@ export const SessionMessageTable = pgTable(
     type: text().$type<SessionMessage.Type>().notNull(),
     seq: bigint({ mode: "number" }).notNull(),
     ...Timestamps,
-    data: text({ mode: "json" }).notNull().$type<SessionMessageData>(),
+    data: text().notNull().$type<SessionMessageData>(),
   },
   (table) => [
     uniqueIndex("session_message_session_seq_idx").on(table.session_id, table.seq),
@@ -102,7 +105,7 @@ export const SessionPendingTable = pgTable(
       .notNull()
       .references(() => SessionTable.id, { onDelete: "cascade" }),
     type: text().$type<SessionInbox.Info["type"]>().notNull(),
-    data: text({ mode: "json" }).$type<UserPayload | SyntheticPayload | Record<string, never>>().notNull(),
+    data: text().$type<UserPayload | SyntheticPayload | Record<string, never>>().notNull(),
     delivery: text().$type<SessionInbox.Delivery>(),
     admitted_seq: bigint({ mode: "number" }).notNull(),
     time_created: bigint({ mode: "number" })
@@ -127,7 +130,7 @@ export const SessionInboxTable = pgTable(
       .notNull()
       .references(() => SessionTable.id, { onDelete: "cascade" }),
     type: text().$type<SessionInbox.Info["type"]>().notNull(),
-    payload: text({ mode: "json" }).$type<UserPayload | SyntheticPayload | CompactionPayload | MovePayload>().notNull(),
+    payload: text().$type<UserPayload | SyntheticPayload | CompactionPayload | MovePayload>().notNull(),
     delivery: text().$type<SessionInbox.Delivery>().notNull(),
     enqueued_seq: bigint({ mode: "number" }).notNull(),
     time_created: bigint({ mode: "number" })
@@ -148,7 +151,7 @@ export const InstructionEntryTable = pgTable(
       .notNull()
       .references(() => SessionTable.id, { onDelete: "cascade" }),
     key: text().notNull(),
-    value: text({ mode: "json" }).$type<Schema.Json>(),
+    value: text().$type<Schema.Json>(),
     removed: integer().notNull().default(0),
     ...Timestamps,
   },
@@ -157,7 +160,7 @@ export const InstructionEntryTable = pgTable(
 
 export const InstructionBlobTable = pgTable("instruction_blob", {
   hash: text().$type<Instruction.Hash>().primaryKey(),
-  value: text({ mode: "json" }).$type<Schema.Json>(),
+  value: text().$type<Schema.Json>(),
 })
 
 export const InstructionStateTable = pgTable("instruction_state", {
@@ -167,6 +170,6 @@ export const InstructionStateTable = pgTable("instruction_state", {
     .references(() => SessionTable.id, { onDelete: "cascade" }),
   epoch_start: bigint({ mode: "number" }).notNull(),
   through_seq: bigint({ mode: "number" }).notNull(),
-  initial_values: text({ mode: "json" }).notNull().$type<Instruction.Values>(),
-  current_values: text({ mode: "json" }).notNull().$type<Instruction.Values>(),
+  initial_values: text().notNull().$type<Instruction.Values>(),
+  current_values: text().notNull().$type<Instruction.Values>(),
 })

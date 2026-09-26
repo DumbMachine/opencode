@@ -1,14 +1,14 @@
 export * as InstructionBuiltIns from "./builtins.js"
 
-import { makeLocationNode } from "@opencode-ai/util/effect/app-node"
+import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { Context, DateTime, Effect, Layer, Schema } from "effect"
-import { Global } from "@opencode-ai/util/global"
+import type { Session } from "@opencode/schema/session"
+import { Global } from "@opencode/util/global"
 import { Location } from "../location.js"
-import { SessionSchema } from "../session/schema.js"
 import { Instructions } from "./index.js"
 
 export interface Interface {
-  readonly load: (sessionID: SessionSchema.ID) => Effect.Effect<Instructions.List>
+  readonly load: (sessionID: Session.ID) => Effect.Effect<Instructions.List>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/InstructionBuiltIns") {}
@@ -33,7 +33,7 @@ const layer = Layer.effect(
                   `  Workspace root folder: ${location.project.directory}`,
                   `  Is directory a git repo: ${location.vcs?.type === "git" ? "yes" : "no"}`,
                   `  Platform: ${process.platform}`,
-                  `  Use ${global.tmp} for temporary work outside the workspace; it already exists and is pre-approved for external directory access.`,
+                  `  Prefer ${global.tmp} over generic system temporary directories such as /tmp; it is pre-created and approved for external access.`,
                   "</env>",
                 ].join("\n"),
               ),

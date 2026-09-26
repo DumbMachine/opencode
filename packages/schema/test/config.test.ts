@@ -5,14 +5,41 @@ import { ConfigAgent } from "../src/config/agent.js"
 import { ConfigMCP } from "../src/config/mcp.js"
 import { ConfigProvider } from "../src/config/provider.js"
 import { Mcp } from "../src/mcp.js"
+import { Provider } from "../src/provider.js"
 import { AbsolutePath } from "../src/schema.js"
+import { WebSearch } from "../src/websearch.js"
 
 describe("Config.Entry", () => {
+  test("accepts directory-only worktree config and omits it when absent", () => {
+    const decode = Schema.decodeUnknownSync(Config.Info)
+    const input = { worktree: { directory: "../worktrees" } }
+    expect(Schema.encodeSync(Config.Info)(decode(input))).toEqual(input)
+    expect(Schema.encodeSync(Config.Info)(new Config.Info({ worktree: undefined }))).not.toHaveProperty("worktree")
+    expect(() => decode({ worktree: {} })).toThrow()
+    expect(() => decode({ worktree: { directory: " " } })).toThrow()
+    expect(() => decode({ worktree: { directory: false } })).toThrow()
+  })
+  test("round-trips canonical provider IDs without changing config keys", () => {
+    const input = { providers: { "console-anthropic": { canonical: "anthropic" } } }
+    const decoded = Schema.decodeUnknownSync(Config.Info)(input)
+    expect(decoded.providers?.["console-anthropic"]?.canonical).toBe(Provider.ID.anthropic)
+    expect(Schema.encodeSync(Config.Info)(decoded)).toEqual(input)
+    expect(() => Schema.decodeUnknownSync(Config.Info)({ providers: { custom: { canonical: 1 } } })).toThrow()
+  })
+
+  test("accepts disabled, fixed, and random web search selection", () => {
+    const decode = Schema.decodeUnknownSync(Config.Info)
+
+    expect(decode({ websearch: false }).websearch).toBe(false)
+    expect(decode({ websearch: { provider: "exa" } }).websearch).toEqual({ provider: WebSearch.ID.make("exa") })
+    expect(decode({ websearch: { provider: "random" } }).websearch).toEqual({ provider: "random" })
+  })
+
   test("round-trips every configuration entry type", () => {
     const entries = [
       new Config.Document({
         type: "document",
-        path: "/project/opencode.json",
+        path: AbsolutePath.make("/project/opencode.json"),
         info: new Config.Info({
           permissions: [
             { action: "shell", resource: "*", effect: "ask" },
@@ -22,9 +49,6 @@ describe("Config.Entry", () => {
       }),
       new Config.Document({ type: "document", info: new Config.Info({ shell: "/bin/zsh" }) }),
       new Config.Directory({ type: "directory", path: AbsolutePath.make("/project/.opencode") }),
-      new Config.File({ type: "file", path: AbsolutePath.make("/project/opencode.json") }),
-      new Config.AgentsDirectory({ type: "agents", path: AbsolutePath.make("/project/.agents") }),
-      new Config.ClaudeDirectory({ type: "claude", path: AbsolutePath.make("/project/.claude") }),
     ]
 
     const encoded = Schema.encodeSync(Schema.Array(Config.Entry))(entries)
@@ -33,14 +57,7 @@ describe("Config.Entry", () => {
     expect(decoded).toEqual(entries)
     expect(decoded[0]).toBeInstanceOf(Config.Document)
     expect(decoded[1]).not.toHaveProperty("path")
-    expect(decoded.map((entry) => entry.type)).toEqual([
-      "document",
-      "document",
-      "directory",
-      "file",
-      "agents",
-      "claude",
-    ])
+    expect(decoded.map((entry) => entry.type)).toEqual(["document", "document", "directory"])
     expect(decoded[0]?.type === "document" ? decoded[0].info.permissions : undefined).toEqual([
       { action: "shell", resource: "*", effect: "ask" },
       { action: "shell", resource: "git status", effect: "allow" },
@@ -69,7 +86,7 @@ describe("Config.Entry", () => {
             }),
           },
         }),
-        providers: { custom: new ConfigProvider.Info({ headers: undefined }) },
+        providers: { custom: new ConfigProvider.Info({ canonical: undefined, headers: undefined }) },
       }),
     })
     const encoded = Schema.encodeSync(Config.Entry)(entry)
@@ -84,5 +101,6 @@ describe("Config.Entry", () => {
     expect(docs).not.toHaveProperty("headers")
     expect(docs.oauth).not.toHaveProperty("client_id")
     expect(encoded.info.providers?.custom).not.toHaveProperty("headers")
+    expect(encoded.info.providers?.custom).not.toHaveProperty("canonical")
   })
 })

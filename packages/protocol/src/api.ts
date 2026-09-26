@@ -11,18 +11,19 @@ import { FileSystemGroup } from "./groups/fs.js"
 import { makeFormGroup } from "./groups/form.js"
 import { CommandGroup } from "./groups/command.js"
 import { SkillGroup } from "./groups/skill.js"
+import { RpcGroup } from "./groups/rpc.js"
 import { EventGroup, makeEventGroup } from "./groups/event.js"
-import type { Definition } from "@opencode-ai/schema/event"
+import type { Definition } from "@opencode/schema/event"
 import { AgentGroup } from "./groups/agent.js"
 import { PluginGroup } from "./groups/plugin.js"
-import { HealthGroup } from "./groups/health.js"
 import { ServerGroup } from "./groups/server.js"
 import { DebugGroup } from "./groups/debug.js"
 import { PtyGroup } from "./groups/pty.js"
+import { PersistentPtyGroup } from "./groups/persistent-pty.js"
 import { ShellGroup } from "./groups/shell.js"
 import { ReferenceGroup } from "./groups/reference.js"
 import { Authorization } from "./middleware/authorization.js"
-import { LocationGroup } from "./groups/location.js"
+import { makeLocationGroup } from "./groups/location.js"
 import { IntegrationGroup } from "./groups/integration.js"
 import { WebSearchGroup } from "./groups/websearch.js"
 import { McpGroup } from "./groups/mcp.js"
@@ -34,36 +35,40 @@ import { MigrationGroup } from "./groups/migration.js"
 import { ConfigGroup } from "./groups/config.js"
 
 type LocationGroups<LocationId extends HttpApiMiddleware.AnyId> =
-  | HttpApiGroup.AddMiddleware<typeof LocationGroup, LocationId>
   | HttpApiGroup.AddMiddleware<typeof AgentGroup, LocationId>
   | HttpApiGroup.AddMiddleware<typeof PluginGroup, LocationId>
   | HttpApiGroup.AddMiddleware<typeof ModelGroup, LocationId>
-  | HttpApiGroup.AddMiddleware<typeof GenerateGroup, LocationId>
   | HttpApiGroup.AddMiddleware<typeof ProviderGroup, LocationId>
   | HttpApiGroup.AddMiddleware<typeof IntegrationGroup, LocationId>
   | HttpApiGroup.AddMiddleware<typeof WebSearchGroup, LocationId>
   | HttpApiGroup.AddMiddleware<typeof McpGroup, LocationId>
-  | HttpApiGroup.AddMiddleware<typeof CredentialGroup, LocationId>
   | HttpApiGroup.AddMiddleware<typeof ProjectGroup, LocationId>
   | HttpApiGroup.AddMiddleware<typeof FileSystemGroup, LocationId>
   | HttpApiGroup.AddMiddleware<typeof CommandGroup, LocationId>
   | HttpApiGroup.AddMiddleware<typeof SkillGroup, LocationId>
+  | HttpApiGroup.AddMiddleware<typeof RpcGroup, LocationId>
   | HttpApiGroup.AddMiddleware<typeof PtyGroup, LocationId>
   | HttpApiGroup.AddMiddleware<typeof ShellGroup, LocationId>
   | HttpApiGroup.AddMiddleware<typeof ReferenceGroup, LocationId>
   | HttpApiGroup.AddMiddleware<typeof VcsGroup, LocationId>
   | HttpApiGroup.AddMiddleware<typeof ConfigGroup, LocationId>
 
-type SessionGroups<SessionLocationId extends HttpApiMiddleware.AnyId, SessionLocationService> =
-  | ReturnType<typeof makeSessionGroup<SessionLocationId, SessionLocationService>>
-  | typeof MessageGroup
-
-type FormGroups<
-  LocationId extends HttpApiMiddleware.AnyId,
-  LocationService,
+type SessionGroups<
+  SessionLocationId extends HttpApiMiddleware.AnyId,
+  SessionLocationService,
   FormLocationId extends HttpApiMiddleware.AnyId,
   FormLocationService,
-> = ReturnType<typeof makeFormGroup<LocationId, LocationService, FormLocationId, FormLocationService>>
+> =
+  | ReturnType<typeof makeSessionGroup<SessionLocationId, SessionLocationService, FormLocationId, FormLocationService>>
+  | typeof MessageGroup
+
+type FormGroups<LocationId extends HttpApiMiddleware.AnyId, LocationService> = ReturnType<
+  typeof makeFormGroup<LocationId, LocationService>
+>
+
+type LocationGroup<LocationId extends HttpApiMiddleware.AnyId, LocationService> = ReturnType<
+  typeof makeLocationGroup<LocationId, LocationService>
+>
 
 type MixedMiddlewareGroups<
   LocationId extends HttpApiMiddleware.AnyId,
@@ -81,14 +86,17 @@ type ApiGroups<
   SessionLocationService,
   Event extends HttpApiGroup.Constraint,
 > =
-  | typeof HealthGroup
   | typeof ServerGroup
   | typeof DebugGroup
   | typeof MigrationGroup
   | typeof WorktreeGroup
+  | typeof GenerateGroup
+  | typeof PersistentPtyGroup
+  | typeof CredentialGroup
   | LocationGroups<LocationId>
-  | FormGroups<LocationId, LocationService, FormLocationId, FormLocationService>
-  | SessionGroups<SessionLocationId, SessionLocationService>
+  | LocationGroup<LocationId, LocationService>
+  | FormGroups<LocationId, LocationService>
+  | SessionGroups<SessionLocationId, SessionLocationService, FormLocationId, FormLocationService>
   | MixedMiddlewareGroups<LocationId, LocationService, SessionLocationId, SessionLocationService>
   | Event
 
@@ -145,27 +153,28 @@ const makeApiFromGroup = <
   Group
 > =>
   HttpApi.make("server")
-    .add(HealthGroup)
     .add(ServerGroup)
-    .add(LocationGroup.middleware(locationMiddleware))
+    .add(makeLocationGroup(locationMiddleware))
     .add(AgentGroup.middleware(locationMiddleware))
     .add(PluginGroup.middleware(locationMiddleware))
-    .add(makeSessionGroup(sessionLocationMiddleware))
+    .add(makeSessionGroup(sessionLocationMiddleware, formLocationMiddleware))
     .add(MessageGroup)
     .add(ModelGroup.middleware(locationMiddleware))
-    .add(GenerateGroup.middleware(locationMiddleware))
+    .add(GenerateGroup)
     .add(ProviderGroup.middleware(locationMiddleware))
     .add(IntegrationGroup.middleware(locationMiddleware))
     .add(McpGroup.middleware(locationMiddleware))
-    .add(CredentialGroup.middleware(locationMiddleware))
+    .add(CredentialGroup)
     .add(ProjectGroup.middleware(locationMiddleware))
-    .add(makeFormGroup(locationMiddleware, formLocationMiddleware))
+    .add(makeFormGroup(locationMiddleware))
     .add(makePermissionGroup(locationMiddleware, sessionLocationMiddleware))
     .add(FileSystemGroup.middleware(locationMiddleware))
     .add(CommandGroup.middleware(locationMiddleware))
     .add(SkillGroup.middleware(locationMiddleware))
+    .add(RpcGroup.middleware(locationMiddleware))
     .add(eventGroup)
     .add(PtyGroup.middleware(locationMiddleware))
+    .add(PersistentPtyGroup)
     .add(ShellGroup.middleware(locationMiddleware))
     .add(ReferenceGroup.middleware(locationMiddleware))
     .add(WorktreeGroup)

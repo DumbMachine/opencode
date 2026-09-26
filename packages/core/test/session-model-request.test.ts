@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
-import { Message, ToolResultPart } from "@opencode-ai/ai"
-import { boundImages, unsupportedParts } from "@opencode-ai/core/session/model-request"
+import { Message, ToolResultPart, Media } from "@opencode/ai"
+import { boundImages, unsupportedParts } from "@opencode/core/session/model-request"
 
 const capabilities = (input: string[]) => ({ tools: true, input, output: ["text"] })
 
@@ -9,16 +9,18 @@ describe("SessionModelRequest.unsupportedParts", () => {
     const messages = unsupportedParts(
       [
         Message.user([
-          Message.text("Describe this image"),
-          { type: "media", mediaType: "image/png", data: "aGVsbG8=", filename: "logo.png" },
+          Message.text("Describe these files"),
+          { type: "media", media: Media.base64("aGVsbG8=", "image/png"), filename: "logo.png" },
+          { type: "media", media: Media.base64("JVBERg==", "application/pdf"), filename: "document.pdf" },
         ]),
       ],
       capabilities(["text"]),
     )
 
     expect(messages[0]?.content).toEqual([
-      Message.text("Describe this image"),
+      Message.text("Describe these files"),
       Message.text('ERROR: Cannot read "logo.png" (this model does not support image input). Inform the user.'),
+      Message.text('ERROR: Cannot read "document.pdf" (this model does not support pdf input). Inform the user.'),
     ])
   })
 
@@ -58,23 +60,23 @@ describe("SessionModelRequest.unsupportedParts", () => {
   })
 
   test("preserves supported media", () => {
-    const message = Message.user({ type: "media", mediaType: "image/png", data: "aGVsbG8=" })
+    const message = Message.user({ type: "media", media: Media.base64("aGVsbG8=", "image/png") })
     expect(unsupportedParts([message], capabilities(["text", "image"]))[0]?.content).toEqual(message.content)
   })
 })
 
 describe("SessionModelRequest.boundImages", () => {
   test("preserves images below the trigger", () => {
-    const messages = [Message.user({ type: "media", mediaType: "image/png", data: "aGVsbG8=" })]
+    const messages = [Message.user({ type: "media", media: Media.base64("aGVsbG8=", "image/png") })]
     expect(boundImages(messages)).toBe(messages)
   })
 
   test("replaces oldest images until the retained payload reaches the target", () => {
     const image = "a".repeat(9 * 1024 * 1024)
     const messages = [
-      Message.user({ type: "media", mediaType: "image/png", data: image, filename: "first.png" }),
-      Message.user({ type: "media", mediaType: "image/png", data: image, filename: "second.png" }),
-      Message.user({ type: "media", mediaType: "image/png", data: image, filename: "third.png" }),
+      Message.user({ type: "media", media: Media.base64(image, "image/png"), filename: "first.png" }),
+      Message.user({ type: "media", media: Media.base64(image, "image/png"), filename: "second.png" }),
+      Message.user({ type: "media", media: Media.base64(image, "image/png"), filename: "third.png" }),
     ]
     const result = boundImages(messages)
 

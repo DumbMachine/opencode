@@ -1,12 +1,12 @@
 export * as McpTool from "./mcp.js"
 
-import { ToolFailure } from "@opencode-ai/ai"
-import { McpEvent } from "@opencode-ai/schema/mcp-event"
-import { Context, Effect, Exit, Fiber, type JsonSchema, Layer, Scope, Semaphore, Stream } from "effect"
-import { makeLocationNode } from "@opencode-ai/util/effect/app-node"
+import { ToolFailure } from "@opencode/ai"
+import { McpEvent } from "@opencode/schema/mcp-event"
+import { Context, Effect, Fiber, type JsonSchema, Layer, PubSub, Semaphore, Stream } from "effect"
+import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { Bus } from "../bus.js"
 
-import { MCP } from "../mcp/index.js"
+import { Mcp } from "../mcp/index.js"
 import { Permission } from "../permission.js"
 import { Tool } from "../tool.js"
 
@@ -51,7 +51,7 @@ export interface Interface {
   /** Wait for the initial MCP tool registration to settle. */
   readonly flush: Effect.Effect<void>
   /** Builds request-local tools backed by the supplied MCP execution. */
-  readonly tools: (mcp: MCP.Execution) => Effect.Effect<ReadonlyArray<Tool.Info>>
+  readonly tools: (mcp: Mcp.Execution) => Effect.Effect<ReadonlyArray<Tool.Info>>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/McpTool") {}
@@ -59,17 +59,16 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/Mc
 export const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
-    const mcp = yield* MCP.Service
+    const mcp = yield* Mcp.Service
     const tools = yield* Tool.Service
     const bus = yield* Bus.Service
     const permission = yield* Permission.Service
-    const scope = yield* Scope.Scope
     const lock = Semaphore.makeUnsafe(1)
-    let current: Scope.Closeable | undefined
+    let discovered: Mcp.Tool[] = []
 
-    const toolInfos: Interface["tools"] = Effect.fn("McpTool.tools")(function* (execution) {
-      const discovered = yield* execution.tools()
-      return discovered.map((tool): Tool.Info => {
+    const requestTools: Interface["tools"] = Effect.fn("McpTool.tools")(function* (execution) {
+      const found = yield* execution.tools()
+      return found.map((tool): Tool.Info => {
         const schema = (tool.inputSchema ?? {}) as JsonSchema.JsonSchema
         return {
           name: tool.name,
@@ -95,13 +94,17 @@ export const layer = Layer.effect(
                   agent: context.agent,
                   source: { type: "tool", messageID: context.messageID, id: context.id },
                 })
-              let result = yield* execution.callTool({ server: tool.server, name: tool.name, args }).pipe(
-                Effect.catchTags({
-                  "MCP.NotFoundError": (error) =>
-                    new ToolFailure({ message: `MCP server "${error.server}" is not available` }),
-                  "MCP.ToolCallError": (error) => new ToolFailure({ message: error.message }),
-                }),
-              )
+              const call = (meta?: Readonly<Record<string, unknown>>) =>
+                execution
+                  .callTool({ server: tool.server, name: tool.name, args, meta, sessionID: context.sessionID })
+                  .pipe(
+                    Effect.catchTags({
+                      "MCP.NotFoundError": (error) =>
+                        new ToolFailure({ message: `MCP server "${error.server}" is not available` }),
+                      "MCP.ToolCallError": (error) => new ToolFailure({ message: error.message }),
+                    }),
+                  )
+              let result = yield* call()
               const approval = tool.approvalBridge ? approvalRequest(result.meta) : undefined
               if (
                 tool.approvalBridge &&
@@ -109,7 +112,7 @@ export const layer = Layer.effect(
                   (result.structured &&
                     typeof result.structured === "object" &&
                     "kind" in result.structured &&
-                    result.structured.kind === "approval_required" &&
+                    (result.structured as { kind?: unknown }).kind === "approval_required" &&
                     !approval))
               )
                 return yield* new ToolFailure({ message: "MCP approval response is missing a valid host continuation" })
@@ -125,29 +128,16 @@ export const layer = Layer.effect(
                   agent: context.agent,
                   source: { type: "tool", messageID: context.messageID, id: context.id },
                 })
-                result = yield* execution
-                  .callTool({
-                    server: tool.server,
-                    name: tool.name,
-                    args,
-                    meta: {
-                      [APPROVAL_CONTINUATION_META]: {
-                        version: 1,
-                        runId: approval.runId,
-                        permissionId: permissionID,
-                        sessionId: context.sessionID,
-                        messageId: context.messageID,
-                        toolCallId: context.id,
-                      },
-                    },
-                  })
-                  .pipe(
-                    Effect.catchTags({
-                      "MCP.NotFoundError": (error) =>
-                        new ToolFailure({ message: `MCP server "${error.server}" is not available` }),
-                      "MCP.ToolCallError": (error) => new ToolFailure({ message: error.message }),
-                    }),
-                  )
+                result = yield* call({
+                  [APPROVAL_CONTINUATION_META]: {
+                    version: 1,
+                    runId: approval.runId,
+                    permissionId: permissionID,
+                    sessionId: context.sessionID,
+                    messageId: context.messageID,
+                    toolCallId: context.id,
+                  },
+                })
               }
               if (result.isError)
                 return yield* new ToolFailure({
@@ -178,33 +168,120 @@ export const layer = Layer.effect(
       })
     })
 
-    // Register the current tool set under a fresh child scope, then close the previous one so the
-    // registry never has a gap where MCP tools disappear mid-swap.
+    // Register once after initial discovery; only subsequent updates need a debounced reload.
+    const initial = yield* lock
+      .withPermit(
+        Effect.gen(function* () {
+          discovered = yield* mcp.tools()
+          yield* tools.transform((editor) => {
+            for (const tool of discovered) {
+              editor.add({
+                name: tool.name,
+                options: { namespace: namespace(tool.server), codemode: tool.codemode !== false, group: "mcp" },
+                description: tool.description ?? "",
+                input: (tool.inputSchema ?? { type: "object", properties: {} }) as JsonSchema.JsonSchema,
+                output: (tool.outputSchema ?? {}) as JsonSchema.JsonSchema,
+                execute: (input, context) =>
+                  Effect.gen(function* () {
+                    yield* permission.assert({
+                      action: name(tool.server, tool.name),
+                      resources: ["*"],
+                      save: ["*"],
+                      metadata: {},
+                      sessionID: context.sessionID,
+                      agent: context.agent,
+                      source: {
+                        type: "tool",
+                        messageID: context.messageID,
+                        id: context.id,
+                      },
+                    })
+                    const result = yield* mcp
+                      .callTool({
+                        server: tool.server,
+                        name: tool.name,
+                        args: (input ?? {}) as Record<string, unknown>,
+                        sessionID: context.sessionID,
+                      })
+                      .pipe(
+                        Effect.catchTags({
+                          "MCP.NotFoundError": (error) =>
+                            new ToolFailure({ message: `MCP server "${error.server}" is not available` }),
+                          "MCP.ToolCallError": (error) => new ToolFailure({ message: error.message }),
+                        }),
+                      )
+                    if (result.isError)
+                      return yield* new ToolFailure({
+                        message:
+                          result.content
+                            .flatMap((part) => (part.type === "text" ? [part.text] : []))
+                            .join("\n")
+                            .trim() || "MCP tool returned an error",
+                      })
+                    const content = result.content.map((part) =>
+                      part.type === "text"
+                        ? { type: "text" as const, text: part.text }
+                        : {
+                            type: "file" as const,
+                            uri: `data:${part.mimeType};base64,${part.data}`,
+                            mime: part.mimeType,
+                          },
+                    )
+                    const text = content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n")
+                    const output = () => {
+                      if (result.structured !== undefined) return result.structured
+                      if (text === "") return null
+                      // Agents assume JSON returned as text is already an object, so parse it when the server declares no schema.
+                      if (tool.outputSchema === undefined && (text.startsWith("{") || text.startsWith("["))) {
+                        try {
+                          return JSON.parse(text)
+                        } catch {}
+                      }
+                      return text
+                    }
+                    return {
+                      output: output(),
+                      ...(content.length === 0 ? {} : { content }),
+                    }
+                  }).pipe(
+                    Effect.mapError((error) =>
+                      error instanceof ToolFailure
+                        ? error
+                        : new ToolFailure({ message: `Unable to execute ${name(tool.server, tool.name)}` }),
+                    ),
+                  ),
+              })
+            }
+          })
+        }),
+      )
+      .pipe(Effect.forkScoped)
     const reconcile = lock.withPermit(
       Effect.gen(function* () {
-        const discovered = yield* toolInfos(mcp)
-        const next = yield* Scope.fork(scope)
-        yield* tools
-          .transform((draft) => {
-            for (const tool of discovered) draft.add(tool)
-          })
-          .pipe(Scope.provide(next), Effect.orDie)
-        if (current) yield* Scope.close(current, Exit.void)
-        current = next
+        discovered = yield* mcp.tools()
+        yield* tools.reload()
       }),
     )
 
-    const initial = yield* reconcile.pipe(Effect.forkScoped)
+    // Servers announce tools in bursts and each read loads the whole catalog, so settle and refresh
+    // once. The bus subscription stays eager; only the already-open sliding subscription is debounced.
+    const changes = yield* PubSub.sliding<void>(1)
     yield* bus.subscribe(McpEvent.ToolsChanged).pipe(
+      Stream.runForEach(() => PubSub.publish(changes, undefined)),
+      Effect.forkScoped({ startImmediately: true }),
+    )
+    const updates = yield* PubSub.subscribe(changes)
+    yield* Stream.fromSubscription(updates).pipe(
+      Stream.debounce("100 millis"),
       Stream.runForEach(() => reconcile),
       Effect.forkScoped({ startImmediately: true }),
     )
-    return Service.of({ flush: Effect.asVoid(Fiber.await(initial)), tools: toolInfos })
+    return Service.of({ flush: Effect.asVoid(Fiber.await(initial)), tools: requestTools })
   }),
 )
 
 export const node = makeLocationNode({
   service: Service,
   layer,
-  deps: [Tool.node, MCP.node, Bus.node, Permission.node],
+  deps: [Tool.node, Mcp.node, Bus.node, Permission.node],
 })

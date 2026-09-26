@@ -10,7 +10,7 @@ export interface PostgresConfig {
 }
 
 export const PostgresConfig = Context.Service<PostgresConfig>(
-  "@opencode-ai/core/database/PostgresConfig",
+  "@opencode/core/database/PostgresConfig",
 )
 
 export const layer = (config: PostgresConfig) =>

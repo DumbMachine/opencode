@@ -1,9 +1,10 @@
 import { describe, expect, test } from "bun:test"
-import { Agent } from "@opencode-ai/core/agent"
-import { Bus } from "@opencode-ai/core/bus"
-import { Event } from "@opencode-ai/schema/event"
-import { OpenCodeEvent } from "@opencode-ai/protocol/groups/event"
-import { DateTime, Deferred, Effect, Exit, Fiber, Option, Schema, Stream } from "effect"
+import { Agent } from "@opencode/core/agent"
+import { Bus } from "@opencode/core/bus"
+import { Credential } from "@opencode/schema/credential"
+import { Event } from "@opencode/schema/event"
+import { IntegrationID } from "@opencode/schema/integration-id"
+import { Deferred, Effect, Exit, Fiber, Option, Schema, Stream } from "effect"
 import { it } from "../../core/test/lib/effect"
 import { EventFeed } from "../src/event-feed"
 
@@ -11,14 +12,14 @@ const Internal = Bus.ephemeral({ type: "test.internal", schema: { value: Schema.
 
 const event = (id: string): Event.Payload<typeof Agent.Event.Updated> => ({
   id: Event.ID.make(`evt_${id}`),
-  created: DateTime.makeUnsafe(Date.now()),
+  created: Date.now(),
   type: Agent.Event.Updated.type,
   data: {},
 })
 
 const internal = (value: string): Event.Payload<typeof Internal> => ({
   id: Event.ID.create(),
-  created: DateTime.makeUnsafe(Date.now()),
+  created: Date.now(),
   type: Internal.type,
   data: { value },
 })
@@ -40,9 +41,7 @@ function makeSource() {
 describe("EventFeed", () => {
   test("preserves the public SSE frame encoding", () => {
     const payload = event("wire")
-    expect(EventFeed.frame(payload)).toBe(
-      `data: ${JSON.stringify(Schema.encodeUnknownSync(OpenCodeEvent)(payload))}\n\n`,
-    )
+    expect(EventFeed.frame(payload)).toBe(`data: ${JSON.stringify(payload)}\n\n`)
   })
 
   it.effect("encodes once and delivers the same frame to every subscriber", () =>
@@ -111,6 +110,27 @@ describe("EventFeed", () => {
       expect(Exit.isFailure(result)).toBeTrue()
       if (Exit.isSuccess(result)) return
       expect(Option.getOrUndefined(Exit.findErrorOption(result))).toBeInstanceOf(EventFeed.SubscriberOverflowError)
+    }),
+  )
+
+  it.effect("delivers global credential events to public subscribers", () =>
+    Effect.gen(function* () {
+      const source = makeSource()
+      const feed = yield* EventFeed.make(source.observe, { encode: (event) => event.type })
+      const stream = yield* feed.subscribe
+      const received = yield* stream.pipe(Stream.take(1), Stream.runCollect, Effect.forkScoped)
+
+      yield* source.publish({
+        id: Event.ID.create(),
+        created: Date.now(),
+        type: Credential.Event.Switched.type,
+        data: {
+          credentialID: Credential.ID.make("cred_test"),
+          integrationID: IntegrationID.make("openai"),
+        },
+      })
+
+      expect(Array.from(yield* Fiber.join(received))).toEqual([Credential.Event.Switched.type])
     }),
   )
 

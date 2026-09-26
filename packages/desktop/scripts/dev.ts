@@ -1,5 +1,7 @@
 import { $ } from "bun"
 import { join } from "node:path"
+import { fileURLToPath } from "node:url"
+import { prepareDevElectron } from "./dev-electron"
 import { downloadCliToResources, windowsify } from "./utils"
 
 type ServerSource = { type: "build" } | { type: "download"; version: string }
@@ -11,14 +13,18 @@ async function main() {
   process.env.OPENCODE_DISABLE_CHANNEL_DB = "0"
   const options = selectOptions()
   if (options.server.type === "build") process.env.OPENCODE_DESKTOP_SERVER_CHANNEL = "local"
+  process.env.OPENCODE_DESKTOP_ISOLATED_SERVER = "1"
   await prepareDesktop()
   await prepareServer(options.server)
   await startDesktop(options.electron)
 }
 
 async function prepareDesktop() {
-  await $`bun run install-electron`
-  await $`bun ./scripts/copy-icons.ts ${process.env.OPENCODE_CHANNEL ?? "dev"}`
+  await Promise.all([
+    $`bun run install-electron`,
+    $`bun ./scripts/copy-icons.ts ${process.env.OPENCODE_CHANNEL ?? "dev"}`,
+  ])
+  if (process.platform === "darwin") process.env.ELECTRON_EXEC_PATH = await prepareDevElectron()
 }
 
 function selectOptions(): DevOptions {
@@ -39,15 +45,23 @@ function selectOptions(): DevOptions {
 async function prepareServer(source: ServerSource) {
   if (source.type === "download")
     return downloadCliToResources(source.version, windowsify("resources/opencode-cli-dev"))
+  await $`bun run --cwd ${join(import.meta.dirname, "../../app")} build`.env({
+    ...process.env,
+    VITE_OPENCODE_SERVER_MODE: "origin",
+  })
   process.env.OPENCODE_DESKTOP_CLI_DEV = join(import.meta.dirname, "../../cli")
+  await $`bun run --cwd ${process.env.OPENCODE_DESKTOP_CLI_DEV} --define=OPENCODE_VERSION=${JSON.stringify(process.env.OPENCODE_VERSION)} src/index.ts --version`
   if (process.platform !== "win32") return
   process.env.OPENCODE_DESKTOP_WSL_CLI_BUILD = join(import.meta.dirname, "../../cli/script/build.ts")
   process.env.OPENCODE_DESKTOP_WSL_CLI_OUTPUT = join(import.meta.dirname, "../resources/opencode-cli-wsl")
 }
 
 async function startDesktop(args: string[]) {
-  process.env.OPENCODE_DESKTOP_ISOLATED_SERVER = "1"
-  await $`electron-vite dev ${args}`
+  // Bun's implicit spawn environment omits values set during preparation.
+  process.exitCode = await Bun.spawn(
+    ["node", fileURLToPath(new URL("../bin/electron-vite.js", import.meta.resolve("electron-vite"))), "dev", ...args],
+    { env: process.env, stdio: ["inherit", "inherit", "inherit"] },
+  ).exited
 }
 
 await main()

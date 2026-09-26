@@ -1,21 +1,18 @@
 export * as ModelBudget from "./model-budget.js"
 
-import { AIError, GenerationOptions, LLMEvent, LLMRequest, LLMResponse, QuotaExceededReason } from "@opencode-ai/ai"
-import { LLMClient, type LLMClientShape } from "@opencode-ai/ai/route"
+import { AIError, GenerationOptions, LLMEvent, LLMRequest, LLMResponse, QuotaExceededError } from "@opencode/ai"
+import { LLMClient, type LLMClientShape } from "@opencode/ai/route"
 import { Effect, Layer, Stream } from "effect"
 
-const failure = (message: string) =>
-  new AIError({ module: "ModelBudget", method: "admit", reason: new QuotaExceededReason({ message }) })
+const failure = (message: string) => new AIError({ reason: new QuotaExceededError({ message }) })
 
 // A byte bound avoids tokenizer/network work on the first-token path. For
 // media that can expand at the provider, reserve the entire provider context.
 export const inputBound = (request: LLMRequest) => {
   const text = JSON.stringify({ system: request.system, messages: request.messages, tools: request.tools })
   const opaque = /"type":"(image|file|audio|video)"/.test(text)
-  const context = request.model.defaults?.limits?.input ?? request.model.defaults?.limits?.context ?? request.model.route.defaults.limits?.input ?? request.model.route.defaults.limits?.context
-  if (opaque && (!context || context <= 0)) throw new Error("Model has no input limit for media billing")
-  const bytes = new TextEncoder().encode(text).byteLength + 256 * (request.messages.length + request.tools.length + 1)
-  return opaque ? context! : Math.min(context ?? bytes, bytes)
+  if (opaque) throw new Error("Model has no input limit for media billing")
+  return new TextEncoder().encode(text).byteLength + 256 * (request.messages.length + request.tools.length + 1)
 }
 
 export const make = (client: LLMClientShape, endpoint: string, token: string, outputLimit = 8192): LLMClientShape => {
@@ -48,15 +45,11 @@ export const make = (client: LLMClientShape, endpoint: string, token: string, ou
       Effect.gen(function* () {
         const session = request.http?.headers?.["x-opencode-session"]
         if (!session) return yield* failure("Model request has no billing session")
-        if (request.tools.some((tool) => tool.native !== undefined))
+        if (request.tools.some((tool) => "native" in tool && tool.native !== undefined))
           return yield* failure("Provider-hosted tools require a separately priced budget")
         if (request.http?.body || request.model.defaults?.http?.body || request.model.route.defaults.http?.body)
           return yield* failure("Raw model body overrides are unavailable with enforced budgets")
-        const maxTokens = Math.min(
-          outputLimit,
-          request.generation?.maxTokens ?? outputLimit,
-          request.model.defaults?.limits?.output ?? request.model.route.defaults.limits?.output ?? outputLimit,
-        )
+        const maxTokens = Math.min(outputLimit, request.generation?.maxTokens ?? outputLimit)
         if (!Number.isSafeInteger(maxTokens) || maxTokens < 1) return yield* failure("Invalid model output limit")
         const input = yield* Effect.try({
           try: () => inputBound(request),
@@ -109,7 +102,7 @@ export const make = (client: LLMClientShape, endpoint: string, token: string, ou
         return result ? Effect.succeed(result) : Effect.fail(failure("Model response was incomplete"))
       }),
     )
-  return { stream, generate }
+  return { stream, generate, compact: client.compact }
 }
 
 export const layer = Layer.effect(

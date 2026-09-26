@@ -1,11 +1,14 @@
 import { describe, expect, test } from "bun:test"
 import { DateTime, Schema } from "effect"
 import { Agent } from "../src/agent.js"
+import { ConfigAgent } from "../src/config/agent.js"
+import { ConfigProvider } from "../src/config/provider.js"
 import { FileSystem } from "../src/filesystem.js"
 import { Form } from "../src/form.js"
 import { Mcp } from "../src/mcp.js"
 import { Model } from "../src/model.js"
 import { Project } from "../src/project.js"
+import { SkillAttachment } from "../src/prompt.js"
 import { Provider } from "../src/provider.js"
 import { Pty } from "../src/pty.js"
 import { Session } from "../src/session.js"
@@ -22,7 +25,7 @@ import { AbsolutePath, optional } from "../src/schema.js"
 
 describe("contract hygiene", () => {
   test("restricts agent colors to six-digit hex values", () => {
-    const decode = Schema.decodeUnknownSync(Agent.Color)
+    const decode = Schema.decodeUnknownSync(ConfigAgent.Color)
     expect(decode("#ff6b6b")).toBe("#ff6b6b")
     expect(() => decode("warning")).toThrow()
   })
@@ -54,17 +57,39 @@ describe("contract hygiene", () => {
       }),
     ).toEqual({ text: "completed" })
 
+    const info = Session.Info.make({
+      id: Session.ID.make("ses_untitled"),
+      projectID: Project.ID.make("global"),
+      cost: Money.USD.zero,
+      tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+      time: {
+        created: DateTime.makeUnsafe(0),
+        updated: DateTime.makeUnsafe(0),
+        idle: undefined,
+        viewed: undefined,
+      },
+      title: undefined,
+      location: { directory: AbsolutePath.make("/project") },
+    })
+    const encoded = Schema.encodeSync(Session.Info)(info)
+    expect(encoded).not.toHaveProperty("title")
+    expect(encoded.time).toEqual({ created: 0, updated: 0 })
     expect(
       Schema.encodeSync(Session.Info)({
-        id: Session.ID.make("ses_untitled"),
-        projectID: Project.ID.make("global"),
-        cost: Money.USD.zero,
-        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-        time: { created: DateTime.makeUnsafe(0), updated: DateTime.makeUnsafe(0) },
-        title: undefined,
-        location: { directory: AbsolutePath.make("/project") },
-      }),
-    ).not.toHaveProperty("title")
+        ...info,
+        time: { ...info.time, idle: DateTime.makeUnsafe(2), viewed: DateTime.makeUnsafe(1) },
+      }).time,
+    ).toEqual({ created: 0, updated: 0, idle: 2, viewed: 1 })
+  })
+
+  test("skill attachments retain legacy references while accepting prepared instructions", () => {
+    const reference = { id: Skill.ID.make("effect"), name: Skill.Name.make("Effect") }
+    expect(Schema.decodeUnknownSync(SkillAttachment)(reference)).toEqual(reference)
+    expect(Schema.encodeSync(SkillAttachment)({ ...reference, text: undefined })).toEqual(reference)
+    expect(Schema.decodeUnknownSync(SkillAttachment)({ ...reference, text: "Use Effect" })).toEqual({
+      ...reference,
+      text: "Use Effect",
+    })
   })
 
   test("session inbox items omit the internal enqueue sequence", () => {
@@ -74,7 +99,7 @@ describe("contract hygiene", () => {
           admittedSeq: 3,
           id: "msg_pending",
           sessionID: "ses_pending",
-          timeCreated: 1,
+          time: { created: 1 },
           type: "user",
           payload: { text: "hello" },
           delivery: "steer",
@@ -83,7 +108,7 @@ describe("contract hygiene", () => {
     ).toEqual({
       id: "msg_pending",
       sessionID: "ses_pending",
-      timeCreated: 1,
+      time: { created: 1 },
       type: "user",
       payload: { text: "hello" },
       delivery: "steer",
@@ -120,10 +145,12 @@ describe("contract hygiene", () => {
   test("model defaults and provider overlays preserve public invariants", () => {
     const id = Model.ID.make("model")
     expect(Model.Info.default(Provider.ID.make("provider"), id)).toMatchObject({ modelID: id, variants: [] })
+    expect(Provider.Info.empty(Provider.ID.make("provider")).activation).toBe("auto")
     expect(
       Schema.decodeUnknownSync(Provider.Info)({
         id: "provider",
         name: "Provider",
+        activation: "auto",
         package: "native",
         settings: { arbitrary: 1n },
       }).settings,
@@ -142,6 +169,8 @@ describe("contract hygiene", () => {
   test("reusable public identifiers are stable and unique", () => {
     const identifiers = [
       Agent.Color,
+      ConfigProvider.ModelSettings,
+      ConfigProvider.Settings,
       FileSystem.Submatch,
       Form.Field,
       Form.Fields,
@@ -155,10 +184,10 @@ describe("contract hygiene", () => {
       Model.Ref,
       Model.Capabilities,
       Model.Cost,
+      Model.Settings,
       Model.Variant,
       Project.Current,
       Worktree.Directory,
-      Worktree.ListInput,
       Worktree.List,
       Project.Icon,
       Project.Commands,
@@ -188,7 +217,7 @@ describe("contract hygiene", () => {
 
   test("all session inbox item types accept both delivery modes", () => {
     const decode = Schema.decodeUnknownSync(SessionInbox.Info)
-    const base = { id: "msg_inbox", sessionID: "ses_inbox", timeCreated: 1 }
+    const base = { id: "msg_inbox", sessionID: "ses_inbox", time: { created: 1 } }
     const move = {
       location: { directory: "/project" },
       projectID: "global",
@@ -201,7 +230,7 @@ describe("contract hygiene", () => {
     }
   })
 
-  test("current source limits Any to provider options and avoids mutable contract wrappers", async () => {
+  test("current source limits Any to reviewed boundaries and avoids mutable contract wrappers", async () => {
     const files = [...new Bun.Glob("*.ts").scanSync(new URL("../src", import.meta.url).pathname)].filter(
       (file) => !file.endsWith("-v1.ts"),
     )
@@ -212,11 +241,13 @@ describe("contract hygiene", () => {
 
     expect(
       sources
-        .filter((item) => item.file !== "provider.ts")
+        .filter((item) => item.file !== "provider.ts" && item.file !== "model.ts" && item.file !== "integration.ts")
         .map((item) => item.source)
         .join("\n"),
     ).not.toContain("Schema.Any")
-    expect(sources.find((item) => item.file === "provider.ts")?.source.match(/Schema\.Any/g)).toHaveLength(4)
+    expect(sources.find((item) => item.file === "provider.ts")?.source.match(/Schema\.Any/g)).toHaveLength(3)
+    expect(sources.find((item) => item.file === "model.ts")?.source.match(/Schema\.Any/g)).toHaveLength(2)
+    expect(sources.find((item) => item.file === "integration.ts")?.source.match(/Schema\.Any/g)).toHaveLength(2)
     expect(source).not.toContain("Schema.mutable")
   })
 

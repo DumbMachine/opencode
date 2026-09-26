@@ -11,6 +11,9 @@ truth. Follow links from that page when the question needs more detail. Fetch
 <https://opencode.ai/v2/docs/> first when you need to discover the relevant
 documentation page.
 
+A machine-readable documentation index is available at
+<https://opencode.ai/v2/llms.txt>.
+
 ## Version policy
 
 Always answer for OpenCode V2 unless the user explicitly asks about V1,
@@ -29,10 +32,45 @@ V1 documentation and syntax may be consulted only when the user explicitly
 asks about V1 or when needed as migration input. Outputs and recommendations
 must still use V2 unless the user specifically requests a V1 result.
 
-## [Configuration](https://opencode.ai/v2/docs/config)
+## [CLI](https://opencode.ai/v2/docs/cli)
 
-OpenCode configuration uses JSON or JSONC. Include the published schema so the
-user's editor can validate fields and provide autocomplete:
+For questions about the terminal interface, command-line invocation, `run`,
+`mini`, terminal providers, or other CLI behavior, fetch the
+[CLI guide](https://opencode.ai/v2/docs/cli) and the relevant page linked from
+that section.
+
+CLI and TUI preferences are separate from OpenCode's server and project
+configuration. They live in the global `~/.config/opencode/cli.json`, or
+`$XDG_CONFIG_HOME/opencode/cli.json` when `XDG_CONFIG_HOME` is set. There is no
+project-local CLI configuration. Set `OPENCODE_CLI_CONFIG_CONTENT` to merge
+inline JSON over the global settings. Most preferences can also be changed from
+the TUI by pressing `Ctrl+P` and selecting **Open settings**.
+
+### [Settings](https://opencode.ai/v2/docs/cli/config)
+
+Fetch the full [CLI settings reference](https://opencode.ai/v2/docs/cli/config)
+before editing `cli.json`. It documents every terminal-only setting, accepted
+values, and examples, including themes, input, sessions, tabs, diffs, alerts,
+Mini, keybindings, terminal plugins, and debugging. Do not put these settings
+in `opencode.json(c)`.
+
+### [Keybinds](https://opencode.ai/v2/docs/cli/keybinds)
+
+Configure keybindings under `keybinds` in `cli.json`. The leader key is the
+`keybinds.leader` entry; leader timing is configured separately under
+`leader.timeout`. Bindings can use a string, an array of strings, or an object
+when event behavior such as `preventDefault` is required. Disable a binding
+with `"none"` or `false`.
+
+Never guess a command ID, default binding, or accepted key syntax. Fetch the
+full [keybind reference](https://opencode.ai/v2/docs/cli/keybinds), which lists
+the current IDs and defaults, before answering or editing a binding.
+
+## [OpenCode configuration](https://opencode.ai/v2/docs/config)
+
+OpenCode's server and project configuration uses JSON or JSONC. Include the
+published schema so the user's editor can validate fields and provide
+autocomplete:
 
 ```jsonc
 {
@@ -45,15 +83,21 @@ to every project for that user. Project configuration can live in any directory
 as `opencode.json(c)` or `.opencode/opencode.json(c)`, including nested packages
 in a monorepo.
 
-When OpenCode starts, it searches from the current directory up to the project
-root. It merges direct `opencode.json(c)` files from root to current directory,
+During ordinary project discovery, OpenCode searches the current Location
+directory and every ancestor through the filesystem root, including directories
+above the detected project or repository root. It merges direct
+`opencode.json(c)` files from the farthest ancestor to the current directory,
 then does the same for `.opencode/opencode.json(c)` files. This means every
-`.opencode` config overrides every direct config. Global configuration has the
-lowest precedence.
+discovered `.opencode` config overrides every discovered direct config. Global
+filesystem configuration has lower precedence than these discovered documents.
 
 Common configuration fields include `model`, `default_agent`, `permissions`,
 `agents`, `commands`, `plugins`, `providers`, `mcp`, `skills`, `instructions`,
 `references`, `formatter`, and `lsp`.
+
+This configuration is distinct from `cli.json`. Use the
+[CLI settings reference](https://opencode.ai/v2/docs/cli/config) for terminal
+preferences, especially themes and keybindings.
 
 Do not guess field names or shapes. Fetch the V2 configuration guide and its
 linked topic guide as the source of truth, and preserve unrelated settings when
@@ -63,12 +107,39 @@ examples, but do not fetch it to determine the V2 configuration shape.
 See the [full configuration guide](https://opencode.ai/v2/docs/config) for
 every field, examples, config locations, and links to dedicated feature guides.
 
+## [MCP servers](https://opencode.ai/v2/docs/mcp-servers)
+
+Configure MCP servers under `mcp.servers`. Prefer the CLI because it preserves
+unrelated configuration. Use `--global` when the user asks to set up a service
+for themselves without limiting it to the current project; omit it when they
+explicitly want project-local configuration.
+
+```sh
+opencode mcp add <name> --global --url <remote-url>
+opencode mcp list
+```
+
+Remote servers use OAuth by default. If `mcp list` reports that a server needs
+authentication, tell the user to run `/mcps`, select the server, and sign in.
+Do not run `opencode mcp auth` through the shell tool: it starts an interactive
+flow whose authorization link can be hidden in background process output.
+Use the user-facing MCP interface instead.
+
+Report the server as configured but awaiting sign-in until its connection
+status confirms it is connected.
+
+OAuth credentials are stored outside the OpenCode configuration. Do not ask for or
+store an API key when the server supports OAuth. Use header-based credentials
+only when OAuth is unavailable or the user explicitly requires them, and use an
+environment substitution such as `{env:MCP_API_KEY}` instead of writing a
+secret into configuration.
+
 ## [V1 to V2 migration](https://opencode.ai/v2/docs/migrate-v1)
 
 For any request to migrate OpenCode configuration, agents, commands, skills,
 plugins, integrations, or other behavior from V1 to V2, read the full
 [migration guide](https://opencode.ai/v2/docs/migrate-v1) before acting. In
-the repository, its source is `packages/www/content/docs/(Get started)/migrate-v1.mdx`.
+the repository, its source is `services/www/src/docs/content/migrate-v1.mdx`.
 
 V1 config files and `.opencode/` definitions are intended to remain compatible.
 The only intentional breaking changes are the server API and plugin API. Native
@@ -84,8 +155,12 @@ bug.
 
 For questions about creating, configuring, loading, publishing, or migrating
 plugins, fetch the full [plugins guide](https://opencode.ai/v2/docs/build/plugins)
-before answering. This includes questions about the Effect plugin API, hooks,
-transforms, tools, plugin context capabilities, and package entrypoints.
+before answering. Refer to this guide when the user wants to build a plugin. It
+covers hooks, transforms, tools, plugin context capabilities, and package
+entrypoints. Plugins can also extend the TUI; for those, fetch the
+[CLI plugin guide](https://opencode.ai/v2/docs/build/plugins/cli).
+For custom methods and events shared with other plugins or clients, fetch the
+[RPC guide](https://opencode.ai/v2/docs/build/plugins/rpc).
 
 ## [Service](https://opencode.ai/v2/docs/troubleshooting#check-the-background-service)
 
@@ -97,13 +172,13 @@ OpenCode normally discovers or starts the shared background service
 automatically. If the service is stuck or unhealthy, restart it:
 
 ```sh
-opencode2 service restart
+opencode service restart
 ```
 
 Check its status after restarting:
 
 ```sh
-opencode2 service status
+opencode service status
 ```
 
 ## [API](https://opencode.ai/v2/docs/api)
@@ -119,15 +194,15 @@ HTTP method and path or an OpenAPI operation ID.
 Call an endpoint with an HTTP method and path:
 
 ```sh
-opencode2 api get /api/health
+opencode api get /api/info
 ```
 
 Pass a request body with `--data` or `-d`, and additional headers with
 `--header` or `-H`:
 
 ```sh
-opencode2 api post /api/example --data '{"key":"value"}'
-opencode2 api get /api/example --header 'X-Example:value'
+opencode api post /api/example --data '{"key":"value"}'
+opencode api get /api/example --header 'X-Example:value'
 ```
 
 Request bodies default to `Content-Type: application/json`. When OpenCode is
@@ -146,22 +221,32 @@ For questions about connecting an application to OpenCode over the network,
 fetch the full [client guide](https://opencode.ai/v2/docs/build/client) before
 answering.
 
-`@opencode-ai/client` is the generated TypeScript client for the OpenCode HTTP
+`@opencode/client` is the generated TypeScript client for the OpenCode HTTP
 API. Its methods and types come from the same contract as the API reference.
 The default entrypoint exposes Promise-based resource clients and async
-iterables for streaming endpoints. The `@opencode-ai/client/effect` entrypoint
+iterables for streaming endpoints. The `@opencode/client/effect` entrypoint
 exposes typed Effects, Streams, and decoded OpenCode schema values. Its
 `Service` API can discover, start, stop, and authenticate with the local
 background service from a Node application.
+
+## [SDK](https://opencode.ai/v2/docs/build/sdk)
+
+For questions about embedding OpenCode directly in an application, fetch the
+full [SDK guide](https://opencode.ai/v2/docs/build/sdk) before answering. The SDK
+hosts OpenCode in the application without opening an HTTP listener.
+
+Use the [Effect SDK guide](https://opencode.ai/v2/docs/build/sdk/effect) for
+Effect applications. For Cloudflare Durable Objects, use the
+[Cloudflare SDK guide](https://opencode.ai/v2/docs/build/sdk/cloudflare).
 
 ## [Troubleshooting](https://opencode.ai/v2/docs/troubleshooting)
 
 OpenCode runs a client and a background server. Start by determining whether a
 problem belongs to the client, the shared server, or one project.
 
-- Check the service with `opencode2 service status` and verify the API with
-  `opencode2 api get /api/health`.
-- Compare with `opencode2 --standalone`, which runs the TUI with a private
+- Check the service with `opencode service status` and verify the API with
+  `opencode api get /api/info`.
+- Compare with `opencode --standalone`, which runs the TUI with a private
   server, to isolate shared-service issues.
 - Inspect `~/.local/share/opencode/log/opencode.log`. Filter `role=cli` for
   client startup and `role=server` for sessions, providers, plugins,

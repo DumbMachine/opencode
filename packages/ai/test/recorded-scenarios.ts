@@ -1,6 +1,7 @@
 import { expect } from "bun:test"
 import { Effect, Schema } from "effect"
 import {
+  Media,
   LLM,
   LLMEvent,
   LLMRequest,
@@ -164,6 +165,7 @@ export const expectGoldenWeatherToolLoop = (events: ReadonlyArray<LLMEvent>) => 
 export interface GoldenScenarioContext {
   readonly id: string
   readonly model: LanguageModel
+  readonly prompt?: string
   readonly maxTokens?: number
   readonly temperature?: number | false
 }
@@ -181,12 +183,10 @@ const normalizeImageText = (value: string) =>
     .trim()
 
 const encryptedReasoningOptions = {
-  openai: {
-    store: false,
-    include: ["reasoning.encrypted_content"],
-    reasoningEffort: "low",
-    reasoningSummary: "auto",
-  },
+  store: false,
+  include: ["reasoning.encrypted_content"],
+  reasoningEffort: "low",
+  reasoningSummary: "auto",
 } as const
 
 type AssistantTextExpectation = string | RegExp
@@ -300,12 +300,11 @@ const runGeneratedConversation = (context: GoldenScenarioContext, steps: Readonl
 
 const runTextScenario = (context: GoldenScenarioContext) =>
   runGeneratedConversation(context, [
-    user("Reply exactly with: Hello!"),
+    user(context.prompt ?? "Reply exactly with: Hello!"),
     assistant.expectText(/^Hello!?$/, {
       system: "You are concise.",
       maxTokens: context.maxTokens ?? 40,
-      providerOptions:
-        context.model.route.id === "gemini" ? { gemini: { thinkingConfig: { thinkingBudget: 0 } } } : undefined,
+      providerOptions: context.model.route.id === "gemini" ? { thinkingConfig: { thinkingBudget: 0 } } : undefined,
     }),
   ])
 
@@ -332,7 +331,7 @@ const runImageScenario = (context: GoldenScenarioContext) =>
           type: "text",
           text: "The image contains exactly three lowercase English words. Read them left to right and reply with only those words.",
         },
-        { type: "media", mediaType: "image/png", data: yield* restroomImage() },
+        { type: "media", media: Media.base64(yield* restroomImage(), "image/png") },
       ]),
       assistant.expectText(/.+/, {
         system: "Read images carefully. Reply only with the visible text.",
@@ -388,7 +387,7 @@ const runReasoningScenario = (context: GoldenScenarioContext) =>
     user("Think briefly, then reply exactly with: Hello!"),
     assistant.expectText(/^Hello!?$/, {
       system: "Show concise reasoning when the provider supports visible reasoning summaries.",
-      providerOptions: { openai: { reasoningEffort: "low", reasoningSummary: "auto" } },
+      providerOptions: { reasoningEffort: "low", reasoningSummary: "auto" },
       maxTokens: context.maxTokens ?? 120,
       assert: (response) => expect(response.usage?.reasoningTokens ?? 0).toBeGreaterThan(0),
     }),

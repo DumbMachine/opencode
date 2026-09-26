@@ -51,6 +51,12 @@ describe("acp lifecycle subprocess", () => {
     )
 
     expect(selectConfigOption(loaded.configOptions, "model")?.category).toBe("model")
+    const mismatched = await acp.request<LoadSessionResponse>("session/load", {
+      cwd: fixture.root,
+      sessionId: session.sessionId,
+      mcpServers: [],
+    })
+    expect(mismatched.error?.code).toBe(-32602)
   }, 60_000)
 
   test("list request includes a live ACP-created session", async () => {
@@ -75,13 +81,6 @@ describe("acp lifecycle subprocess", () => {
     ).toEqual({})
     const listed = expectOk(await acp.request<ListSessionsResponse>("session/list", { cwd: fixture.home }))
     expect(listed.sessions.some((item) => item.sessionId === session.sessionId)).toBe(false)
-  }, 60_000)
-
-  test("resume capability advertisement", async () => {
-    await using fixture = await createAcpFixture()
-    const initialized = await initialize(fixture.spawn())
-
-    expect(initialized.agentCapabilities?.sessionCapabilities?.resume).toEqual({})
   }, 60_000)
 
   test("resume request returns session config options", async () => {

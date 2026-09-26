@@ -17,7 +17,7 @@ describe("Z.ai Images", () => {
           http: { body: { configured: true, quality: "configured" }, query: { trace: "default" } },
         }).image("glm-image"),
         prompt: "A red circle on a white background",
-        options: {
+        providerOptions: {
           quality: "hd",
           userID: "alias-user",
           user_id: "raw-user",
@@ -31,8 +31,20 @@ describe("Z.ai Images", () => {
       })
 
       expect(response.images).toHaveLength(1)
-      expect(response.image?.mediaType).toBe("application/octet-stream")
-      expect(response.image?.data).toBe("https://cdn.z.ai/generated.png")
+      expect(response.image.mediaType).toBe("application/octet-stream")
+      // Z.ai documents that output URLs expire 30 days after generation; the test clock starts at 0.
+      expect(response.image.source).toEqual({
+        type: "url",
+        url: "https://cdn.z.ai/generated.png",
+        expiresAt: 30 * 24 * 60 * 60 * 1000,
+      })
+      expect(response.notices).toEqual([
+        {
+          type: "moderated",
+          message: "Z.ai Images applied a content filter for future-role at level 4.5",
+          providerMetadata: { zai: { role: "future-role", level: 4.5 } },
+        },
+      ])
       expect(response.providerMetadata).toEqual({
         zai: {
           created: 1_760_335_349,
@@ -78,11 +90,38 @@ describe("Z.ai Images", () => {
     ),
   )
 
+  it.effect("sanitizes unpaired surrogates in outbound image requests", () =>
+    Image.generate({
+      model: ZAI.configure({ apiKey: "test", http: { body: { metadata: { source: "default\uDC00" } } } }).image(
+        "model",
+      ),
+      prompt: "A red circle \uD800 on a white background \u{1F600}",
+    }).pipe(
+      Effect.provide(
+        ImageClient.layer.pipe(
+          Layer.provide(
+            dynamicResponse((input) => {
+              expect(JSON.parse(input.text)).toMatchObject({
+                prompt: "A red circle \uFFFD on a white background \u{1F600}",
+                metadata: { source: "default\uFFFD" },
+              })
+              return Effect.succeed(
+                input.respond(JSON.stringify({ data: [{ url: "https://example.test/image.jpg" }] }), {
+                  headers: { "content-type": "application/json" },
+                }),
+              )
+            }),
+          ),
+        ),
+      ),
+    ),
+  )
+
   it.effect("lets raw native options override aliases", () =>
     Image.generate({
       model: ZAI.configure({ apiKey: "test" }).image("model"),
       prompt: "test",
-      options: { quality: "future-quality", userID: "x", user_id: "raw-user" },
+      providerOptions: { quality: "future-quality", userID: "x", user_id: "raw-user" },
     }).pipe(
       Effect.provide(
         ImageClient.layer.pipe(

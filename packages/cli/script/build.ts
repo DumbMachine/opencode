@@ -1,14 +1,15 @@
 #!/usr/bin/env bun
 
 import { $ } from "bun"
-import { rm } from "fs/promises"
+import { mkdir, rm } from "fs/promises"
 import path from "path"
-import { Script } from "@opencode-ai/script"
+import { Script } from "@opencode/script"
 import { createSolidTransformPlugin } from "@opentui/solid/bun-plugin"
 import type { BunPlugin } from "bun"
 import pkg from "../package.json"
 import { buildAppArchive } from "./app-assets"
 import { verifyArtifact, verifySimulationGraph } from "./verify-artifact"
+import { resolveOpencodePty } from "./opencode-pty"
 
 const dir = path.resolve(import.meta.dirname, "..")
 const binary = "opencodepg"
@@ -27,6 +28,7 @@ const requestedTarget = process.argv.find((arg) => arg.startsWith("--target="))?
 const skipInstall = process.argv.includes("--skip-install")
 const skipWebUi = process.argv.includes("--skip-web-ui")
 const solidPlugin = createSolidTransformPlugin()
+const releaseAssets = new Map<string, Promise<Map<string, string>>>()
 
 const allTargets: {
   os: string
@@ -60,7 +62,8 @@ const targets =
       : allTargets
 if (!targets.length) throw new Error(`Unknown build target: ${requestedTarget}`)
 
-if (!skipInstall) await $`bun install --os="*" --cpu="*" @opentui/core@${pkg.dependencies["@opentui/core"]}`
+if (!skipInstall)
+  await $`bun install --os="*" --cpu="*" @opentui/core@${pkg.dependencies["@opentui/core"]} @opencode-ai/pty@${pkg.dependencies["@opencode-ai/pty"]}`
 const appArchive = await buildAppArchive(Script.channel, { skipBuild: skipWebUi })
 const appAssetsPlugin: BunPlugin = {
   name: "opencode-app-assets",
@@ -71,12 +74,29 @@ const appAssetsPlugin: BunPlugin = {
     }))
     build.onLoad({ filter: /^opencode-app-assets$/, namespace: "opencode" }, () => ({
       loader: "js",
-      contents: `export default ${JSON.stringify(appArchive)}`,
+      contents: `export default ${appArchive}`,
     }))
   },
 }
 
 for (const item of targets) {
+  const opencodePty = await resolveOpencodePty({
+    platform: item.os,
+    arch: item.arch,
+    ...(item.os === "linux" ? { libc: item.abi ?? "glibc" } : {}),
+  })
+  const opencodePtyPlugin: BunPlugin = {
+    name: "opencode-pty-binary",
+    setup(build) {
+      build.onLoad({ filter: /persistent-pty[/\\]pty-binding\.ts$/ }, () => ({
+        loader: "js",
+        contents: opencodePty
+          ? `import file from ${JSON.stringify(opencodePty.source)} with { type: "file" }
+export default { path: file, version: ${JSON.stringify(opencodePty.version)}, sha256: ${JSON.stringify(opencodePty.sha256)} }`
+          : "export default undefined",
+      }))
+    },
+  }
   const simulationInputs = new Set<string>()
   const simulationGraphPlugin: BunPlugin = {
     name: "opencode-simulation-graph",
@@ -91,7 +111,7 @@ for (const item of targets) {
   const parcelWatcherPlugin: BunPlugin = {
     name: "parcel-watcher-binding",
     setup(build) {
-      build.onLoad({ filter: /filesystem\/watcher-binding\.ts$/ }, () => ({
+      build.onLoad({ filter: /filesystem[/\\]watcher-binding\.ts$/ }, () => ({
         contents: `export default () => require(${JSON.stringify(parcelWatcherPackage)})`,
         loader: "js",
       }))
@@ -99,15 +119,17 @@ for (const item of targets) {
   }
   const target = targetName(item)
   const name = target.replace(binary, "cli")
+  const executablePath = await compileExecutable(item)
   console.log(`building ${name}`)
   const result = await Bun.build({
     entrypoints: ["./src/index.ts"],
     tsconfig: "./tsconfig.json",
-    plugins: [appAssetsPlugin, solidPlugin, parcelWatcherPlugin, simulationGraphPlugin],
+    plugins: [appAssetsPlugin, solidPlugin, parcelWatcherPlugin, opencodePtyPlugin, simulationGraphPlugin],
     external: ["node-gyp"],
     format: "esm",
     minify: true,
-    sourcemap: "inline",
+    bytecode: true,
+    sourcemap: Script.channel === "dev" || Script.channel === "local" ? "inline" : "none",
     splitting: true,
     compile: {
       autoloadBunfig: false,
@@ -115,14 +137,22 @@ for (const item of targets) {
       autoloadTsconfig: true,
       autoloadPackageJson: true,
       target: target.replace(binary, "bun") as Bun.Build.CompileTarget,
+      ...(executablePath ? { executablePath } : {}),
       outfile: path.join(outdir, name, "bin", binary),
-      execArgv: [`--user-agent=${binary}/${Script.version}`, "--use-system-ca", "--"],
+      execArgv: [
+        "--smol",
+        `--user-agent=opencode/${Script.channel}/${Script.version}/cli`,
+        "--use-system-ca",
+        "--no-warnings",
+        "--",
+      ],
       windows: {},
     },
     define: {
       OPENCODE_VERSION: `'${Script.version}'`,
-      OPENCODE_CLI_NAME: `'${binary}'`,
+      OPENCODE_CLI_NAME: "'opencode'",
       OPENCODE_CHANNEL: `'${Script.channel}'`,
+      OPENCODE_ARTIFACT: `'cli'`,
       OPENCODE_LIBC: item.os === "linux" ? `'${item.abi ?? "glibc"}'` : "undefined",
       // FFF_LIBC selects the fff native lib variant: "musl" or "gnu".
       FFF_LIBC: item.os === "linux" ? `'${item.abi ?? "gnu"}'` : "undefined",
@@ -140,7 +170,7 @@ for (const item of targets) {
     path.join(outdir, name, "package.json"),
     JSON.stringify(
       {
-        name: `@opencode-ai/${name}`,
+        name: `@opencode/${name}`,
         version: Script.version,
         license: "MIT",
         repository: { type: "git", url: "git+https://github.com/anomalyco/opencode.git" },
@@ -152,6 +182,76 @@ for (const item of targets) {
     ),
   )
   await verifyArtifact(path.join(outdir, name))
+}
+
+async function compileExecutable(item: (typeof allTargets)[number]) {
+  const release = process.env.BUN_COMPILE_RELEASE
+  if (!release) return
+
+  const platform = item.os === "win32" ? "windows" : item.os
+  const name = [
+    "bun",
+    platform,
+    item.arch === "arm64" ? "aarch64" : item.arch,
+    item.abi,
+    item.avx2 === false ? "baseline" : undefined,
+  ]
+    .filter(Boolean)
+    .join("-")
+  const cache = path.join(outdir, ".bun", release)
+  const executable = path.join(cache, name, item.os === "win32" ? "bun.exe" : "bun")
+  if (await Bun.file(executable).exists()) return executable
+
+  await mkdir(cache, { recursive: true })
+  const archive = path.join(cache, `${name}.zip`)
+  const assets = await compileReleaseAssets(release)
+  const url = assets.get(`${name}.zip`)
+  if (!url) throw new Error(`Bun release ${release} does not include ${name}.zip`)
+  const token = process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN
+  const response = await fetch(url, {
+    headers: { Accept: "application/octet-stream", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+  })
+  if (!response.ok) throw new Error(`Failed to download ${name} from Bun release ${release}: ${response.status}`)
+  // Stream to disk instead of `Bun.write(archive, response)`: passing the Response object
+  // hangs forever if it gets GC'd mid-download (https://github.com/oven-sh/bun/issues/40278).
+  const sink = Bun.file(archive).writer()
+  for await (const chunk of response.body!) await sink.write(chunk)
+  await sink.end()
+  await $`unzip -oq ${archive} -d ${cache}`
+  await rm(archive)
+  return executable
+}
+
+function compileReleaseAssets(release: string) {
+  const existing = releaseAssets.get(release)
+  if (existing) return existing
+  const pending = fetch(`https://api.github.com/repos/oven-sh/bun/releases/tags/${release}?cache=${Date.now()}`)
+    .then(async (response) => {
+      if (!response.ok) throw new Error(`Failed to resolve Bun release ${release}: ${response.status}`)
+      const data: unknown = await response.json()
+      if (typeof data !== "object" || data === null || !("assets" in data) || !Array.isArray(data.assets)) {
+        throw new Error(`Bun release ${release} returned invalid metadata`)
+      }
+      return new Map(
+        data.assets
+          .filter(
+            (asset): asset is { name: string; url: string } =>
+              typeof asset === "object" &&
+              asset !== null &&
+              "name" in asset &&
+              typeof asset.name === "string" &&
+              "url" in asset &&
+              typeof asset.url === "string",
+          )
+          .map((asset) => [asset.name, asset.url]),
+      )
+    })
+    .catch((error) => {
+      releaseAssets.delete(release)
+      throw error
+    })
+  releaseAssets.set(release, pending)
+  return pending
 }
 
 function targetName(item: (typeof allTargets)[number]) {

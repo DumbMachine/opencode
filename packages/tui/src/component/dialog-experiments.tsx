@@ -13,13 +13,7 @@ type Experiment = {
 // In-flight features anyone can opt into. Each entry is temporary: an
 // experiment either graduates (delete the entry, make the behavior
 // unconditional) or dies (delete the entry and the branch it gated).
-export const experiments: Experiment[] = [
-  {
-    id: "tab_scroll",
-    title: "Remember tab scroll",
-    description: "Keep each open tab's reading position and show a shortcut back to the bottom.",
-  },
-]
+export const experiments: Experiment[] = []
 
 export function DialogExperiments() {
   const config = useConfig()
@@ -63,7 +57,7 @@ export function DialogExperiments() {
       onSelect={(option) => void change(option.value)}
       emptyView={
         <box paddingLeft={4} paddingRight={4}>
-          <text fg={theme.text.subdued}>No experiments available</text>
+          <text fg={theme.text.muted}>No experiments available</text>
         </box>
       }
       footerHints={experiments.length > 0 ? [{ title: "←/→", label: "change" }] : []}

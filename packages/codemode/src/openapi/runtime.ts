@@ -4,7 +4,7 @@ import { ToolError, toolError } from "../tool-error.js"
 import { isRecord, own } from "./spec.js"
 import type { AppliedAuth, Credential, Plan, SecurityScheme } from "./types.js"
 
-const decodeJson = Schema.decodeUnknownOption(Schema.UnknownFromJsonString)
+const decodeJson = Schema.decodeUnknownOption(Schema.fromJsonString(Schema.Unknown))
 const maxErrorBodyChars = 1_024
 const maxResponseBodyBytes = 50 * 1024 * 1024
 
@@ -24,8 +24,8 @@ export const invoke = (plan: Plan, input: unknown): Effect.Effect<unknown, unkno
     const response = yield* client
       .execute(request)
       .pipe(
-        Effect.catch((cause) =>
-          Effect.fail(toolError(`${plan.operation.method} ${plan.operation.path} failed: transport error`, cause)),
+        Effect.mapError((cause) =>
+          toolError(`${plan.operation.method} ${plan.operation.path} failed: transport error`, cause),
         ),
       )
     const text = yield* readResponseBody(response, plan)

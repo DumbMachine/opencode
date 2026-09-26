@@ -1,7 +1,7 @@
 import { homedir } from "node:os"
 import { isAbsolute, join } from "node:path"
 import { Config, Effect, FileSystem, Schema } from "effect"
-import { PositiveInt } from "@opencode-ai/core/schema"
+import { PositiveInt } from "@opencode/core/schema"
 
 const InstanceName = Schema.String.check(
   Schema.makeFilter((value) =>
@@ -43,7 +43,7 @@ export const Manifest = Schema.Struct({
 })
 export interface Manifest extends Schema.Schema.Type<typeof Manifest> {}
 
-export class ResolveError extends Schema.TaggedErrorClass<ResolveError>()("DriveManifest.ResolveError", {
+export class ResolveError extends Schema.TaggedError<ResolveError>()("DriveManifest.ResolveError", {
   reason: Schema.Literals(["config", "not-found", "read", "decode"]),
   path: Schema.optionalKey(Schema.String),
   message: Schema.String,

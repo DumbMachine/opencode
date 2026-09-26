@@ -141,7 +141,7 @@ describe("OpenRouter", () => {
         LLM.request({
           model: OpenRouter.configure({
             apiKey: "test-key",
-            providerOptions: { openrouter: { usage: false } },
+            providerOptions: { usage: false },
           }).model("openai/gpt-4o-mini"),
           cache: "none",
           prompt: "Hello",
@@ -152,6 +152,27 @@ describe("OpenRouter", () => {
     }),
   )
 
+  it.effect("fits the reasoning budget to half the output limit", () =>
+    Effect.gen(function* () {
+      const reasoning = (maxTokens: number | undefined, value: Record<string, unknown>) =>
+        compileRequest(
+          LLM.request({
+            model: OpenRouter.configure({ apiKey: "test-key" }).model("qwen/qwen3.8-flash"),
+            cache: "none",
+            prompt: "Hello",
+            ...(maxTokens === undefined ? {} : { generation: { maxTokens } }),
+            providerOptions: { reasoning: value },
+          }),
+        ).pipe(Effect.map((prepared) => prepared.body.reasoning))
+
+      expect(yield* reasoning(32_000, { max_tokens: 131_071 })).toEqual({ max_tokens: 16_000 })
+      expect(yield* reasoning(131_072, { max_tokens: 65_536 })).toEqual({ max_tokens: 65_536 })
+      expect(yield* reasoning(1_500, { max_tokens: 65_536 })).toEqual({ max_tokens: 1_024 })
+      expect(yield* reasoning(undefined, { max_tokens: 131_071 })).toEqual({ max_tokens: 131_071 })
+      expect(yield* reasoning(32_000, { effort: "high" })).toEqual({ effort: "high" })
+    }),
+  )
+
   it.effect("applies OpenRouter payload options from the model helper", () =>
     Effect.gen(function* () {
       const prepared = yield* compileRequest(
@@ -159,17 +180,15 @@ describe("OpenRouter", () => {
           model: OpenRouter.configure({
             apiKey: "test-key",
             providerOptions: {
-              openrouter: {
-                usage: true,
-                reasoning: { effort: "high" },
-                models: ["anthropic/claude-sonnet-4.6", "google/gemini-3.1-pro"],
-                provider: { order: ["anthropic", "google"], require_parameters: true },
-                plugins: [{ id: "response-healing" }],
-                web_search_options: { engine: "native", max_results: 3 },
-                debug: { echo_upstream_body: true },
-                user: "user_123",
-                future_option: { enabled: true },
-              },
+              usage: true,
+              reasoning: { effort: "high" },
+              models: ["anthropic/claude-sonnet-4.6", "google/gemini-3.1-pro"],
+              provider: { order: ["anthropic", "google"], require_parameters: true },
+              plugins: [{ id: "response-healing" }],
+              web_search_options: { engine: "native", max_results: 3 },
+              debug: { echo_upstream_body: true },
+              user: "user_123",
+              future_option: { enabled: true },
             },
           }).model("anthropic/claude-3.7-sonnet:thinking"),
           prompt: "Think briefly.",
@@ -192,6 +211,21 @@ describe("OpenRouter", () => {
     }),
   )
 
+  it.effect("omits the prompt cache key when caching is disabled", () =>
+    Effect.gen(function* () {
+      const prepared = yield* compileRequest(
+        LLM.request({
+          model: OpenRouter.configure({ apiKey: "test-key" }).model("openai/gpt-4o-mini"),
+          prompt: "Hello",
+          promptCacheKey: "session_123",
+          cache: "none",
+        }),
+      )
+
+      expect(prepared.body).not.toHaveProperty("prompt_cache_key")
+    }),
+  )
+
   it.effect("filters invalid known OpenRouter options while preserving extensions", () =>
     Effect.gen(function* () {
       const invalid: Record<string, unknown> = {
@@ -210,7 +244,7 @@ describe("OpenRouter", () => {
         LLM.request({
           model: OpenRouter.configure({
             apiKey: "test-key",
-            providerOptions: { openrouter: invalid },
+            providerOptions: invalid,
           }).model("openai/gpt-4o-mini"),
           prompt: "Hello",
         }),
@@ -282,7 +316,7 @@ describe("OpenRouter", () => {
               {
                 type: "reasoning",
                 text: "Thinking",
-                providerMetadata: { openai: { reasoningField: "reasoning", reasoningDetails: details } },
+                providerMetadata: { openrouter: { reasoningField: "reasoning", reasoningDetails: details } },
               },
             ]),
           ],
@@ -292,18 +326,19 @@ describe("OpenRouter", () => {
       expect(prepared.body.messages).toEqual([
         {
           role: "assistant",
-          content: null,
+          content: "",
           reasoning: "Thinking",
+          reasoning_content: undefined,
           reasoning_details: details,
+          reasoning_text: undefined,
         },
       ])
     }),
   )
 
-  it.effect("preserves opaque and duplicate continuation details", () =>
+  it.effect("drops unrecognized details and preserves duplicate continuation details", () =>
     Effect.gen(function* () {
       const details = [
-        { type: "reasoning.future", format: "provider-v2", state: { opaque: true } },
         { type: "reasoning.encrypted", id: "state", data: "opaque" },
         { type: "reasoning.encrypted", id: "state", data: "opaque" },
       ]
@@ -315,14 +350,29 @@ describe("OpenRouter", () => {
             Message.assistant({
               type: "reasoning",
               text: "Thinking",
-              providerMetadata: { openai: { reasoningField: "reasoning", reasoningDetails: details } },
+              providerMetadata: {
+                openrouter: {
+                  reasoningField: "reasoning",
+                  reasoningDetails: [
+                    { type: "reasoning.future", format: "provider-v2", state: { opaque: true } },
+                    ...details,
+                  ],
+                },
+              },
             }),
           ],
         }),
       )
 
       expect(prepared.body.messages).toEqual([
-        { role: "assistant", content: null, reasoning: "Thinking", reasoning_details: details },
+        {
+          role: "assistant",
+          content: "",
+          reasoning: "Thinking",
+          reasoning_content: undefined,
+          reasoning_details: details,
+          reasoning_text: undefined,
+        },
       ])
     }),
   )
@@ -341,14 +391,21 @@ describe("OpenRouter", () => {
             Message.assistant({
               type: "reasoning",
               text: "AB",
-              providerMetadata: { openai: { reasoningField: "reasoning", reasoningDetails: details } },
+              providerMetadata: { openrouter: { reasoningField: "reasoning", reasoningDetails: details } },
             }),
           ],
         }),
       )
 
       expect(prepared.body.messages).toEqual([
-        { role: "assistant", content: null, reasoning: "AB", reasoning_details: details },
+        {
+          role: "assistant",
+          content: "",
+          reasoning: "AB",
+          reasoning_content: undefined,
+          reasoning_details: details,
+          reasoning_text: undefined,
+        },
       ])
     }),
   )
@@ -363,7 +420,16 @@ describe("OpenRouter", () => {
         }),
       )
 
-      expect(prepared.body.messages).toEqual([{ role: "assistant", content: null }])
+      expect(prepared.body.messages).toEqual([
+        {
+          role: "assistant",
+          content: "",
+          reasoning: undefined,
+          reasoning_content: undefined,
+          reasoning_details: undefined,
+          reasoning_text: undefined,
+        },
+      ])
     }),
   )
 })

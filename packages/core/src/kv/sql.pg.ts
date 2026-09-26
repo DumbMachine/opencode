@@ -4,6 +4,6 @@ import type { KV } from "../kv.js"
 
 export const KVTable = pgTable("kv", {
   key: text().primaryKey(),
-  value: text({ mode: "json" }).$type<KV.Value>().notNull(),
+  value: text().$type<KV.Value>().notNull(),
   ...Timestamps,
 })

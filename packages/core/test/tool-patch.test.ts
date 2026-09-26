@@ -2,30 +2,52 @@ import fs from "fs/promises"
 import path from "path"
 import { describe, expect } from "bun:test"
 import { Effect, Exit, Layer, Schema } from "effect"
-import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
-import { LayerNode } from "@opencode-ai/util/effect/layer-node"
-import { Environment } from "@opencode-ai/core/environment/index"
-import { FSUtil } from "@opencode-ai/util/fs-util"
-import { Formatter } from "@opencode-ai/core/formatter"
-import { FileMutation } from "@opencode-ai/core/file-mutation"
-import { Location } from "@opencode-ai/core/location"
-import { Permission } from "@opencode-ai/core/permission"
-import { AbsolutePath } from "@opencode-ai/core/schema"
-import { Session } from "@opencode-ai/core/session"
-import { Tool } from "@opencode-ai/core/tool"
-import { PatchTool } from "@opencode-ai/core/tool/plugin/patch"
+import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
+import { LayerNode } from "@opencode/util/effect/layer-node"
+import { Environment } from "@opencode/core/environment/index"
+import { Formatter } from "@opencode/core/formatter"
+import { FileMutation } from "@opencode/core/file-mutation"
+import { Location } from "@opencode/core/location"
+import { FileAccess } from "@opencode/core/file-access"
+import { Model } from "@opencode/core/model"
+import { Permission } from "@opencode/core/permission"
+import { Provider } from "@opencode/core/provider"
+import { AbsolutePath } from "@opencode/core/schema"
+import { Session } from "@opencode/core/session"
+import { Tool } from "@opencode/core/tool"
+import { PatchTool } from "@opencode/core/tool/plugin/patch"
+import type { SessionHooks } from "@opencode/plugin/effect/session"
 import { transformEnvironmentFiles } from "./fixture/environment"
 import { location } from "./fixture/location"
 import { tmpdir } from "./fixture/tmpdir"
-import { makeLocationNode } from "@opencode-ai/util/effect/app-node"
+import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { testEffect } from "./lib/effect"
 import { permissionLayer } from "./lib/permission"
 import { toolIdentity, executeTool, registerToolPlugin, toolDefinitions } from "./lib/tool"
 
+const sessionHooks = new Map<string, (event: SessionHooks["context"]) => Effect.Effect<void>>()
 const patchToolNode = makeLocationNode({
   name: "test/patch-tool-plugin",
-  layer: Layer.effectDiscard(registerToolPlugin(PatchTool.Plugin)),
-  deps: [Tool.node, FileMutation.node, Environment.node, Formatter.node, Location.node, Permission.node],
+  layer: Layer.effectDiscard(
+    registerToolPlugin(PatchTool.Plugin, {
+      session: {
+        hook: (name, callback) =>
+          Effect.sync(() => {
+            sessionHooks.set(name, callback as (event: SessionHooks["context"]) => Effect.Effect<void>)
+            return { dispose: Effect.void }
+          }),
+      },
+    }),
+  ),
+  deps: [
+    Tool.node,
+    FileAccess.node,
+    FileMutation.node,
+    Environment.node,
+    Formatter.node,
+    Location.node,
+    Permission.node,
+  ],
 })
 
 const sessionID = Session.ID.make("ses_patch_tool_test")
@@ -91,10 +113,9 @@ const withTool = <A, E, R>(
     return yield* body(yield* Tool.Service)
   }).pipe(
     Effect.provide(
-      AppNodeBuilder.build(LayerNode.group([Tool.node, FileMutation.node, patchToolNode]), [
-        [
-          Environment.node,
-          transformEnvironmentFiles(activeLocation, (files) => ({
+      AppNodeBuilder.build(LayerNode.group([Tool.node, FileAccess.node, FileMutation.node, patchToolNode]), [
+        Environment.node.replace(
+          transformEnvironmentFiles((files) => ({
             read: (target, range) =>
               Effect.sync(() => {
                 if (!editApproved) readsBeforeEditApproval++
@@ -112,10 +133,10 @@ const withTool = <A, E, R>(
               return files.write(target, content)
             },
           })),
-        ],
-        [Location.node, activeLocation],
-        [Formatter.node, formatter],
-        [Permission.node, permission],
+        ),
+        Location.node.replace(activeLocation),
+        Formatter.node.replace(formatter),
+        Permission.node.replace(permission),
       ]),
     ),
   )
@@ -146,6 +167,34 @@ const withTempTool = <A, E, R>(body: (directory: string, registry: Tool.Interfac
   )
 
 describe("PatchTool", () => {
+  it.live("selects the same edit tools for compaction and generate requests as the agent loop", () =>
+    withTempTool(() =>
+      Effect.gen(function* () {
+        const event = (id: string): SessionHooks["context"] => ({
+          sessionID,
+          agent: toolIdentity.agent,
+          model: Model.Ref.make({ providerID: Provider.ID.make("test"), id: Model.ID.make(id) }),
+          system: [],
+          messages: [],
+          tools: Object.fromEntries(
+            ["patch", "edit", "write", "read"].map((name) => [name, { description: name, input: { type: "object" } }]),
+          ),
+          options: {},
+        })
+        for (const name of ["context", "compaction", "generate"]) {
+          const hook = sessionHooks.get(name)
+          expect(hook).toBeDefined()
+          const claude = event("claude-sonnet-4")
+          yield* hook!(claude)
+          expect(Object.keys(claude.tools)).toEqual(["edit", "write", "read"])
+          const gpt = event("gpt-5")
+          yield* hook!(gpt)
+          expect(Object.keys(gpt.tools)).toEqual(["patch", "read"])
+        }
+      }),
+    ),
+  )
+
   it.live("registers and sequentially applies add, update, and delete hunks", () =>
     Effect.acquireUseRelease(
       Effect.promise(() => tmpdir()),
@@ -231,6 +280,22 @@ describe("PatchTool", () => {
         )
       },
       (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ),
+  )
+
+  it.live("replaces a file with a directory containing an added file", () =>
+    withTempTool((directory, registry) =>
+      Effect.gen(function* () {
+        yield* Effect.promise(() => fs.writeFile(path.join(directory, "parent"), "before\n"))
+        const settled = yield* executeTool(
+          registry,
+          call("*** Begin Patch\n*** Delete File: parent\n*** Add File: parent/child.txt\n+after\n*** End Patch"),
+        )
+        expect(settled.status).toBe("completed")
+        expect(yield* Effect.promise(() => fs.readFile(path.join(directory, "parent/child.txt"), "utf8"))).toBe(
+          "after\n",
+        )
+      }),
     ),
   )
 
@@ -482,6 +547,42 @@ describe("PatchTool", () => {
           },
         ])
       }),
+    ),
+  )
+
+  it.live("uses Location-relative resources for move targets in a nested Location", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) => {
+        reset()
+        const active = path.join(tmp.path, "nested", "location")
+        const source = path.join(active, "old.txt")
+        return Effect.promise(() =>
+          fs.mkdir(active, { recursive: true }).then(() => fs.writeFile(source, "before\n")),
+        ).pipe(
+          Effect.andThen(
+            withTool(
+              active,
+              (registry) =>
+                Effect.gen(function* () {
+                  const settled = yield* executeTool(
+                    registry,
+                    call(
+                      "*** Begin Patch\n*** Update File: old.txt\n*** Move to: moved.txt\n@@\n-before\n+after\n*** End Patch",
+                    ),
+                  )
+                  expect(settled).toMatchObject({
+                    status: "completed",
+                    output: { applied: [{ resource: "moved.txt" }] },
+                  })
+                  expect(assertions).toMatchObject([{ action: "edit", resources: ["old.txt", "moved.txt"] }])
+                }),
+              tmp.path,
+            ),
+          ),
+        )
+      },
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
     ),
   )
 
@@ -781,8 +882,15 @@ describe("PatchTool", () => {
       Effect.promise(() => Promise.all([tmpdir(), tmpdir()])),
       ([active, outside]) => {
         reset()
-        const target = path.join(outside.path, "external.txt")
-        return Effect.promise(() => fs.writeFile(target, "before\n")).pipe(
+        const repository = path.join(outside.path, "repository")
+        const directory = path.join(repository, "nested")
+        const target = path.join(directory, "external.txt")
+        return Effect.promise(() =>
+          Promise.all([
+            fs.mkdir(path.join(repository, ".git"), { recursive: true }),
+            fs.mkdir(directory, { recursive: true }).then(() => fs.writeFile(target, "before\n")),
+          ]),
+        ).pipe(
           Effect.andThen(
             withTool(active.path, (registry) =>
               Effect.gen(function* () {
@@ -793,6 +901,15 @@ describe("PatchTool", () => {
                   ),
                 ).toMatchObject({ status: "completed" })
                 expect(assertions.map((input) => input.action)).toEqual(["external_directory", "edit"])
+                expect(assertions[0]).toMatchObject({
+                  resources: [path.join(directory, "*").replaceAll("\\", "/")],
+                  save: [path.join(repository, "*").replaceAll("\\", "/")],
+                  metadata: {
+                    filepath: target,
+                    parentDir: directory,
+                  },
+                })
+                expect(assertions[1]?.resources).toEqual([target.replaceAll("\\", "/")])
                 expect(readsBeforeEditApproval).toBe(1)
                 expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("after\n")
               }),
@@ -880,6 +997,7 @@ describe("PatchTool", () => {
                     ),
                   ).toMatchObject({ status: "completed" })
                   expect(assertions.map((input) => input.action)).toEqual(["edit"])
+                  expect(assertions[0]?.resources).toEqual(["../sibling.txt"])
                   expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("after\n")
                 }),
               tmp.path,
@@ -956,6 +1074,53 @@ describe("PatchTool", () => {
     ),
   )
 
+  it.live("uses canonical external permissions and resources for a move destination", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => Promise.all([tmpdir(), tmpdir()])),
+      ([active, outside]) => {
+        reset()
+        const source = path.join(active.path, "source.txt")
+        const destination = path.join(outside.path, "moved.txt")
+        return Effect.promise(() => fs.writeFile(source, "before\n")).pipe(
+          Effect.andThen(
+            withTool(active.path, (registry) =>
+              Effect.gen(function* () {
+                const settled = yield* executeTool(
+                  registry,
+                  call(
+                    `*** Begin Patch\n*** Update File: source.txt\n*** Move to: ${destination}\n@@\n-before\n+after\n*** End Patch`,
+                  ),
+                )
+                expect(settled).toMatchObject({
+                  status: "completed",
+                  output: { applied: [{ resource: destination.replaceAll("\\", "/") }] },
+                })
+                expect(assertions).toMatchObject([
+                  {
+                    action: "external_directory",
+                    resources: [path.join(outside.path, "*").replaceAll("\\", "/")],
+                    save: [path.join(outside.path, "*").replaceAll("\\", "/")],
+                    metadata: { filepath: destination, parentDir: outside.path },
+                  },
+                  {
+                    action: "edit",
+                    resources: ["source.txt", destination.replaceAll("\\", "/")],
+                  },
+                ])
+                expect(yield* exists(source)).toBe(false)
+                expect(yield* Effect.promise(() => fs.readFile(destination, "utf8"))).toBe("after\n")
+              }),
+            ),
+          ),
+        )
+      },
+      ([active, outside]) =>
+        Effect.promise(() =>
+          Promise.all([active[Symbol.asyncDispose](), outside[Symbol.asyncDispose]()]).then(() => undefined),
+        ),
+    ),
+  )
+
   it.live("approves each external file under the same parent", () =>
     Effect.acquireUseRelease(
       Effect.promise(() => Promise.all([tmpdir(), tmpdir()])),
@@ -983,9 +1148,7 @@ describe("PatchTool", () => {
                   "edit",
                 ])
                 expect(assertions[0]?.resources).toEqual([
-                  process.platform === "win32"
-                    ? FSUtil.normalizePathPattern(path.join(outside.path, "*"))
-                    : path.join(yield* Effect.promise(() => fs.realpath(outside.path)), "*").replaceAll("\\", "/"),
+                  path.join(yield* Effect.promise(() => fs.realpath(outside.path)), "*").replaceAll("\\", "/"),
                 ])
                 expect(assertions[1]?.resources).toEqual(assertions[0]?.resources)
               }),

@@ -1,6 +1,6 @@
 import { describe, expect } from "bun:test"
 import { Effect, Schema, Stream } from "effect"
-import { LLM, LLMResponse, Message, ToolDefinition, type LanguageModel } from "../../src/index.js"
+import { LLM, LLMResponse, Message, ToolDefinition, type LanguageModel, Media } from "../../src/index.js"
 import { AmazonBedrock, Anthropic, Google, OpenAI, XAI } from "../../src/providers.js"
 import { LLMClient } from "../../src/route.js"
 import { Tool } from "../../src/tool.js"
@@ -64,7 +64,7 @@ const targets: ReadonlyArray<{
     id: "xai",
     name: "xAI Grok 4.5",
     provider: "xai",
-    protocol: "openai-responses",
+    protocol: "xai-responses",
     requires: "XAI_API_KEY",
     filename: "verification.pdf",
     maxTokens: 40,
@@ -131,7 +131,7 @@ describe("PDF recorded", () => {
               generation: { maxTokens: target.maxTokens, temperature: 0 },
               messages: [
                 Message.user([
-                  { type: "media", mediaType: "application/pdf", data: PDF, filename: target.filename },
+                  { type: "media", media: Media.base64(PDF, "application/pdf"), filename: target.filename },
                   { type: "text", text: prompt },
                 ]),
               ],

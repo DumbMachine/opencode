@@ -110,6 +110,7 @@ const schema: Omit<DatabaseMigration.Migration, "id"> = {
           \`time_created\` integer NOT NULL,
           \`time_updated\` integer NOT NULL,
           \`time_initialized\` integer,
+          \`time_active\` integer DEFAULT 0 NOT NULL,
           \`sandboxes\` text NOT NULL,
           \`commands\` text
         );
@@ -209,6 +210,9 @@ const schema: Omit<DatabaseMigration.Migration, "id"> = {
           \`model\` text,
           \`time_created\` integer NOT NULL,
           \`time_updated\` integer NOT NULL,
+          \`time_idle\` integer,
+          \`time_viewed\` integer,
+          \`idle_outcome\` text,
           \`time_compacting\` integer,
           \`time_archived\` integer,
           \`time_suspended\` integer,
@@ -220,7 +224,7 @@ const schema: Omit<DatabaseMigration.Migration, "id"> = {
         CREATE TABLE \`workspace\` (
           \`id\` text PRIMARY KEY,
           \`provider\` text NOT NULL,
-          \`binding\` text NOT NULL,
+          \`binding\` text,
           \`created_at\` integer NOT NULL,
           \`last_used_at\` integer NOT NULL
         );

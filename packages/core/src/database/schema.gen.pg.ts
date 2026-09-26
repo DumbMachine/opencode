@@ -91,6 +91,7 @@ const schema: Omit<DatabaseMigration.Migration, "id"> = {
           "time_created" BIGINT NOT NULL,
           "time_updated" BIGINT NOT NULL,
           "time_initialized" BIGINT,
+          "time_active" BIGINT DEFAULT 0 NOT NULL,
           "sandboxes" text NOT NULL,
           "commands" text
         );
@@ -146,6 +147,9 @@ const schema: Omit<DatabaseMigration.Migration, "id"> = {
           "model" text,
           "time_created" BIGINT NOT NULL,
           "time_updated" BIGINT NOT NULL,
+          "time_idle" BIGINT,
+          "time_viewed" BIGINT,
+          "idle_outcome" text,
           "time_compacting" BIGINT,
           "time_archived" BIGINT,
           "time_suspended" BIGINT,

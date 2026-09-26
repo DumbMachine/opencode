@@ -1,16 +1,16 @@
 import { describe, expect } from "bun:test"
-import { Cause, DateTime, Deferred, Effect, Exit, Fiber, Layer, Option, Ref, Schema, Stream } from "effect"
-import { Bus } from "@opencode-ai/core/bus"
-import { Event } from "@opencode-ai/schema/event"
-import { Session } from "@opencode-ai/schema/session"
-import { SessionEvent } from "@opencode-ai/schema/session-event"
-import { Database } from "@opencode-ai/core/database/database"
-import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
-import { LayerNode } from "@opencode-ai/util/effect/layer-node"
-import { EventSequenceTable, EventTable } from "@opencode-ai/core/event/sql"
-import { Location } from "@opencode-ai/core/location"
-import { AbsolutePath } from "@opencode-ai/core/schema"
-import { Workspace } from "@opencode-ai/core/workspace"
+import { Cause, Deferred, Effect, Exit, Fiber, Layer, Ref, Schema, Stream } from "effect"
+import { Bus } from "@opencode/core/bus"
+import { Event } from "@opencode/schema/event"
+import { Session } from "@opencode/schema/session"
+import { SessionEvent } from "@opencode/schema/session-event"
+import { Database } from "@opencode/core/database/database"
+import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
+import { LayerNode } from "@opencode/util/effect/layer-node"
+import { EventSequenceTable, EventTable } from "@opencode/core/event/sql"
+import { Location } from "@opencode/core/location"
+import { AbsolutePath } from "@opencode/core/schema"
+import { Workspace } from "@opencode/core/workspace"
 import { eq } from "drizzle-orm"
 import { location } from "./fixture/location"
 import { testEffect } from "./lib/effect"
@@ -100,12 +100,14 @@ const tail = (bus: Bus.Interface, input: { aggregateID: string; after?: number }
 
 const it = testEffect(
   AppNodeBuilder.build(LayerNode.group([Database.node, Bus.node, Location.node]), [
-    [Location.node, locationLayer],
-    [Bus.node, Bus.configured({ persist: true })],
+    Location.node.replace(locationLayer),
+    Bus.node.replace(Bus.configured({ persist: true })),
   ]),
 )
 const itWithoutLocation = testEffect(
-  AppNodeBuilder.build(LayerNode.group([Database.node, Bus.node]), [[Bus.node, Bus.configured({ persist: true })]]),
+  AppNodeBuilder.build(LayerNode.group([Database.node, Bus.node]), [
+    Bus.node.replace(Bus.configured({ persist: true })),
+  ]),
 )
 const itWithoutPersistence = testEffect(AppNodeBuilder.build(LayerNode.group([Database.node, Bus.node])))
 
@@ -123,7 +125,7 @@ describe("Bus", () => {
       yield* bus.publish(Message, { text: "hello" })
       yield* bus.publish(CountMessage, { count: 2 })
 
-      const received = Array.from(yield* Fiber.join(fiber)).map((event) =>
+      const received = (yield* Fiber.join(fiber)).map((event) =>
         event.type === "test.message" ? event.data.text : event.data.count,
       )
       expect(received).toEqual(["hello", 2])
@@ -136,7 +138,7 @@ describe("Bus", () => {
       const fiber = yield* bus.subscribe(Message).pipe(Stream.take(1), Stream.runCollect, Effect.forkScoped)
       yield* Effect.yieldNow
       const event = yield* bus.publish(Message, { text: "hello" })
-      const received = Array.from(yield* Fiber.join(fiber))
+      const received = yield* Fiber.join(fiber)
 
       expect(received).toEqual([event])
       expect(event.type).toBe("test.message")
@@ -146,6 +148,23 @@ describe("Bus", () => {
         directory: AbsolutePath.make("project"),
         workspaceID: Workspace.ID.make("wrk_test"),
       })
+    }),
+  )
+
+  it.effect("omits ambient and explicit locations for global events", () =>
+    Effect.gen(function* () {
+      const bus = yield* Bus.Service
+      const event = yield* bus.publish(
+        GlobalMessage,
+        { text: "hello" },
+        {
+          global: true,
+          location: { directory: AbsolutePath.make("explicit"), workspaceID: Workspace.ID.make("wrk_explicit") },
+        },
+      )
+
+      expect(event).not.toHaveProperty("location")
+      expect(event.type).toBe("test.global")
     }),
   )
 
@@ -195,8 +214,8 @@ describe("Bus", () => {
       yield* Effect.yieldNow
       const event = yield* bus.publish(Message, { text: "hello" })
 
-      expect(Array.from(yield* Fiber.join(typed))).toEqual([event])
-      expect(Array.from(yield* Fiber.join(wildcard))).toEqual([event])
+      expect(yield* Fiber.join(typed)).toEqual([event])
+      expect(yield* Fiber.join(wildcard)).toEqual([event])
     }),
   )
 
@@ -211,10 +230,10 @@ describe("Bus", () => {
       )
 
       const event = yield* bus.publish(SyncMessage, { id: "one", text: "hello" })
-      yield* bus.publish(SyncMessage, { id: "one", text: "after unsubscribe" })
+      yield* bus.publish(SyncMessage, { id: "one", text: "second event" })
 
       expect(received[0]).toEqual(event)
-      expect(received[1]?.data).toEqual({ id: "one", text: "after unsubscribe" })
+      expect(received[1]?.data).toEqual({ id: "one", text: "second event" })
     }),
   )
 
@@ -422,7 +441,7 @@ describe("Bus", () => {
       const { db } = yield* Database.Service
       const aggregateID = Event.ID.create()
 
-      yield* bus.publish(SyncMessage, { id: aggregateID, text: "first" })
+      const event = yield* bus.publish(SyncMessage, { id: aggregateID, text: "first" })
       const rows = yield* db
         .select()
         .from(EventTable)
@@ -433,6 +452,7 @@ describe("Bus", () => {
       expect(rows).toHaveLength(1)
       expect(rows[0]?.type).toBe(Bus.versionedType(SyncMessage.type, 1))
       expect(rows[0]?.aggregate_id).toBe(aggregateID)
+      expect(rows[0]?.created).toBe(event.created)
     }),
   )
 
@@ -584,7 +604,7 @@ describe("Bus", () => {
 
       yield* bus.publish(DurableMessage, durableData(aggregateID, "two"))
 
-      expect(Array.from(yield* Fiber.join(fiber)).map((event) => [event.durable?.seq, event.data])).toEqual([
+      expect((yield* Fiber.join(fiber)).map((event) => [event.durable?.seq, event.data])).toEqual([
         [1, durableData(aggregateID, "one")],
         [2, durableData(aggregateID, "two")],
       ])
@@ -600,7 +620,7 @@ describe("Bus", () => {
 
       yield* bus.publish(DurableMessage, durableData(aggregateID, "one"))
 
-      expect(Array.from(yield* Fiber.join(fiber)).map((event) => [event.durable?.seq, event.data])).toEqual([
+      expect((yield* Fiber.join(fiber)).map((event) => [event.durable?.seq, event.data])).toEqual([
         [0, durableData(aggregateID, "zero")],
         [1, durableData(aggregateID, "one")],
       ])
@@ -613,8 +633,7 @@ describe("Bus", () => {
       const continueRead = yield* Deferred.make<void>()
       let pause = true
       const eventLayer = AppNodeBuilder.build(LayerNode.group([Database.node, Bus.node]), [
-        [
-          Bus.node,
+        Bus.node.replace(
           Bus.configured({
             persist: true,
             beforeAggregateRead: () =>
@@ -622,7 +641,7 @@ describe("Bus", () => {
                 ? Deferred.succeed(readStarted, undefined).pipe(Effect.andThen(Deferred.await(continueRead)))
                 : Effect.void,
           }),
-        ],
+        ),
       ])
 
       yield* Effect.gen(function* () {
@@ -635,7 +654,7 @@ describe("Bus", () => {
         yield* bus.publish(DurableMessage, durableData(aggregateID, "during handoff"))
         yield* Deferred.succeed(continueRead, undefined)
 
-        expect(Array.from(yield* Fiber.join(fiber)).map((event) => [event.durable?.seq, event.data])).toEqual([
+        expect((yield* Fiber.join(fiber)).map((event) => [event.durable?.seq, event.data])).toEqual([
           [0, durableData(aggregateID, "during handoff")],
         ])
       }).pipe(Effect.provide(eventLayer))
@@ -654,7 +673,7 @@ describe("Bus", () => {
         yield* bus.publish(DurableMessage, durableData(aggregateID, String(index)))
       }
 
-      expect(Array.from(yield* Fiber.join(fiber)).map((event) => [event.durable?.seq, event.data])).toEqual(
+      expect((yield* Fiber.join(fiber)).map((event) => [event.durable?.seq, event.data])).toEqual(
         Array.from({ length: count }, (_, index) => [index, durableData(aggregateID, String(index))]),
       )
     }),
@@ -670,7 +689,7 @@ describe("Bus", () => {
       yield* bus.publish(Message, { text: "live only" })
       yield* bus.publish(DurableMessage, durableData(aggregateID, "durable"))
 
-      expect(Array.from(yield* Fiber.join(fiber)).map((event) => event.type)).toEqual([DurableMessage.type])
+      expect((yield* Fiber.join(fiber)).map((event) => event.type)).toEqual([DurableMessage.type])
     }),
   )
 
@@ -706,7 +725,7 @@ describe("Bus", () => {
 
       yield* bus.replay({
         id: Event.ID.create(),
-        created: DateTime.makeUnsafe(0),
+        created: 0,
         type: Bus.versionedType(DurableMessage.type, 1),
         seq: 0,
         aggregateID,
@@ -726,7 +745,7 @@ describe("Bus", () => {
 
       yield* bus.replay({
         id: Event.ID.create(),
-        created: DateTime.makeUnsafe(0),
+        created: 0,
         type: Bus.versionedType(DurableMessage.type, 1),
         seq: 0,
         aggregateID,
@@ -763,7 +782,7 @@ describe("Bus", () => {
         const exit = yield* bus
           .replay({
             id: Event.ID.create(),
-            created: DateTime.makeUnsafe(0),
+            created: 0,
             type: Bus.versionedType(DurableMessage.type, 1),
             seq: 1,
             aggregateID: envelopeAggregateID,
@@ -797,7 +816,7 @@ describe("Bus", () => {
 
       yield* bus.replay({
         id: Event.ID.create(),
-        created: DateTime.makeUnsafe(0),
+        created: 0,
         type: Bus.versionedType(DurableMessage.type, 1),
         seq: 0,
         aggregateID,
@@ -806,7 +825,7 @@ describe("Bus", () => {
       const exit = yield* bus
         .replay({
           id: Event.ID.create(),
-          created: DateTime.makeUnsafe(0),
+          created: 0,
           type: Bus.versionedType(DurableMessage.type, 1),
           seq: 5,
           aggregateID,
@@ -831,14 +850,14 @@ describe("Bus", () => {
 
       yield* bus.replay({
         id: Event.ID.create(),
-        created: DateTime.makeUnsafe(0),
+        created: 0,
         type: Bus.versionedType(SessionEvent.InstructionsUpdated.type, 2),
         seq: 0,
         aggregateID,
         data: { sessionID: aggregateID, delta: { "core/context": "0".repeat(64) } },
       })
 
-      expect(received[0]?.created).toEqual(DateTime.makeUnsafe(0))
+      expect(received[0]?.created).toBe(0)
     }),
   )
 
@@ -867,7 +886,7 @@ describe("Bus", () => {
       const exit = yield* bus
         .replay({
           id: Event.ID.create(),
-          created: DateTime.makeUnsafe(0),
+          created: 0,
           type: "unknown.event.1",
           seq: 0,
           aggregateID: Event.ID.create(),
@@ -895,7 +914,7 @@ describe("Bus", () => {
       yield* bus.replay(
         {
           id: Event.ID.create(),
-          created: DateTime.makeUnsafe(0),
+          created: 0,
           type: Bus.versionedType(DurableMessage.type, 1),
           seq: 1,
           aggregateID,
@@ -915,7 +934,7 @@ describe("Bus", () => {
       const id = Event.ID.create()
       const replayed = {
         id,
-        created: DateTime.makeUnsafe(0),
+        created: 0,
         type: Bus.versionedType(DurableMessage.type, 1),
         seq: 0,
         aggregateID,
@@ -972,7 +991,7 @@ describe("Bus", () => {
       yield* bus.replay(
         {
           id: Event.ID.create(),
-          created: DateTime.makeUnsafe(0),
+          created: 0,
           type: Bus.versionedType(DurableMessage.type, 1),
           seq: 0,
           aggregateID,
@@ -1001,7 +1020,7 @@ describe("Bus", () => {
       yield* bus.replay(
         {
           id: Event.ID.create(),
-          created: DateTime.makeUnsafe(0),
+          created: 0,
           type: Bus.versionedType(DurableMessage.type, 1),
           seq: 1,
           aggregateID,
@@ -1012,7 +1031,7 @@ describe("Bus", () => {
       yield* bus.replay(
         {
           id: Event.ID.create(),
-          created: DateTime.makeUnsafe(0),
+          created: 0,
           type: Bus.versionedType(DurableMessage.type, 1),
           seq: 2,
           aggregateID,
@@ -1045,7 +1064,7 @@ describe("Bus", () => {
       yield* bus.replay(
         {
           id: Event.ID.create(),
-          created: DateTime.makeUnsafe(0),
+          created: 0,
           type: Bus.versionedType(DurableMessage.type, 1),
           seq: 0,
           aggregateID,
@@ -1058,7 +1077,7 @@ describe("Bus", () => {
         .replay(
           {
             id: Event.ID.create(),
-            created: DateTime.makeUnsafe(0),
+            created: 0,
             type: Bus.versionedType(DurableMessage.type, 1),
             seq: 1,
             aggregateID,
@@ -1080,7 +1099,7 @@ describe("Bus", () => {
       yield* bus.listen((event) => Effect.sync(() => received.push(event)))
       const replayed = {
         id: Event.ID.create(),
-        created: DateTime.makeUnsafe(0),
+        created: 0,
         type: Bus.versionedType(DurableMessage.type, 1),
         seq: 0,
         aggregateID,
@@ -1101,7 +1120,7 @@ describe("Bus", () => {
       const aggregateID = Session.ID.create()
       const replayed = {
         id: Event.ID.create(),
-        created: DateTime.makeUnsafe(0),
+        created: 0,
         type: Bus.versionedType(DurableMessage.type, 1),
         seq: 0,
         aggregateID,
@@ -1126,7 +1145,7 @@ describe("Bus", () => {
       const id = Event.ID.create()
       yield* bus.replay({
         id,
-        created: DateTime.makeUnsafe(0),
+        created: 0,
         type: Bus.versionedType(DurableMessage.type, 1),
         seq: 0,
         aggregateID,
@@ -1136,7 +1155,7 @@ describe("Bus", () => {
       const exit = yield* bus
         .replay({
           id,
-          created: DateTime.makeUnsafe(0),
+          created: 0,
           type: Bus.versionedType(DurableMessage.type, 1),
           seq: 1,
           aggregateID,
@@ -1159,7 +1178,7 @@ describe("Bus", () => {
       yield* bus.replay(
         {
           id: Event.ID.create(),
-          created: DateTime.makeUnsafe(0),
+          created: 0,
           type: Bus.versionedType(DurableMessage.type, 1),
           seq: 0,
           aggregateID,
@@ -1170,7 +1189,7 @@ describe("Bus", () => {
       yield* bus.replay(
         {
           id: Event.ID.create(),
-          created: DateTime.makeUnsafe(0),
+          created: 0,
           type: Bus.versionedType(DurableMessage.type, 1),
           seq: 1,
           aggregateID,
@@ -1232,7 +1251,7 @@ describe("Bus", () => {
 
       yield* bus.replay({
         id: Event.ID.create(),
-        created: DateTime.makeUnsafe(0),
+        created: 0,
         type: Bus.versionedType(DurableMessage.type, 1),
         seq: 0,
         aggregateID,
@@ -1250,7 +1269,7 @@ describe("Bus", () => {
       yield* bus.publish(DurableMessage, durableData(aggregateID, "zero"))
       yield* bus.publish(DurableMessage, durableData(aggregateID, "one"))
 
-      const items = Array.from(yield* Stream.runCollect(bus.log({ aggregateID })))
+      const items = yield* Stream.runCollect(bus.log({ aggregateID }))
 
       expect(items.map((item) => (Bus.isSynced(item) ? item.type : item.durable?.seq))).toEqual([
         Event.Seq.make(0),
@@ -1266,9 +1285,9 @@ describe("Bus", () => {
       const bus = yield* Bus.Service
       const aggregateID = Session.ID.create()
 
-      const empty = Array.from(yield* Stream.runCollect(bus.log({ aggregateID })))
+      const empty = yield* Stream.runCollect(bus.log({ aggregateID }))
       yield* bus.publish(DurableMessage, durableData(aggregateID, "zero"))
-      const drained = Array.from(yield* Stream.runCollect(bus.log({ aggregateID, after: 0 })))
+      const drained = yield* Stream.runCollect(bus.log({ aggregateID, after: 0 }))
 
       expect(empty).toEqual([{ type: "log.synced", aggregateID }])
       expect(empty[0]).not.toHaveProperty("seq")
@@ -1288,7 +1307,7 @@ describe("Bus", () => {
 
       yield* bus.publish(DurableMessage, durableData(aggregateID, "one"))
 
-      const items = Array.from(yield* Fiber.join(fiber))
+      const items = yield* Fiber.join(fiber)
       expect(items.map((item) => (Bus.isSynced(item) ? item : item.durable?.seq))).toEqual([
         Event.Seq.make(0),
         { type: "log.synced", aggregateID, seq: Event.Seq.make(0) },
@@ -1300,7 +1319,7 @@ describe("Bus", () => {
   it.effect("log replays across configured read pages", () =>
     Effect.gen(function* () {
       const eventLayer = AppNodeBuilder.build(LayerNode.group([Database.node, Bus.node]), [
-        [Bus.node, Bus.configured({ persist: true, logReadPageSize: 2 })],
+        Bus.node.replace(Bus.configured({ persist: true, logReadPageSize: 2 })),
       ])
 
       yield* Effect.gen(function* () {
@@ -1312,7 +1331,7 @@ describe("Bus", () => {
         yield* bus.publish(DurableMessage, durableData(aggregateID, "three"))
         yield* bus.publish(DurableMessage, durableData(aggregateID, "four"))
 
-        const items = Array.from(yield* Stream.runCollect(bus.log({ aggregateID })))
+        const items = yield* Stream.runCollect(bus.log({ aggregateID }))
 
         expect(items.map((item) => (Bus.isSynced(item) ? item.type : item.durable?.seq))).toEqual([
           Event.Seq.make(0),
@@ -1333,8 +1352,7 @@ describe("Bus", () => {
       const releaseRead = yield* Deferred.make<void>()
       const firstRead = yield* Ref.make(true)
       const eventLayer = AppNodeBuilder.build(LayerNode.group([Database.node, Bus.node]), [
-        [
-          Bus.node,
+        Bus.node.replace(
           Bus.configured({
             persist: true,
             beforeAggregateRead: () =>
@@ -1345,7 +1363,7 @@ describe("Bus", () => {
                 }),
               ),
           }),
-        ],
+        ),
       ])
 
       yield* Effect.gen(function* () {
@@ -1360,7 +1378,7 @@ describe("Bus", () => {
         yield* bus.publish(DurableMessage, durableData(aggregateID, "one"))
         yield* Deferred.succeed(releaseRead, undefined)
 
-        const items = Array.from(yield* Fiber.join(fiber))
+        const items = yield* Fiber.join(fiber)
         expect(items.map((item) => (Bus.isSynced(item) ? item : item.durable?.seq))).toEqual([
           Event.Seq.make(0),
           { type: "log.synced", aggregateID, seq: Event.Seq.make(0) },

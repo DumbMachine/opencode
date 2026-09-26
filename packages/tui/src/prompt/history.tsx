@@ -1,11 +1,12 @@
 import path from "path"
 import { onMount } from "solid-js"
 import { createStore, produce, unwrap } from "solid-js/store"
-import type { PromptInput } from "@opencode-ai/schema"
+import type { PromptInput } from "@opencode/schema"
 import type { Types } from "effect"
 import { createSimpleContext } from "../context/helper"
 import { useTuiPaths } from "../context/runtime"
 import { appendText, readText, writeText } from "../util/persistence"
+import { promptOffsetWidth } from "./display"
 
 export type PastedText = {
   text: string
@@ -27,6 +28,34 @@ export type PromptPartRef = {
 }
 
 export const emptyPrompt = (): PromptInfo => ({ text: "", files: [], agents: [], skills: [], pasted: [] })
+
+// Part ranges are textarea offsets, so shift by display width rather than string length.
+export function appendPrompt(prompt: PromptInfo, following: PromptInfo): PromptInfo {
+  const text = prompt.text ? `${prompt.text}\n\n` : ""
+  const offset = promptOffsetWidth(text)
+  const shift = <T extends { start: number; end: number }>(range: T, by: number) => ({
+    ...range,
+    start: range.start + by,
+    end: range.end + by,
+  })
+  const mentions = <T extends { mention?: { start: number; end: number } }>(
+    items: T[] | undefined,
+    next: T[] | undefined,
+  ) => [
+    ...(items ?? []).map((item) => ({ ...item, mention: item.mention && shift(item.mention, 0) })),
+    ...(next ?? []).map((item) => ({ ...item, mention: item.mention && shift(item.mention, offset) })),
+  ]
+  return {
+    text: text + following.text,
+    files: mentions(prompt.files, following.files),
+    agents: mentions(prompt.agents, following.agents),
+    skills: mentions(prompt.skills, following.skills),
+    pasted: [
+      ...prompt.pasted.map((part) => ({ ...part, source: shift(part.source, 0) })),
+      ...following.pasted.map((part) => ({ ...part, source: shift(part.source, offset) })),
+    ],
+  }
+}
 
 export const MAX_HISTORY_ENTRIES = 50
 
@@ -71,10 +100,7 @@ export const { use: usePromptHistory, provider: PromptHistoryProvider } = create
         writeText(historyPath, lines.map((line) => JSON.stringify(line)).join("\n") + "\n").catch(() => {})
     })
 
-    const [store, setStore] = createStore({
-      index: 0,
-      history: [] as PromptInfo[],
-    })
+    const [store, setStore] = createStore({ index: 0, history: [] as PromptInfo[] })
 
     return {
       move(direction: 1 | -1, input: string) {

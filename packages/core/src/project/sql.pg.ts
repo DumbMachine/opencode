@@ -15,8 +15,12 @@ export const ProjectTable = pgTable("project", {
   icon_color: text(),
   ...Timestamps,
   time_initialized: bigint({ mode: "number" }),
+  time_active: bigint({ mode: "number" })
+    .notNull()
+    .default(0)
+    .$defaultFn(() => Date.now()),
   sandboxes: absoluteArrayColumn().notNull(),
-  commands: text({ mode: "json" }).$type<{ start?: string }>(),
+  commands: text().$type<{ start?: string }>(),
 })
 
 /** @deprecated Use WorktreeTable from worktree/sql instead. */
@@ -50,8 +54,10 @@ export function upsertProject(
       set: { worktree: project.canonical, vcs: vcs ?? null },
       setWhere: or(
         ne(ProjectTable.worktree, project.canonical),
-        vcs ? or(isNull(ProjectTable.vcs), ne(ProjectTable.vcs, vcs)) : isNotNull(ProjectTable.vcs),
-      ),
+        vcs
+          ? or(isNull(ProjectTable.vcs as any), ne(ProjectTable.vcs as any, vcs))
+          : isNotNull(ProjectTable.vcs as any),
+      ) as any,
     })
     .run()
 }
