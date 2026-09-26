@@ -106,6 +106,9 @@ it.live("serves the HttpApi and enforces Basic auth like the Node server", () =>
     )
     expect(response.status).toBe(200)
     const body = yield* Effect.promise(() => response.json()).pipe(Effect.flatMap(Schema.decodeUnknownEffect(ServerInfo)))
+    expect(response.headers.get("x-opencode-model-budget")).toBe(
+      process.env.OPENCODE_MODEL_BUDGET_ENDPOINT && process.env.OPENCODE_MODEL_BUDGET_TOKEN ? "1" : null,
+    )
     expect(body.version).toBe("test-version")
     expect(body.paths.tmp).toEndWith("opencode")
   }),

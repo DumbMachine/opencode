@@ -26,7 +26,7 @@ test("admission precedes provider execution and sends an enforced output limit",
         expect(body.usage).toEqual({ input: 10, output: 3, reasoning: 0, cache_read: 0, cache_write: 0 })
         return Response.json({ ok: true })
       }
-      expect(body.max_tokens).toBe(128)
+      expect(body.max_completion_tokens).toBe(128)
       if (omitUsage) return new Response('data: [DONE]\n\n', {headers: {"content-type": "text/event-stream"}})
       return new Response(
         'data: {"id":"c1","object":"chat.completion.chunk","model":"test","choices":[{"index":0,"delta":{"content":"hello"},"finish_reason":null}]}\n\ndata: {"id":"c1","object":"chat.completion.chunk","model":"test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":3,"total_tokens":13}}\n\ndata: [DONE]\n\n',

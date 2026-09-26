@@ -13,15 +13,23 @@ export const ServerHandler = HttpApiBuilder.group(Api, "server.server", (handler
     const auth = yield* ServerAuth.Config
 
     return handlers
-      .handle("server.info", () =>
+      .handleRaw("server.info", () =>
         Effect.gen(function* () {
           const info = yield* ServerInfo.Service
-          return {
-            version: info.app.version ?? "unknown",
-            pid: process.pid ?? 0,
-            urls: info.urls(),
-            paths: info.paths,
-          }
+          return HttpServerResponse.jsonUnsafe(
+            {
+              version: info.app.version ?? "unknown",
+              pid: process.pid ?? 0,
+              urls: info.urls(),
+              paths: info.paths,
+            },
+            {
+              headers:
+                process.env.OPENCODE_MODEL_BUDGET_ENDPOINT && process.env.OPENCODE_MODEL_BUDGET_TOKEN
+                  ? { "x-opencode-model-budget": "1" }
+                  : {},
+            },
+          )
         }),
       )
       .handle("server.pair", () => pairing.issue())
