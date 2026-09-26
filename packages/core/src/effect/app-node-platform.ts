@@ -1,3 +1,4 @@
+import { ModelBudget } from "../model-budget.js"
 import { LLMClient, RequestExecutor } from "@opencode-ai/ai/route"
 import { NodeSocket } from "@effect/platform-node"
 import { Socket } from "effect/unstable/socket"
@@ -10,7 +11,11 @@ export const requestExecutor = makeGlobalNode({
   deps: [httpClient],
 })
 
-export const llmClient = makeGlobalNode({ service: LLMClient.Service, layer: LLMClient.layer, deps: [requestExecutor] })
+export const llmClient = makeGlobalNode({
+  service: LLMClient.Service,
+  layer: ModelBudget.layer,
+  deps: [requestExecutor],
+})
 
 export const webSocketConstructor = makeGlobalNode({
   service: Socket.WebSocketConstructor,
