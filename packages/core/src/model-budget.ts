@@ -12,8 +12,7 @@ const failure = (message: string) =>
 export const inputBound = (request: LLMRequest) => {
   const text = JSON.stringify({ system: request.system, messages: request.messages, tools: request.tools })
   const opaque = /"type":"(image|file|audio|video)"/.test(text)
-  const limits = request.model.defaults?.limits ?? request.model.route.defaults.limits
-  const context = limits?.input ?? limits?.context
+  const context = request.model.defaults?.limits?.input ?? request.model.defaults?.limits?.context ?? request.model.route.defaults.limits?.input ?? request.model.route.defaults.limits?.context
   if (opaque && (!context || context <= 0)) throw new Error("Model has no input limit for media billing")
   const bytes = new TextEncoder().encode(text).byteLength + 256 * (request.messages.length + request.tools.length + 1)
   return opaque ? context! : Math.min(context ?? bytes, bytes)
@@ -23,13 +22,24 @@ export const make = (client: LLMClientShape, endpoint: string, token: string, ou
   const send = (path: string, body: unknown) =>
     Effect.tryPromise({
       try: async () => {
-        const response = await fetch(endpoint + path, {
-          method: "POST",
-          headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-          body: JSON.stringify(body),
-          signal: AbortSignal.timeout(5000),
-        })
-        if (!response.ok) throw new Error(await response.text())
+        // Admission is never retried: an accepted-but-lost response must not
+        // authorize duplicate execution. Completion is idempotent and may retry.
+        const tries = path === "/complete" ? 3 : 1
+        for (let attempt = 0; attempt < tries; attempt++) {
+          try {
+            const response = await fetch(endpoint + path, {
+              method: "POST",
+              headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+              body: JSON.stringify(body),
+              signal: AbortSignal.timeout(5000),
+            })
+            if (!response.ok) throw new Error(await response.text())
+            return
+          } catch (error) {
+            if (attempt + 1 === tries) throw error
+            await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)))
+          }
+        }
       },
       catch: (error) => failure(error instanceof Error ? error.message : "Model budget is unavailable"),
     })
@@ -38,12 +48,14 @@ export const make = (client: LLMClientShape, endpoint: string, token: string, ou
       Effect.gen(function* () {
         const session = request.http?.headers?.["x-opencode-session"]
         if (!session) return yield* failure("Model request has no billing session")
+        if (request.tools.some((tool) => tool.native !== undefined))
+          return yield* failure("Provider-hosted tools require a separately priced budget")
         if (request.http?.body || request.model.defaults?.http?.body || request.model.route.defaults.http?.body)
           return yield* failure("Raw model body overrides are unavailable with enforced budgets")
         const maxTokens = Math.min(
           outputLimit,
           request.generation?.maxTokens ?? outputLimit,
-          request.model.defaults?.limits?.output ?? outputLimit,
+          request.model.defaults?.limits?.output ?? request.model.route.defaults.limits?.output ?? outputLimit,
         )
         if (!Number.isSafeInteger(maxTokens) || maxTokens < 1) return yield* failure("Invalid model output limit")
         const input = yield* Effect.try({
