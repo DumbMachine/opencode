@@ -56,7 +56,8 @@ describe("Dual-Engine Parity Matrix (SQLite vs PostgreSQL)", () => {
         await Effect.runPromise(
           Effect.gen(function* () {
             const { db, config } = yield* Database.Service
-            expect(config?.dialect).toBe(engine.name)
+            // The direct SQLite layer returns only db; PostgreSQL includes config.
+            expect(config?.dialect ?? "sqlite").toBe(engine.name)
 
             // Applying migrations twice should be a clean, safe no-op
             yield* DatabaseMigration.apply(db, engine.name)

@@ -4,8 +4,12 @@ import type { DatabaseMigration } from "../migration.js"
 const migration: DatabaseMigration.Migration = {
   id: "20260823191254_nullable_workspace_binding",
   foreignKeys: false,
-  up(tx) {
+  up(tx, dialect = "sqlite") {
     return Effect.gen(function* () {
+      if (dialect === "postgres") {
+        yield* tx.run(`ALTER TABLE "workspace" ALTER COLUMN "binding" DROP NOT NULL`)
+        return
+      }
       yield* tx.run(`
         CREATE TABLE \`__new_workspace\` (
           \`id\` text PRIMARY KEY,

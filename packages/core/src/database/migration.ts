@@ -16,7 +16,7 @@ type Transaction = Parameters<Parameters<Database["transaction"]>[0]>[0]
 export type Migration = {
   id: string
   foreignKeys?: boolean
-  up: (tx: Transaction) => Effect.Effect<void, unknown, Global.Service>
+  up: (tx: Transaction, dialect?: Dialect) => Effect.Effect<void, unknown, Global.Service>
 }
 
 // Not serialized here: the Database layer holds a lock scoped to the database
@@ -141,7 +141,7 @@ export function applyOnly(db: Database, input: Migration[], dialect: Dialect = "
       yield* Effect.logInfo("database migration started", { migration: migration.id })
       const apply = db.transaction((tx) =>
         Effect.gen(function* () {
-          yield* migration.up(tx)
+          yield* migration.up(tx, dialect)
           yield* tx.run(recordMigration(dialect, migration.id))
         }),
       )

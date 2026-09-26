@@ -219,7 +219,7 @@ const schema: Omit<DatabaseMigration.Migration, "id"> = {
         CREATE TABLE IF NOT EXISTS "workspace" (
           "id" text PRIMARY KEY,
           "provider" text NOT NULL,
-          "binding" text NOT NULL,
+          "binding" text,
           "created_at" BIGINT NOT NULL,
           "last_used_at" BIGINT NOT NULL
         );
