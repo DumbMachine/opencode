@@ -148,7 +148,7 @@ const layer = Layer.effect(
     const sharedInstructions = (sessionID: SessionSchema.ID) =>
       Effect.all(
         {
-          builtins: builtins.load(sessionID),
+          builtins: builtins.load(),
           discovery: discovery.load(),
           references: referenceInstructions.load(),
           entries: entries.load(sessionID),
@@ -220,15 +220,18 @@ const layer = Layer.effect(
         input,
         model: captured?.selection?.model ?? execution?.model ?? session.model,
         agent: { ...agent, info: agent.info },
+        // Ordered from most to least shared across sessions so the baseline stays a reusable
+        // prompt-cache prefix: user-level catalog and guidance, then project instructions, then
+        // the date and environment, which vary by day and directory.
         instructions: Instructions.combine([
-              loaded.shared.builtins,
-              CodeModeInstructions.make(loaded.tools.codeModeCatalog),
-              loaded.shared.discovery,
-              loaded.skills,
-              loaded.shared.references,
-              loaded.mcp,
-              loaded.shared.entries,
-            ]),
+          CodeModeInstructions.make(loaded.tools.codeModeCatalog),
+          loaded.mcp,
+          loaded.shared.references,
+          loaded.skills,
+          loaded.shared.discovery,
+          loaded.shared.builtins,
+          loaded.shared.entries,
+        ]),
         tools: loaded.tools,
         ephemeral: loaded.ephemeral,
       }
