@@ -21,6 +21,7 @@ import {
   SyntheticConflictError,
 } from "./error.js"
 import { SessionEvent } from "./event.js"
+import { SessionExecutionCapability } from "./execution-capability.js"
 import { SessionExecution } from "./execution.js"
 import { SessionInbox } from "./inbox.js"
 import { SessionMessage } from "./message.js"
@@ -129,7 +130,10 @@ export const make = Effect.fn("Session.make")(function* () {
     return yield* admission.list(sessionID)
   })
   const cancelInbox = Effect.fn("Session.cancelInbox")(
-    (sessionID: SessionSchema.ID, inboxID: SessionMessage.ID) => mutatePending(sessionID, inboxID, admission.cancel),
+    (sessionID: SessionSchema.ID, inboxID: SessionMessage.ID) =>
+      mutatePending(sessionID, inboxID, admission.cancel).pipe(
+        Effect.andThen(SessionExecutionCapability.drop(sessionID, inboxID)),
+      ),
     Effect.uninterruptible,
   )
   const steerInbox = Effect.fn("Session.steerInbox")(function* (

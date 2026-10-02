@@ -177,6 +177,7 @@ export class LanguageModelCompatibility extends Schema.Class<LanguageModelCompat
   /** Require every assistant message to include its reasoning field, even when empty. */
   requireReasoning: Schema.optional(Schema.Boolean),
   maxTokensField: Schema.optional(LanguageModelMaxTokensFieldCompatibility),
+  supportsMaxOutputTokens: Schema.optional(Schema.Boolean),
   requireFinishReason: Schema.optional(Schema.Boolean),
   requireAssistantAfterTool: Schema.optional(Schema.Boolean),
   supportsStore: Schema.optional(Schema.Boolean),
@@ -211,6 +212,8 @@ export class LanguageModel<
   readonly route: AnyRoute<Compact>
   readonly defaults?: LanguageModelDefaults
   readonly compatibility?: LanguageModelCompatibility
+  readonly inputLimit?: number
+  readonly outputLimit?: number
 
   constructor(input: LanguageModel.ConstructorInput<Compact>) {
     this.id = input.id
@@ -218,6 +221,8 @@ export class LanguageModel<
     this.route = input.route
     this.defaults = input.defaults
     this.compatibility = input.compatibility
+    this.inputLimit = input.inputLimit
+    this.outputLimit = input.outputLimit
   }
 
   static make<
@@ -231,6 +236,8 @@ export class LanguageModel<
       defaults: input.defaults === undefined ? undefined : LanguageModelDefaults.make(input.defaults),
       compatibility:
         input.compatibility === undefined ? undefined : LanguageModelCompatibility.make(input.compatibility),
+      inputLimit: input.inputLimit,
+      outputLimit: input.outputLimit,
     })
   }
 
@@ -243,6 +250,8 @@ export class LanguageModel<
       route: model.route,
       defaults: model.defaults,
       compatibility: model.compatibility,
+      inputLimit: model.inputLimit,
+      outputLimit: model.outputLimit,
     }
   }
 
@@ -275,6 +284,8 @@ export namespace LanguageModel {
     readonly route: AnyRoute<Compact>
     readonly defaults?: LanguageModelDefaults
     readonly compatibility?: LanguageModelCompatibility
+    readonly inputLimit?: number
+    readonly outputLimit?: number
   }
 
   export type Input<Compact extends CompactionOperations | undefined = CompactionOperations | undefined> = Omit<

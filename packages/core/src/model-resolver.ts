@@ -191,6 +191,12 @@ export const fromCatalogModel = (
         new UnsupportedCompactionError({ providerID: model.providerID, modelID: model.id, route: resolved.route.id }),
       )
     }),
+    Effect.map((resolved) =>
+      LanguageModel.update(resolved, {
+        inputLimit: model.limit.input ?? model.limit.context,
+        outputLimit: model.limit.output,
+      }),
+    ),
   )
 
 const resolveCatalogModel = Effect.fn("ModelResolver.resolveCatalogModel")(function* (
@@ -283,7 +289,10 @@ function prepareProviderSettings(
   )
 }
 
-function prepareProviderURL(model: RuntimeInfo, baseURL: string): Effect.Effect<string, UnresolvedProviderVariablesError> {
+function prepareProviderURL(
+  model: RuntimeInfo,
+  baseURL: string,
+): Effect.Effect<string, UnresolvedProviderVariablesError> {
   if (!baseURL.includes("${")) return Effect.succeed(baseURL)
   const prepared = baseURL.replace(/\$\{([^}]+)\}/g, (placeholder, name: string) => process.env[name] ?? placeholder)
   const failure = unresolvedProviderVariables(model, prepared)

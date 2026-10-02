@@ -165,7 +165,10 @@ const layer = Layer.effect(
                 return DrainResult.Complete()
               const ready = yield* restore(
                 Effect.gen(function* () {
-                  const selected = yield* prepareContext(sessionID)
+                  // Validate the baseline before exposing admitted input. The visible
+                  // history may still end with a completed turn whose request-scoped
+                  // capability has expired; resolve the grant only after promotion.
+                  const selected = yield* prepareSelection(sessionID)
                   const promoted = yield* SessionInbox.promote(
                     db,
                     bus,
@@ -181,7 +184,7 @@ const layer = Layer.effect(
                   if (promoted > 0) step = 1
                   return {
                     _tag: "Ready" as const,
-                    context: yield* context.load(selected),
+                    context: yield* loadWithGrant(sessionID, selected),
                   }
                 }),
               )
@@ -201,21 +204,35 @@ const layer = Layer.effect(
       }
     })
 
-    const prepareContext = Effect.fn("SessionRunner.prepareContext")(function* (sessionID: SessionSchema.ID) {
-      const selected = yield* context.select(sessionID)
-      // A blocked initial instruction baseline must leave admitted input pending.
-      yield* InstructionState.prepare(db, bus, selected.instructions, sessionID)
+    const loadWithGrant = Effect.fn("SessionRunner.loadWithGrant")(function* (
+      sessionID: SessionSchema.ID,
+      selected: SessionContext.Selection,
+    ) {
       const preview = yield* context.load(selected)
       const grant = yield* executionGrant(
         sessionID,
         preview.messages,
-        yield* SessionExecutionCapability.get(sessionID),
+        yield* SessionExecutionCapability.get(
+          sessionID,
+          preview.messages.toReversed().find((message) => message.type === "user")?.id,
+        ),
       )
-      if (!grant) return selected
+      if (!grant) return preview
       const executionMcp = yield* mcp.request(grant.mcp)
       const next = yield* context.select(sessionID, executionMcp)
       yield* InstructionState.prepare(db, bus, next.instructions, sessionID)
-      return next
+      return yield* context.load(next)
+    })
+
+    const prepareSelection = Effect.fn("SessionRunner.prepareSelection")(function* (sessionID: SessionSchema.ID) {
+      const selected = yield* context.select(sessionID)
+      // A blocked initial instruction baseline must leave admitted input pending.
+      yield* InstructionState.prepare(db, bus, selected.instructions, sessionID)
+      return selected
+    })
+
+    const prepareContext = Effect.fn("SessionRunner.prepareContext")(function* (sessionID: SessionSchema.ID) {
+      return yield* loadWithGrant(sessionID, yield* prepareSelection(sessionID))
     })
 
     /** Owns logical Step policy; each attempt owns its streaming, tools, and durable settlement. */
@@ -228,7 +245,7 @@ const layer = Layer.effect(
       let recoverContinuation = true
       while (true) {
         // Reuse boundary preparation once; retries refresh context without delivering more input.
-        const loaded = initial ?? (yield* prepareContext(sessionID).pipe(Effect.flatMap(context.load)))
+        const loaded = initial ?? (yield* prepareContext(sessionID))
         initial = undefined
         const compacted = yield* compaction.compact({ reason: "auto", context: loaded })
         if (compacted.status === "failed") return yield* new StepFailedError({ error: compacted.error })

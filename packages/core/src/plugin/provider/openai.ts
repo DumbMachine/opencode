@@ -290,6 +290,9 @@ export const OpenAIPlugin = define({
             return
           }
           draft.cost = []
+          // The ChatGPT subscription endpoint rejects max_output_tokens.
+          // Billing must reserve the full model output window instead.
+          draft.compatibility = { ...draft.compatibility, supportsMaxOutputTokens: false }
           // Match Codex CLI so context consumption and subscription usage stay consistent between clients.
           draft.limit = { ...draft.limit, context: 400_000, input: 272_000 }
         })

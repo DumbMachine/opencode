@@ -770,7 +770,7 @@ export const lowerGeneration = (request: LLMRequest, options = OpenResponsesOpti
   const parallelToolCalls = resolveParallelToolCalls(request)
   return {
     stream: true as const,
-    max_output_tokens: generation?.maxTokens,
+    max_output_tokens: request.model.compatibility?.supportsMaxOutputTokens === false ? undefined : generation?.maxTokens,
     temperature: generation?.temperature,
     top_p: generation?.topP,
     presence_penalty: generation?.presencePenalty,

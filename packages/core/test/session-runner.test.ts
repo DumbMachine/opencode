@@ -49,6 +49,7 @@ import { SessionExecution } from "@opencode/core/session/execution"
 import { SessionRunCoordinator } from "@opencode/core/session/run-coordinator"
 import { SessionRunner } from "@opencode/core/session/runner/index"
 import { SessionRunnerLLM } from "@opencode/core/session/runner/llm"
+import { SessionExecutionCapability } from "@opencode/core/session/execution-capability"
 import { SessionRunnerModel } from "@opencode/core/session/runner/model"
 import { SessionUsage } from "@opencode/core/session/usage"
 import { PluginSupervisor } from "@opencode/core/plugin/supervisor"
@@ -966,6 +967,53 @@ const watchRename = Effect.fnUntraced(function* (sessionID: Session.ID) {
 })
 
 describe("SessionRunnerLLM", () => {
+  scenario("applies a new request-scoped grant after an earlier MCP turn", function* (s) {
+    const first = yield* s.session.prompt({ sessionID, text: "First", capabilities: ["mcp"], resume: false })
+    yield* SessionExecutionCapability.set(sessionID, { inputID: first.id, mcp: {} })
+    yield* s.llm.push(TestLLM.text("First answer", "text-first"), TestLLM.text("Second answer", "text-second"))
+    yield* s.resume
+
+    const second = yield* s.session.prompt({ sessionID, text: "Second", capabilities: ["mcp"], resume: false })
+    yield* SessionExecutionCapability.set(sessionID, { inputID: second.id, mcp: {} })
+    yield* s.resume
+
+    expect(s.requests).toHaveLength(2)
+    expect(yield* s.inbox).toEqual([])
+    expect((yield* s.context).map((message) => message.type)).toEqual(["user", "assistant", "user", "assistant"])
+  })
+  scenario("queued MCP inputs retain independent grants across multiple deliveries", function* (s) {
+    const first = yield* s.session.prompt({ sessionID, text: "First", capabilities: ["mcp"], resume: false })
+    const second = yield* s.session.prompt({
+      sessionID,
+      text: "Second",
+      delivery: "queue",
+      capabilities: ["mcp"],
+      resume: false,
+    })
+    yield* SessionExecutionCapability.set(sessionID, { inputID: first.id, mcp: {} })
+    yield* SessionExecutionCapability.set(sessionID, { inputID: second.id, mcp: {} })
+    yield* s.llm.push(TestLLM.text("First answer", "text-first"), TestLLM.text("Second answer", "text-second"))
+    yield* s.resume
+    expect(s.requests).toHaveLength(2)
+    expect(yield* s.inbox).toEqual([])
+    expect((yield* s.context).map((message) => message.type)).toEqual(["user", "assistant", "user", "assistant"])
+  })
+
+  scenario("an input requiring MCP fails explicitly when its own grant is unavailable", function* (s) {
+    const first = yield* s.session.prompt({ sessionID, text: "First", capabilities: ["mcp"], resume: false })
+    const second = yield* s.session.prompt({
+      sessionID,
+      text: "Second",
+      delivery: "queue",
+      capabilities: ["mcp"],
+      resume: false,
+    })
+    yield* SessionExecutionCapability.set(sessionID, { inputID: second.id, mcp: {} })
+    const exit = yield* s.resume.pipe(Effect.exit)
+    expect(Exit.isFailure(exit)).toBe(true)
+    expect(s.requests).toHaveLength(0)
+  })
+
   scenario("generates the title while the first model step is still running", function* (s) {
     yield* prepareTitleGeneration
 

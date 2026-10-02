@@ -421,7 +421,7 @@ function projectIdle(
       .update(SessionTable)
       .set({
         // Unread uses a strict timestamp comparison, so every terminal must advance even within one millisecond.
-        time_idle: sql`max(${time}, coalesce(${SessionTable.time_idle} + 1, ${time}))`,
+        time_idle: sql`case when ${SessionTable.time_idle} is null or ${time} > ${SessionTable.time_idle} then ${time} else ${SessionTable.time_idle} + 1 end`,
         idle_outcome: outcome,
         time_updated: sql`${SessionTable.time_updated}`,
       })
@@ -596,7 +596,7 @@ const layer = Layer.effectDiscard(
         .set({
           // Monotone watermark: a duplicate or stale view never regresses, and a terminal event
           // committing after the viewer's observation keeps the newer idle transition unread.
-          time_viewed: sql`max(${idle}, coalesce(${SessionTable.time_viewed}, ${idle}))`,
+          time_viewed: sql`case when ${SessionTable.time_viewed} is null or ${idle} > ${SessionTable.time_viewed} then ${idle} else ${SessionTable.time_viewed} end`,
           time_updated: sql`${SessionTable.time_updated}`,
         })
         .where(eq(SessionTable.id, event.data.sessionID))

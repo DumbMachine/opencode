@@ -77,6 +77,8 @@ export const Compatibility = Schema.Struct({
   /** Require every assistant message to include its reasoning field, even when empty. */
   requireReasoning: Schema.Boolean.pipe(optional),
   maxTokensField: MaxTokensField.pipe(optional),
+  /** Whether the endpoint accepts an explicit output-token cap. */
+  supportsMaxOutputTokens: Schema.Boolean.pipe(optional),
   requireFinishReason: Schema.Boolean.pipe(optional),
   requireAssistantAfterTool: Schema.Boolean.pipe(optional),
   supportsPromptCacheKey: Schema.Boolean.pipe(optional),

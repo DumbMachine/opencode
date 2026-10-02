@@ -124,8 +124,12 @@ export const layer = Layer.effect(
         reportLifecycle(
           sessionID,
           Effect.gen(function* () {
-            yield* SessionExecutionCapability.clear(sessionID)
             const outcome = terminal(exit, reason)
+            yield* SessionExecutionCapability.retain(
+              sessionID,
+              new Set((yield* SessionInbox.list(db, sessionID)).map((item) => item.id)),
+              outcome.type === "interrupted",
+            )
             if (outcome.type === "succeeded") {
               yield* bus.publish(SessionEvent.Execution.Succeeded, { sessionID }, releaseOnCommit(sessionID))
               return

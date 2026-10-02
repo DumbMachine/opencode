@@ -272,6 +272,8 @@ describe("ModelResolver", () => {
 
       expect(catalog.id).toBe(ID.make("test-model"))
       expect(resolved).toMatchObject({ id: "api-test-model", provider: "test-provider" })
+      expect(resolved.inputLimit).toBe(80)
+      expect(resolved.outputLimit).toBe(20)
       expect(resolved.route).toMatchObject({
         id: "openai-responses",
         providerMetadataKey: "openai",

@@ -305,46 +305,42 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
       .handle(
         "session.prompt",
         Effect.fn(function* (ctx) {
-          if (ctx.payload.mcp && ctx.payload.resume === false)
-            return yield* new InvalidRequestError({
-              message: "A request-scoped MCP grant starts execution itself; do not set resume to false",
-            })
           const admitted = yield* session
-              .prompt({
-                sessionID: ctx.params.sessionID,
-                id: ctx.payload.id,
-                text: ctx.payload.text,
-                files: ctx.payload.files,
-                agents: ctx.payload.agents,
-                skills: ctx.payload.skills,
-                capabilities: ctx.payload.mcp ? ["mcp"] : undefined,
-                metadata: ctx.payload.metadata,
-                delivery: ctx.payload.delivery,
-                resume: ctx.payload.mcp ? false : ctx.payload.resume,
-              })
-              .pipe(
-                Effect.catchTag("Session.NotFoundError", missingSession),
-                Effect.catchTag("Session.PromptConflictError", (error) =>
-                  Effect.fail(
-                    new ConflictError({
-                      message: `Prompt message ID conflicts with an existing durable record: ${error.messageID}`,
-                      resource: error.messageID,
-                    }),
-                  ),
+            .prompt({
+              sessionID: ctx.params.sessionID,
+              id: ctx.payload.id,
+              text: ctx.payload.text,
+              files: ctx.payload.files,
+              agents: ctx.payload.agents,
+              skills: ctx.payload.skills,
+              capabilities: ctx.payload.mcp ? ["mcp"] : undefined,
+              metadata: ctx.payload.metadata,
+              delivery: ctx.payload.delivery,
+              resume: ctx.payload.mcp ? false : ctx.payload.resume,
+            })
+            .pipe(
+              Effect.catchTag("Session.NotFoundError", missingSession),
+              Effect.catchTag("Session.PromptConflictError", (error) =>
+                Effect.fail(
+                  new ConflictError({
+                    message: `Prompt message ID conflicts with an existing durable record: ${error.messageID}`,
+                    resource: error.messageID,
+                  }),
                 ),
-                Effect.catchTag("Session.AttachmentError", (error) =>
-                  Effect.fail(new InvalidRequestError({ message: error.message, field: "files" })),
-                ),
-                Effect.catchTag("Session.SkillNotFoundError", (error) =>
-                  Effect.fail(new InvalidRequestError({ message: `Skill not found: ${error.skill}`, field: "skills" })),
-                ),
-              )
+              ),
+              Effect.catchTag("Session.AttachmentError", (error) =>
+                Effect.fail(new InvalidRequestError({ message: error.message, field: "files" })),
+              ),
+              Effect.catchTag("Session.SkillNotFoundError", (error) =>
+                Effect.fail(new InvalidRequestError({ message: `Skill not found: ${error.skill}`, field: "skills" })),
+              ),
+            )
           if (ctx.payload.mcp) {
             yield* SessionExecutionCapability.set(ctx.params.sessionID, {
               inputID: admitted.id,
               mcp: ctx.payload.mcp,
             })
-            yield* session.wake(ctx.params.sessionID)
+            if (ctx.payload.resume !== false) yield* session.wake(ctx.params.sessionID)
           }
           return { data: admitted }
         }),
