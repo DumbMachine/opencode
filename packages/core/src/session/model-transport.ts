@@ -16,6 +16,7 @@ import {
   Cause,
   Clock,
   Context,
+  Duration,
   Effect,
   Exit,
   Fiber,
@@ -90,7 +91,7 @@ export interface Interface {
   readonly bind: (
     sessionID: SessionSchema.ID,
     interceptor?: Interceptor,
-    idleTimeout?: number,
+    idleTimeout?: number | false,
   ) => WebSocketChannelExecutor
   readonly close: (sessionID: SessionSchema.ID) => Effect.Effect<void>
   readonly closeAll: Effect.Effect<void>
@@ -310,7 +311,7 @@ export const makeLayer = (connector: WebSocketConnector) =>
         owner: State,
         input: WebSocketChannelExchange,
         interceptor?: Interceptor,
-        idleTimeout?: number,
+        idleTimeout?: number | false,
       ) {
         if (owner.closed)
           return yield* transportError("Session WebSocket owner is closed", {
@@ -438,7 +439,7 @@ export const makeLayer = (connector: WebSocketConnector) =>
         const token = {}
         const frames = Stream.fromQueue(active.queue).pipe(
           Stream.timeoutOrElse({
-            duration: idleTimeout ?? IDLE_TIMEOUT,
+            duration: idleTimeout === false ? Duration.infinity : (idleTimeout ?? IDLE_TIMEOUT),
             orElse: () =>
               Stream.fail(
                 transportError("Timed out waiting for WebSocket data", {
@@ -532,7 +533,7 @@ export const makeLayer = (connector: WebSocketConnector) =>
       const bind = (
         sessionID: SessionSchema.ID,
         interceptor?: Interceptor,
-        idleTimeout?: number,
+        idleTimeout?: number | false,
       ): WebSocketChannelExecutor => ({
         execute: (exchange) => {
           const owner = state(sessionID)

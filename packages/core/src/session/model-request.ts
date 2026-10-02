@@ -333,9 +333,8 @@ export const layer = Layer.effect(
       const routed = LLMRequest.update(base, {
         model: route === base.model.route ? base.model : LanguageModel.update(base.model, { route }),
         http: new HttpOptions({
-          body: base.http?.body,
+          ...base.http,
           headers,
-          query: base.http?.query,
         }),
       })
       const request = routed
