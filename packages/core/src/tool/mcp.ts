@@ -155,6 +155,7 @@ export const layer = Layer.effect(
               const text = content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n")
               return {
                 output: result.structured ?? (text === "" ? null : text),
+                ...(result.meta === undefined ? {} : { metadata: { mcp: result.meta } }),
                 ...(content.length === 0 ? {} : { content }),
               }
             }).pipe(
