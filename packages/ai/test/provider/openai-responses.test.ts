@@ -4506,7 +4506,7 @@ describe("OpenAI Responses route", () => {
     }),
   )
 
-  it.effect("recovers authoritative incomplete final function arguments", () =>
+  it.effect("rejects authoritative incomplete final function arguments", () =>
     Effect.gen(function* () {
       const body = sseEvents(
         {
@@ -4532,17 +4532,17 @@ describe("OpenAI Responses route", () => {
         }),
       ).pipe(Effect.provide(fixedResponse(body)))
 
-      expect(response.events.find(LLMEvent.is.toolCall)).toMatchObject({
+      expect(response.toolCalls).toEqual([])
+      expect(response.events.find(LLMEvent.is.toolInputError)).toMatchObject({
         id: "call_1",
         name: "lookup",
-        input: { query: "partial" },
+        raw: '{"query":"partial',
       })
       expect(response.finishReason.normalized).toBe("tool-calls")
-      expect(response.events.some(LLMEvent.is.toolInputError)).toBeFalse()
     }),
   )
 
-  it.effect("recovers incomplete function arguments when output_item.added is absent", () =>
+  it.effect("rejects incomplete function arguments when output_item.added is absent", () =>
     Effect.gen(function* () {
       const body = sseEvents(
         {
@@ -4559,10 +4559,11 @@ describe("OpenAI Responses route", () => {
       )
       const response = yield* LLMClient.generate(request).pipe(Effect.provide(fixedResponse(body)))
 
-      expect(response.events.find(LLMEvent.is.toolCall)).toMatchObject({
+      expect(response.toolCalls).toEqual([])
+      expect(response.events.find(LLMEvent.is.toolInputError)).toMatchObject({
         id: "call_1",
         name: "lookup",
-        input: { query: "partial" },
+        raw: '{"query":"partial',
       })
       expect(response.finishReason.normalized).toBe("tool-calls")
     }),
