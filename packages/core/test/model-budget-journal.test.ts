@@ -495,3 +495,56 @@ test.each(["scan", "remove"] as const)(
     }
   },
 )
+
+test("one session's held completion cannot queue another session's completion", async () => {
+  const entered = Promise.withResolvers<void>()
+  const release = Promise.withResolvers<void>()
+  const completed: string[] = []
+  const server = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const path = new URL(req.url).pathname
+      const body = (await req.json()) as Record<string, KV.Value>
+      if (path === "/reserve") return Response.json({ ok: true })
+      if (path !== "/complete") return providerReply()
+      const session = body.session_id as string
+      if (session === "tenant-alpha-session") {
+        entered.resolve()
+        await release.promise
+      }
+      completed.push(session)
+      return Response.json({ ok: true })
+    },
+  })
+  try {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const base = yield* LLMClient.Service
+        const journal = yield* KV.Service
+        const client = ModelBudget.make(base, server.url.origin, "fixture", journal)
+        const blocked = yield* client
+          .stream(request(server.url.origin, "tenant-alpha-session"))
+          .pipe(Stream.runCollect, Effect.forkScoped)
+        yield* Effect.promise(() => entered.promise)
+        const independent = yield* client
+          .stream(request(server.url.origin, "tenant-beta-session"))
+          .pipe(Stream.runCollect, Effect.forkScoped)
+        // Release the fixture gate before child-fibre cleanup even on assertions.
+        yield* Effect.addFinalizer(() => Effect.sync(() => release.resolve()))
+        const result = yield* Fiber.join(independent).pipe(Effect.timeout("2 seconds"))
+        expect(result.filter(LLMEvent.is.stepFinish)).toHaveLength(1)
+        yield* Fiber.interrupt(independent)
+        expect(completed).toEqual(["tenant-beta-session"])
+        const pending = (yield* journal.scan({ prefix })).entries
+        expect(pending).toHaveLength(1)
+        expect((pending[0].value as Record<string, KV.Value>).session_id).toBe("tenant-alpha-session")
+        release.resolve()
+        yield* Fiber.join(blocked)
+        expect((yield* journal.scan({ prefix })).entries).toEqual([])
+      }).pipe(Effect.scoped, Effect.provide(layer())),
+    )
+  } finally {
+    release.resolve()
+    server.stop(true)
+  }
+})

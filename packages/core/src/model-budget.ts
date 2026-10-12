@@ -66,7 +66,6 @@ export const inputBound = (request: LLMRequest) => {
 }
 
 export const make = (client: LLMClientShape, endpoint: string, token: string, kv: KV.Interface, outputLimit = 8192) => {
-  const delivery = Semaphore.makeUnsafe(1)
   const replaying = Semaphore.makeUnsafe(1)
   let cursor: string | undefined
   const send = (path: string, body: unknown, tries = path === "/reserve" ? 1 : 3) =>
@@ -111,7 +110,7 @@ export const make = (client: LLMClientShape, endpoint: string, token: string, kv
     })
   const record = (value: typeof completion.Type) =>
     kv.set(journalKey(value), value).pipe(
-      Effect.flatMap(() => delivery.withPermit(deliver(value))),
+      Effect.flatMap(() => deliver(value)),
       // Measured usage remains durable even when the bridge is unavailable.
       // Delivery failure must not consume the provider's native finish event.
       Effect.catch((error) =>
@@ -129,7 +128,7 @@ export const make = (client: LLMClientShape, endpoint: string, token: string, kv
         limit: 10,
       })
       for (const entry of page.entries) {
-        yield* delivery.withPermit(decode(entry).pipe(Effect.flatMap((value) => deliver(value))))
+        yield* decode(entry).pipe(Effect.flatMap((value) => deliver(value)))
       }
       if (page.next !== undefined)
         return yield* failure("Model budget callbacks remain pending; retry before starting another call")
@@ -147,12 +146,10 @@ export const make = (client: LLMClientShape, endpoint: string, token: string, kv
       for (const entry of page.entries) {
         // A failed or malformed entry remains durable, but must not starve later
         // sessions. One try per row keeps a ten-row pass within 50 seconds.
-        yield* delivery.withPermit(
-          decode(entry).pipe(
-            Effect.flatMap((value) => deliver(value, 1)),
-            Effect.catch((error) =>
-              Effect.logWarning("Model budget replay remains pending", { key: entry.key, error: error.message }),
-            ),
+        yield* decode(entry).pipe(
+          Effect.flatMap((value) => deliver(value, 1)),
+          Effect.catch((error) =>
+            Effect.logWarning("Model budget replay remains pending", { key: entry.key, error: error.message }),
           ),
         )
       }
