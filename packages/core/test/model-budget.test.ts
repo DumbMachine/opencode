@@ -22,6 +22,9 @@ test("admission precedes provider execution and sends an enforced output limit",
       events.push(path)
       if (path === "/reserve") {
         expect(body.output_token_limit).toBe(128)
+        expect(body.output_token_estimate).toBe(128)
+        expect(body.input_token_estimate).toBeGreaterThanOrEqual(0)
+        expect(body.input_token_estimate).toBeLessThan(Number(body.input_token_limit))
         return new Response("{}", { status: reject ? 402 : 200 })
       }
       if (path === "/complete") {
@@ -75,7 +78,7 @@ test("admission precedes provider execution and sends an enforced output limit",
   }
 })
 
-test("reserves the full model window when an endpoint rejects output caps", async () => {
+test("pairs an output estimate with the full window when an endpoint rejects caps", async () => {
   const events: string[] = []
   const server = Bun.serve({
     port: 0,
@@ -85,6 +88,9 @@ test("reserves the full model window when an endpoint rejects output caps", asyn
       events.push(path)
       if (path === "/reserve") {
         expect(body.output_token_limit).toBe(512)
+        expect(body.output_token_estimate).toBe(32)
+        expect(Number.isInteger(body.input_token_estimate)).toBe(true)
+        expect(body.input_token_estimate).toBeLessThan(Number(body.input_token_limit))
         return Response.json({ ok: true })
       }
       if (path === "/complete") {
@@ -145,8 +151,10 @@ test("input bounds use each model window and media requires a declared limit", (
     const model = route.model({ id: `window-${inputLimit}`, inputLimit })
     const long = LLM.request({ model, prompt: "history".repeat(10000) })
     expect(ModelBudget.inputBound(long)).toBe(inputLimit)
+    expect(ModelBudget.inputEstimate(long)).toBe(inputLimit)
     const media = LLM.request({ model, messages: [Message.user(Message.media(Media.base64("aGVsbG8=", "image/png")))] })
     expect(ModelBudget.inputBound(media)).toBe(inputLimit)
+    expect(ModelBudget.inputEstimate(media)).toBe(inputLimit)
   }
   const small = LLM.request({ model: route.model({ id: "small", inputLimit: 10000 }), prompt: "hello" })
   expect(ModelBudget.inputBound(small)).toBeLessThan(10000)
@@ -155,12 +163,131 @@ test("input bounds use each model window and media requires a declared limit", (
     messages: [Message.user(Message.media(Media.base64("aGVsbG8=", "image/png")))],
   })
   expect(() => ModelBudget.inputBound(unknown)).toThrow("Model has no input limit for media billing")
+  expect(() => ModelBudget.inputEstimate(unknown)).toThrow("Model has no input limit for media billing")
   const invalid = LLM.request({ model: route.model({ id: "invalid", inputLimit: 0 }), prompt: "hello" })
   expect(() => ModelBudget.inputBound(invalid)).toThrow("Model has an invalid input limit for billing")
 })
 
+test("text estimates count provider content without treating local metadata as tokens", () => {
+  const model = OpenAIChat.route.with({ auth: Auth.bearer("test") }).model({ id: "estimate", inputLimit: 100000 })
+  const tool = { name: "lookup", description: "Look up a saved record", inputSchema: { type: "object" } }
+  const request = LLM.request({
+    model,
+    system: "Use the connected workspace tools.",
+    messages: [Message.user("Summarize the saved record. ".repeat(10))],
+    tools: [{ type: "namespace", name: "workspace", tools: [tool] }],
+  })
+  const estimate = ModelBudget.inputEstimate(request)
+  expect(Number.isInteger(estimate)).toBe(true)
+  expect(estimate).toBeGreaterThan(0)
+  expect(estimate).toBeLessThan(ModelBudget.inputBound(request))
+  const local = "local accounting metadata ".repeat(10000)
+  const annotated = LLM.request({
+    ...request,
+    metadata: { local },
+    system: [{ type: "text", text: request.system[0].text, metadata: { local } }],
+    messages: [
+      Message.user({
+        type: "text",
+        text: request.messages[0].content[0].type === "text" ? request.messages[0].content[0].text : "",
+        metadata: { local },
+      }),
+    ],
+    tools: [{ type: "namespace", name: "workspace", tools: [{ ...tool, metadata: { local } }] }],
+  })
+  expect(ModelBudget.inputEstimate(annotated)).toBe(estimate)
+  const toolResult = LLM.request({
+    ...request,
+    messages: [
+      ...request.messages,
+      Message.assistant([{ type: "tool-call", id: "call-1", name: "lookup", input: { id: "1" } }]),
+      Message.tool({ id: "call-1", name: "lookup", result: { saved: "record content ".repeat(10) } }),
+    ],
+  })
+  expect(ModelBudget.inputEstimate(toolResult)).toBeGreaterThan(estimate)
+  const fileResult = LLM.request({
+    model,
+    messages: [
+      Message.tool({
+        id: "call-file",
+        name: "lookup",
+        resultType: "content",
+        result: [
+          { type: "file", mime: "application/pdf", name: "fixture.pdf", uri: "data:application/pdf;base64,aGVsbG8=" },
+        ],
+      }),
+    ],
+  })
+  expect(ModelBudget.inputEstimate(fileResult)).toBe(model.inputLimit!)
+})
+
+test("UTF-8 input estimates remain distinct from byte bounds and clamp to each window", () => {
+  const route = OpenAIChat.route.with({ auth: Auth.bearer("test") })
+  for (const prompt of ["ASCII context ".repeat(100), "भारत में ऐप 🌏 ".repeat(100)]) {
+    const request = LLM.request({ model: route.model({ id: "utf8", inputLimit: 100000 }), prompt })
+    const estimate = ModelBudget.inputEstimate(request)
+    const bound = ModelBudget.inputBound(request)
+    expect(Number.isInteger(estimate)).toBe(true)
+    expect(estimate).toBeGreaterThan(0)
+    expect(estimate).toBeLessThan(bound)
+    expect(bound).toBeGreaterThanOrEqual(new TextEncoder().encode(prompt).byteLength)
+    const small = LLM.request({ model: route.model({ id: "small", inputLimit: 32 }), prompt })
+    expect(ModelBudget.inputEstimate(small)).toBe(32)
+    expect(ModelBudget.inputBound(small)).toBe(32)
+  }
+})
+
+test("the default output estimate preserves API wire caps and uncapped model maxima", async () => {
+  const admissions: Array<Record<string, number>> = []
+  const bodies: Array<Record<string, unknown>> = []
+  const server = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const path = new URL(req.url).pathname
+      const body = (await req.json()) as Record<string, number>
+      if (path === "/reserve") {
+        admissions.push(body)
+        return Response.json({ ok: true })
+      }
+      if (path === "/complete") return Response.json({ ok: true })
+      bodies.push(body)
+      return Response.json({ error: { message: "fixture refuses before execution" } }, { status: 400 })
+    },
+  })
+  const layer = Layer.merge(
+    LayerNode.compile(KV.node),
+    LLMClient.layer.pipe(Layer.provide(RequestExecutor.layer.pipe(Layer.provide(FetchHttpClient.layer)))),
+  )
+  const run = (supportsMaxOutputTokens: boolean) =>
+    Effect.gen(function* () {
+      const base = yield* LLMClient.Service
+      const journal = yield* KV.Service
+      const client = ModelBudget.make(base, server.url.origin, "test", journal)
+      return yield* client
+        .stream(
+          LLM.request({
+            model: OpenAIResponses.route
+              .with({ endpoint: { baseURL: server.url.origin + "/v1/" }, auth: Auth.bearer("test") })
+              .model({ id: "test", compatibility: { supportsMaxOutputTokens }, outputLimit: 128000 }),
+            http: { headers: { "x-opencode-session": "output-default" } },
+            prompt: "hello",
+          }),
+        )
+        .pipe(Stream.runCollect)
+    }).pipe(Effect.provide(layer))
+  try {
+    for (const accepts of [true, false]) await Effect.runPromise(run(accepts)).catch(() => undefined)
+    expect(admissions.map((body) => body.output_token_estimate)).toEqual([8192, 8192])
+    expect(admissions.map((body) => body.output_token_limit)).toEqual([8192, 128000])
+    expect(bodies.map((body) => body.max_output_tokens)).toEqual([8192, undefined])
+  } finally {
+    server.stop(true)
+  }
+})
+
 test("capable endpoints reserve and send no more than the declared output window", async () => {
   const limits: number[] = []
+  const estimates: number[] = []
   const sent: number[] = []
   const server = Bun.serve({
     port: 0,
@@ -169,6 +296,7 @@ test("capable endpoints reserve and send no more than the declared output window
       const body = (await req.json()) as Record<string, number>
       if (path === "/reserve") {
         limits.push(body.output_token_limit)
+        estimates.push(body.output_token_estimate)
         return Response.json({ ok: true })
       }
       if (path === "/complete") return Response.json({ ok: true })
@@ -202,6 +330,7 @@ test("capable endpoints reserve and send no more than the declared output window
   try {
     for (const window of [64, 256]) await Effect.runPromise(run(window)).catch(() => undefined)
     expect(limits).toEqual([64, 128])
+    expect(estimates).toEqual([64, 128])
     expect(sent).toEqual([64, 128])
     for (const invalid of [0, -1, 10000.5, Number.NaN])
       await expect(Effect.runPromise(run(invalid))).rejects.toThrow("invalid output limit")

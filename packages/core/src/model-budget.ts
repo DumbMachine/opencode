@@ -2,6 +2,7 @@ export * as ModelBudget from "./model-budget.js"
 
 import {
   AIError,
+  type ContentPart,
   GenerationOptions,
   HttpContext,
   LLMEvent,
@@ -9,10 +10,12 @@ import {
   LLMResponse,
   QuotaExceededError,
   UnsupportedOperationError,
+  type ToolEntry,
 } from "@opencode/ai"
 import { LLMClient, type LLMClientShape } from "@opencode/ai/route"
 import { Cause, Effect, Exit, Layer, Option, Schema, Schedule, Semaphore, Stream } from "effect"
 import { KV } from "./kv.js"
+import { Token } from "./util/token.js"
 
 const failure = (message: string, http?: HttpContext) =>
   new AIError({ reason: new QuotaExceededError({ message, http }) })
@@ -39,11 +42,8 @@ const sessionPrefix = (session: string) => `${journalPrefix}${encodeURIComponent
 const journalKey = (record: typeof completion.Type) => `${sessionPrefix(record.session_id)}${record.attempt_id}`
 const zeroUsage = { input: 0, output: 0, reasoning: 0, cache_read: 0, cache_write: 0 }
 
-// A byte bound avoids tokenizer/network work on the first-token path. For
-// media that can expand at the provider, reserve the entire model input window.
-export const inputBound = (request: LLMRequest) => {
-  const text = JSON.stringify({ system: request.system, messages: request.messages, tools: request.tools })
-  const opaque = request.messages.some((message) =>
+const hasOpaqueInput = (request: LLMRequest) =>
+  request.messages.some((message) =>
     message.content.some(
       (part) =>
         part.type === "media" ||
@@ -52,10 +52,15 @@ export const inputBound = (request: LLMRequest) => {
           part.result.value.some((content) => content.type === "file")),
     ),
   )
+
+// A byte bound avoids tokenizer/network work on the first-token path. For
+// media that can expand at the provider, reserve the entire model input window.
+export const inputBound = (request: LLMRequest) => {
+  const text = JSON.stringify({ system: request.system, messages: request.messages, tools: request.tools })
   const limit = request.model.inputLimit
   if (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 1))
     throw new Error("Model has an invalid input limit for billing")
-  if (opaque) {
+  if (hasOpaqueInput(request)) {
     if (limit === undefined) throw new Error("Model has no input limit for media billing")
     return limit
   }
@@ -63,6 +68,50 @@ export const inputBound = (request: LLMRequest) => {
   // The provider cannot accept more than its model's input window. A local
   // byte upper bound must never reserve more tokens than that entire window.
   return limit === undefined ? bytes : Math.min(bytes, limit)
+}
+
+// Customer admission uses the same approximate text token accounting as
+// compaction. UTF-8/non-ASCII text is not an exact tokenizer measurement; the
+// separate byte/model bound remains authoritative for maximum exposure.
+export const inputEstimate = (request: LLMRequest, bound = inputBound(request)) => {
+  if (hasOpaqueInput(request)) return bound
+  const estimateTool = (tool: ToolEntry): number =>
+    Token.estimate(tool.name + (tool.description ?? "")) +
+    (tool.type === "tool"
+      ? Token.estimate(JSON.stringify(tool.inputSchema))
+      : tool.tools.reduce((sum, entry) => sum + estimateTool(entry), 0))
+  const estimatePart = (part: ContentPart): number => {
+    if (part.type === "effort" || part.type === "media") return 0
+    if (part.type === "compaction") return Token.estimate(part.text ?? "")
+    if (part.type === "text" || part.type === "reasoning") return Token.estimate(part.text)
+    if (part.type === "tool-call")
+      return Token.estimate(part.id + part.name + (part.namespace ?? "") + (JSON.stringify(part.input) ?? ""))
+    const overhead = Token.estimate(part.id + part.name + (part.namespace ?? ""))
+    if (part.result.type === "content")
+      return (
+        overhead +
+        part.result.value.reduce(
+          (sum, content) => sum + (content.type === "text" ? Token.estimate(content.text) : 0),
+          0,
+        )
+      )
+    return (
+      overhead +
+      Token.estimate(
+        typeof part.result.value === "string" ? part.result.value : (JSON.stringify(part.result.value) ?? ""),
+      )
+    )
+  }
+  return Math.min(
+    bound,
+    request.system.reduce((sum, part) => sum + Token.estimate(part.text), 0) +
+      request.tools.reduce((sum, tool) => sum + estimateTool(tool), 0) +
+      request.messages.reduce(
+        (sum, message) =>
+          sum + Token.estimate(message.role) + message.content.reduce((total, part) => total + estimatePart(part), 0),
+        0,
+      ),
+  )
 }
 
 export const make = (client: LLMClientShape, endpoint: string, token: string, kv: KV.Interface, outputLimit = 8192) => {
@@ -171,15 +220,16 @@ export const make = (client: LLMClientShape, endpoint: string, token: string, kv
           (!Number.isSafeInteger(request.model.outputLimit) || request.model.outputLimit < 1)
         )
           return yield* failure("Model has an invalid output limit for billing")
-        const maxTokens = acceptsOutputCap
-          ? Math.min(
-              outputLimit,
-              request.generation?.maxTokens ?? outputLimit,
-              request.model.outputLimit ?? outputLimit,
-            )
-          : request.model.outputLimit
+        const outputEstimate = Math.min(
+          outputLimit,
+          request.generation?.maxTokens ?? outputLimit,
+          request.model.outputLimit ?? outputLimit,
+        )
+        const maxTokens = acceptsOutputCap ? outputEstimate : request.model.outputLimit
         if (maxTokens === undefined || !Number.isSafeInteger(maxTokens) || maxTokens < 1)
           return yield* failure("Model has no enforceable output limit for billing")
+        if (!Number.isSafeInteger(outputEstimate) || outputEstimate < 1)
+          return yield* failure("Model has an invalid output estimate for billing")
         const input = yield* Effect.try({
           try: () => inputBound(request),
           catch: () => failure("Model input cannot be bounded"),
@@ -200,7 +250,13 @@ export const make = (client: LLMClientShape, endpoint: string, token: string, kv
               ? record({ ...attempt, operation: "cancel", usage: zeroUsage })
               : Effect.void,
         )
-        yield* send("/reserve", { ...attempt, input_token_limit: input, output_token_limit: maxTokens }).pipe(
+        yield* send("/reserve", {
+          ...attempt,
+          input_token_limit: input,
+          output_token_limit: maxTokens,
+          input_token_estimate: inputEstimate(request, input),
+          output_token_estimate: outputEstimate,
+        }).pipe(
           // Cancellation must not lose an accepted admission between its HTTP
           // response and the no-dispatch finalizer's state transition.
           Effect.tap(() =>
@@ -218,8 +274,8 @@ export const make = (client: LLMClientShape, endpoint: string, token: string, kv
             }),
           ),
         )
-        // A model whose endpoint rejects the cap is bounded by its published
-        // maximum output window. Reserve that full window before the call.
+        // An endpoint that rejects the cap remains bounded by its model window.
+        // Its smaller admission estimate is never sent as a provider hard cap.
         const bounded = acceptsOutputCap
           ? LLMRequest.update(request, { generation: GenerationOptions.make({ ...request.generation, maxTokens }) })
           : request
