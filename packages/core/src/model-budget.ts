@@ -67,8 +67,17 @@ export const make = (client: LLMClientShape, endpoint: string, token: string, ou
         if (request.http?.body || request.model.defaults?.http?.body || request.model.route.defaults.http?.body)
           return yield* failure("Raw model body overrides are unavailable with enforced budgets")
         const acceptsOutputCap = request.model.compatibility?.supportsMaxOutputTokens !== false
+        if (
+          request.model.outputLimit !== undefined &&
+          (!Number.isSafeInteger(request.model.outputLimit) || request.model.outputLimit < 1)
+        )
+          return yield* failure("Model has an invalid output limit for billing")
         const maxTokens = acceptsOutputCap
-          ? Math.min(outputLimit, request.generation?.maxTokens ?? outputLimit)
+          ? Math.min(
+              outputLimit,
+              request.generation?.maxTokens ?? outputLimit,
+              request.model.outputLimit ?? outputLimit,
+            )
           : request.model.outputLimit
         if (maxTokens === undefined || !Number.isSafeInteger(maxTokens) || maxTokens < 1)
           return yield* failure("Model has no enforceable output limit for billing")

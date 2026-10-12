@@ -148,6 +148,54 @@ test("input bounds use each model window and media requires a declared limit", (
   expect(() => ModelBudget.inputBound(invalid)).toThrow("Model has an invalid input limit for billing")
 })
 
+test("capable endpoints reserve and send no more than the declared output window", async () => {
+  const limits: number[] = []
+  const sent: number[] = []
+  const server = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const path = new URL(req.url).pathname
+      const body = await req.json()
+      if (path === "/reserve") {
+        limits.push(body.output_token_limit)
+        return Response.json({ ok: true })
+      }
+      if (path === "/complete") return Response.json({ ok: true })
+      sent.push(body.max_completion_tokens)
+      return Response.json({ error: { message: "fixture rejects without execution" } }, { status: 400 })
+    },
+  })
+  const layer = LLMClient.layer.pipe(Layer.provide(RequestExecutor.layer.pipe(Layer.provide(FetchHttpClient.layer))))
+  const run = (outputLimit: number) =>
+    Effect.gen(function* () {
+      const base = yield* LLMClient.Service
+      const client = ModelBudget.make(base, server.url.origin, "test", 128)
+      const model = OpenAIChat.route
+        .with({ endpoint: { baseURL: server.url.origin + "/v1/" }, auth: Auth.bearer("test") })
+        .model({ id: "test", outputLimit })
+      return yield* client
+        .stream(
+          LLM.request({
+            model,
+            http: { headers: { "x-opencode-session": "s-output" } },
+            prompt: "hello",
+            generation: { maxTokens: 5000 },
+          }),
+        )
+        .pipe(Stream.runCollect)
+    }).pipe(Effect.provide(layer))
+  try {
+    for (const window of [64, 256]) await Effect.runPromise(run(window)).catch(() => undefined)
+    expect(limits).toEqual([64, 128])
+    expect(sent).toEqual([64, 128])
+    for (const invalid of [0, -1, 10000.5, Number.NaN])
+      await expect(Effect.runPromise(run(invalid))).rejects.toThrow("invalid output limit")
+    expect(limits).toEqual([64, 128])
+  } finally {
+    server.stop(true)
+  }
+})
+
 test("ambiguous provider failure retains the hold", async () => {
   const events: string[] = []
   const server = Bun.serve({
