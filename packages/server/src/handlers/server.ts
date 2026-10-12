@@ -26,7 +26,7 @@ export const ServerHandler = HttpApiBuilder.group(Api, "server.server", (handler
             {
               headers:
                 process.env.OPENCODE_MODEL_BUDGET_ENDPOINT && process.env.OPENCODE_MODEL_BUDGET_TOKEN
-                  ? { "x-opencode-model-budget": "1" }
+                  ? { "x-opencode-model-budget": "2" }
                   : {},
             },
           )

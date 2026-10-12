@@ -6,6 +6,8 @@ import { Auth, LLMClient, RequestExecutor } from "@opencode/ai/route"
 import { Effect, Fiber, Layer, Stream } from "effect"
 import { FetchHttpClient } from "effect/unstable/http"
 import { ModelBudget } from "../src/model-budget.js"
+import { KV } from "../src/kv.js"
+import { LayerNode } from "@opencode/util/effect/layer-node"
 
 test("admission precedes provider execution and sends an enforced output limit", async () => {
   const events: string[] = []
@@ -35,10 +37,14 @@ test("admission precedes provider execution and sends an enforced output limit",
       )
     },
   })
-  const layer = LLMClient.layer.pipe(Layer.provide(RequestExecutor.layer.pipe(Layer.provide(FetchHttpClient.layer))))
+  const layer = Layer.merge(
+    LayerNode.compile(KV.node),
+    LLMClient.layer.pipe(Layer.provide(RequestExecutor.layer.pipe(Layer.provide(FetchHttpClient.layer)))),
+  )
   const run = Effect.gen(function* () {
     const base = yield* LLMClient.Service
-    const client = ModelBudget.make(base, server.url.origin, "test", 128)
+    const journal = yield* KV.Service
+    const client = ModelBudget.make(base, server.url.origin, "test", journal, 128)
     const request = LLM.request({
       model: OpenAIChat.route
         .with({ endpoint: { baseURL: server.url.origin + "/v1/" }, auth: Auth.bearer("test") })
@@ -90,10 +96,14 @@ test("reserves the full model window when an endpoint rejects output caps", asyn
       return Response.json({ error: { message: "stop after inspecting request" } }, { status: 400 })
     },
   })
-  const layer = LLMClient.layer.pipe(Layer.provide(RequestExecutor.layer.pipe(Layer.provide(FetchHttpClient.layer))))
+  const layer = Layer.merge(
+    LayerNode.compile(KV.node),
+    LLMClient.layer.pipe(Layer.provide(RequestExecutor.layer.pipe(Layer.provide(FetchHttpClient.layer)))),
+  )
   const run = Effect.gen(function* () {
     const base = yield* LLMClient.Service
-    const client = ModelBudget.make(base, server.url.origin, "test", 128)
+    const journal = yield* KV.Service
+    const client = ModelBudget.make(base, server.url.origin, "test", journal, 128)
     const model = OpenAIResponses.route
       .with({ endpoint: { baseURL: server.url.origin + "/v1/" }, auth: Auth.bearer("test") })
       .model({ id: "test", compatibility: { supportsMaxOutputTokens: false }, outputLimit: 512 })
@@ -113,7 +123,8 @@ test("reserves the full model window when an endpoint rejects output caps", asyn
     expect(events).toEqual(["/reserve", "/v1/responses", "/complete"])
     const withoutLimit = Effect.gen(function* () {
       const base = yield* LLMClient.Service
-      const client = ModelBudget.make(base, server.url.origin, "test", 128)
+      const journal = yield* KV.Service
+      const client = ModelBudget.make(base, server.url.origin, "test", journal, 128)
       const model = OpenAIResponses.route
         .with({ endpoint: { baseURL: server.url.origin + "/v1/" }, auth: Auth.bearer("test") })
         .model({ id: "test", compatibility: { supportsMaxOutputTokens: false } })
@@ -155,7 +166,7 @@ test("capable endpoints reserve and send no more than the declared output window
     port: 0,
     async fetch(req) {
       const path = new URL(req.url).pathname
-      const body = await req.json()
+      const body = (await req.json()) as Record<string, number>
       if (path === "/reserve") {
         limits.push(body.output_token_limit)
         return Response.json({ ok: true })
@@ -165,11 +176,15 @@ test("capable endpoints reserve and send no more than the declared output window
       return Response.json({ error: { message: "fixture rejects without execution" } }, { status: 400 })
     },
   })
-  const layer = LLMClient.layer.pipe(Layer.provide(RequestExecutor.layer.pipe(Layer.provide(FetchHttpClient.layer))))
+  const layer = Layer.merge(
+    LayerNode.compile(KV.node),
+    LLMClient.layer.pipe(Layer.provide(RequestExecutor.layer.pipe(Layer.provide(FetchHttpClient.layer)))),
+  )
   const run = (outputLimit: number) =>
     Effect.gen(function* () {
       const base = yield* LLMClient.Service
-      const client = ModelBudget.make(base, server.url.origin, "test", 128)
+      const journal = yield* KV.Service
+      const client = ModelBudget.make(base, server.url.origin, "test", journal, 128)
       const model = OpenAIChat.route
         .with({ endpoint: { baseURL: server.url.origin + "/v1/" }, auth: Auth.bearer("test") })
         .model({ id: "test", outputLimit })
@@ -207,10 +222,14 @@ test("ambiguous provider failure retains the hold", async () => {
       return Response.json({ error: { message: "provider unavailable" } }, { status: 500 })
     },
   })
-  const layer = LLMClient.layer.pipe(Layer.provide(RequestExecutor.layer.pipe(Layer.provide(FetchHttpClient.layer))))
+  const layer = Layer.merge(
+    LayerNode.compile(KV.node),
+    LLMClient.layer.pipe(Layer.provide(RequestExecutor.layer.pipe(Layer.provide(FetchHttpClient.layer)))),
+  )
   const run = Effect.gen(function* () {
     const base = yield* LLMClient.Service
-    const client = ModelBudget.make(base, server.url.origin, "test", 128)
+    const journal = yield* KV.Service
+    const client = ModelBudget.make(base, server.url.origin, "test", journal, 128)
     const model = OpenAIChat.route
       .with({ endpoint: { baseURL: server.url.origin + "/v1/" }, auth: Auth.bearer("test") })
       .model({ id: "test", inputLimit: 1024 })
@@ -247,10 +266,14 @@ test("interrupt waits for confirmed usage to finish its completion callback", as
       )
     },
   })
-  const layer = LLMClient.layer.pipe(Layer.provide(RequestExecutor.layer.pipe(Layer.provide(FetchHttpClient.layer))))
+  const layer = Layer.merge(
+    LayerNode.compile(KV.node),
+    LLMClient.layer.pipe(Layer.provide(RequestExecutor.layer.pipe(Layer.provide(FetchHttpClient.layer)))),
+  )
   const run = Effect.gen(function* () {
     const base = yield* LLMClient.Service
-    const client = ModelBudget.make(base, server.url.origin, "test", 128)
+    const journal = yield* KV.Service
+    const client = ModelBudget.make(base, server.url.origin, "test", journal, 128)
     const model = OpenAIChat.route
       .with({ endpoint: { baseURL: server.url.origin + "/v1/" }, auth: Auth.bearer("test") })
       .model({ id: "test", inputLimit: 1024 })

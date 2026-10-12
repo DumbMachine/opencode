@@ -1,10 +1,42 @@
 export * as ModelBudget from "./model-budget.js"
 
-import { AIError, GenerationOptions, LLMEvent, LLMRequest, LLMResponse, QuotaExceededError } from "@opencode/ai"
+import {
+  AIError,
+  GenerationOptions,
+  HttpContext,
+  LLMEvent,
+  LLMRequest,
+  LLMResponse,
+  QuotaExceededError,
+} from "@opencode/ai"
 import { LLMClient, type LLMClientShape } from "@opencode/ai/route"
-import { Effect, Layer, Stream } from "effect"
+import { Cause, Effect, Exit, Layer, Option, Schema, Schedule, Semaphore, Stream } from "effect"
+import { KV } from "./kv.js"
 
-const failure = (message: string) => new AIError({ reason: new QuotaExceededError({ message }) })
+const failure = (message: string, http?: HttpContext) =>
+  new AIError({ reason: new QuotaExceededError({ message, http }) })
+const tokenCount = Schema.Int.check(
+  Schema.isGreaterThanOrEqualTo(0),
+  Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER),
+)
+const completion = Schema.Struct({
+  operation: Schema.Literals(["complete", "cancel"]),
+  session_id: Schema.String,
+  attempt_id: Schema.String,
+  provider_id: Schema.String,
+  model_id: Schema.String,
+  usage: Schema.Struct({
+    input: tokenCount,
+    output: tokenCount,
+    reasoning: tokenCount,
+    cache_read: tokenCount,
+    cache_write: tokenCount,
+  }),
+})
+const journalPrefix = "model-budget:callbacks/"
+const sessionPrefix = (session: string) => `${journalPrefix}${encodeURIComponent(session)}/`
+const journalKey = (record: typeof completion.Type) => `${sessionPrefix(record.session_id)}${record.attempt_id}`
+const zeroUsage = { input: 0, output: 0, reasoning: 0, cache_read: 0, cache_write: 0 }
 
 // A byte bound avoids tokenizer/network work on the first-token path. For
 // media that can expand at the provider, reserve the entire model input window.
@@ -32,13 +64,15 @@ export const inputBound = (request: LLMRequest) => {
   return limit === undefined ? bytes : Math.min(bytes, limit)
 }
 
-export const make = (client: LLMClientShape, endpoint: string, token: string, outputLimit = 8192): LLMClientShape => {
-  const send = (path: string, body: unknown) =>
+export const make = (client: LLMClientShape, endpoint: string, token: string, kv: KV.Interface, outputLimit = 8192) => {
+  const delivery = Semaphore.makeUnsafe(1)
+  const replaying = Semaphore.makeUnsafe(1)
+  let cursor: string | undefined
+  const send = (path: string, body: unknown, tries = path === "/reserve" ? 1 : 3) =>
     Effect.tryPromise({
       try: async () => {
         // Admission is never retried: an accepted-but-lost response must not
         // authorize duplicate execution. Completion is idempotent and may retry.
-        const tries = path === "/complete" ? 3 : 1
         for (let attempt = 0; attempt < tries; attempt++) {
           try {
             const response = await fetch(endpoint + path, {
@@ -47,7 +81,11 @@ export const make = (client: LLMClientShape, endpoint: string, token: string, ou
               body: JSON.stringify(body),
               signal: AbortSignal.timeout(5000),
             })
-            if (!response.ok) throw new Error(await response.text())
+            if (!response.ok)
+              throw failure(
+                await response.text(),
+                new HttpContext({ url: endpoint + path, status: response.status, headers: {} }),
+              )
             return
           } catch (error) {
             if (attempt + 1 === tries) throw error
@@ -55,8 +93,71 @@ export const make = (client: LLMClientShape, endpoint: string, token: string, ou
           }
         }
       },
-      catch: (error) => failure(error instanceof Error ? error.message : "Model budget is unavailable"),
+      catch: (error) =>
+        error instanceof AIError
+          ? error
+          : failure(error instanceof Error ? error.message : "Model budget is unavailable"),
     })
+  const deliver = (record: typeof completion.Type, tries = 3) =>
+    send(`/${record.operation}`, record, tries).pipe(Effect.tap(() => kv.remove(journalKey(record))))
+  const decode = (entry: KV.Entry) =>
+    Effect.gen(function* () {
+      const value = yield* Schema.decodeUnknownEffect(completion)(entry.value).pipe(
+        Effect.mapError(() => failure("Model budget callback journal is invalid")),
+      )
+      if (entry.key !== journalKey(value)) return yield* failure("Model budget callback journal identity mismatch")
+      return value
+    })
+  const record = (value: typeof completion.Type) =>
+    kv.set(journalKey(value), value).pipe(
+      Effect.flatMap(() => delivery.withPermit(deliver(value))),
+      // Measured usage remains durable even when the bridge is unavailable.
+      // Delivery failure must not consume the provider's native finish event.
+      Effect.catch((error) =>
+        Effect.logWarning("Model budget callback remains pending", {
+          attemptID: value.attempt_id,
+          error: error.message,
+        }),
+      ),
+      Effect.uninterruptible,
+    )
+  const flush = (session?: string) =>
+    Effect.gen(function* () {
+      const page = yield* kv.scan({
+        prefix: session === undefined ? journalPrefix : sessionPrefix(session),
+        limit: 10,
+      })
+      for (const entry of page.entries) {
+        yield* delivery.withPermit(decode(entry).pipe(Effect.flatMap((value) => deliver(value))))
+      }
+      if (page.next !== undefined)
+        return yield* failure("Model budget callbacks remain pending; retry before starting another call")
+    }).pipe(
+      Effect.timeout("20 seconds"),
+      Effect.mapError((error) =>
+        error instanceof AIError
+          ? error
+          : failure("Model budget callback replay timed out; retry before starting another call"),
+      ),
+    )
+  const replay = replaying.withPermit(
+    Effect.gen(function* () {
+      const page = yield* kv.scan({ prefix: journalPrefix, after: cursor, limit: 10 })
+      for (const entry of page.entries) {
+        // A failed or malformed entry remains durable, but must not starve later
+        // sessions. One try per row keeps a ten-row pass within 50 seconds.
+        yield* delivery.withPermit(
+          decode(entry).pipe(
+            Effect.flatMap((value) => deliver(value, 1)),
+            Effect.catch((error) =>
+              Effect.logWarning("Model budget replay remains pending", { key: entry.key, error: error.message }),
+            ),
+          ),
+        )
+      }
+      cursor = page.next
+    }),
+  )
   const stream: LLMClientShape["stream"] = (request, options) =>
     Stream.unwrap(
       Effect.gen(function* () {
@@ -85,13 +186,40 @@ export const make = (client: LLMClientShape, endpoint: string, token: string, ou
           try: () => inputBound(request),
           catch: () => failure("Model input cannot be bounded"),
         })
+        // A session must settle its exact earlier callbacks before incurring
+        // more exposure. Other sessions retain independent admission authority.
+        yield* flush(session)
         const attempt = {
           session_id: session,
           attempt_id: crypto.randomUUID(),
           provider_id: request.model.provider,
           model_id: request.model.id,
         }
-        yield* send("/reserve", { ...attempt, input_token_limit: input, output_token_limit: maxTokens })
+        const state = yield* Effect.acquireRelease(
+          Effect.sync(() => ({ dispatched: false, admitted: false, uncertain: false })),
+          (state) =>
+            !state.dispatched && (state.admitted || state.uncertain)
+              ? record({ ...attempt, operation: "cancel", usage: zeroUsage })
+              : Effect.void,
+        )
+        yield* send("/reserve", { ...attempt, input_token_limit: input, output_token_limit: maxTokens }).pipe(
+          // Cancellation must not lose an accepted admission between its HTTP
+          // response and the no-dispatch finalizer's state transition.
+          Effect.tap(() =>
+            Effect.sync(() => {
+              state.admitted = true
+            }),
+          ),
+          Effect.uninterruptible,
+          Effect.onExit((exit) =>
+            Effect.sync(() => {
+              if (Exit.isSuccess(exit)) return
+              const error = Option.getOrUndefined(Exit.findErrorOption(exit))
+              const status = error?.reason.http?.status
+              state.uncertain = status === undefined || status < 400 || status >= 500
+            }),
+          ),
+        )
         // A model whose endpoint rejects the cap is bounded by its published
         // maximum output window. Reserve that full window before the call.
         const bounded = acceptsOutputCap
@@ -99,22 +227,20 @@ export const make = (client: LLMClientShape, endpoint: string, token: string, ou
           : request
         let completed = false
         let observed = false
-        const complete = (usage: {
-          input: number
-          output: number
-          reasoning: number
-          cache_read: number
-          cache_write: number
-        }) =>
-          send("/complete", { ...attempt, usage }).pipe(
-            Effect.uninterruptible,
+        const complete = (usage: (typeof completion.Type)["usage"]) =>
+          record({ ...attempt, operation: "complete", usage }).pipe(
             Effect.tap(() =>
               Effect.sync(() => {
                 completed = true
               }),
             ),
           )
-        return client.stream(bounded, options).pipe(
+        return Stream.suspend(() => {
+          // From this point a provider outcome may be unknown. Never issue a
+          // no-charge cancellation merely because this stream is interrupted.
+          state.dispatched = true
+          return client.stream(bounded, options)
+        }).pipe(
           Stream.tap((event) => {
             observed = true
             if (completed || !LLMEvent.is.stepFinish(event) || !event.usage) return Effect.void
@@ -123,13 +249,16 @@ export const make = (client: LLMClientShape, endpoint: string, token: string, ou
               return Effect.fail(failure("Provider usage is incomplete; budget remains reserved"))
             // No usage / disconnected streams retain their durable reservation.
             // A later verified completion can retry this idempotent callback.
-            return complete({
+            return Schema.decodeUnknownEffect(completion.fields.usage)({
               input: usage.nonCachedInputTokens ?? usage.inputTokens ?? 0,
               output: usage.visibleOutputTokens,
               reasoning: usage.reasoningTokens ?? 0,
               cache_read: usage.cacheReadInputTokens ?? 0,
               cache_write: usage.cacheWriteInputTokens ?? 0,
-            })
+            }).pipe(
+              Effect.mapError(() => failure("Provider usage is incomplete; budget remains reserved")),
+              Effect.flatMap(complete),
+            )
           }),
           Stream.catch((error) =>
             Stream.unwrap(
@@ -144,8 +273,7 @@ export const make = (client: LLMClientShape, endpoint: string, token: string, ou
                   status !== undefined &&
                   status >= 400 &&
                   status < 500
-                if (!completed && !observed && rejected)
-                  yield* complete({ input: 0, output: 0, reasoning: 0, cache_read: 0, cache_write: 0 })
+                if (!completed && !observed && rejected) yield* complete(zeroUsage)
                 return Stream.fail(error)
               }),
             ),
@@ -161,7 +289,20 @@ export const make = (client: LLMClientShape, endpoint: string, token: string, ou
         return result ? Effect.succeed(result) : Effect.fail(failure("Model response was incomplete"))
       }),
     )
-  return { stream, generate, compact: client.compact }
+  return {
+    stream,
+    generate,
+    compact: client.compact,
+    flush,
+    replay,
+    maintain: replay.pipe(
+      Effect.catchCauseIf(
+        (cause) => !Cause.hasInterrupts(cause),
+        (cause) => Effect.logWarning("Model budget replay failed; callbacks remain durable", { cause }),
+      ),
+      Effect.repeat(Schedule.spaced("30 seconds")),
+    ),
+  }
 }
 
 export const layer = Layer.effect(
@@ -172,6 +313,11 @@ export const layer = Layer.effect(
     if (!endpoint) return client
     const token = process.env.OPENCODE_MODEL_BUDGET_TOKEN
     if (!token) return yield* Effect.die(new Error("Model budget token is required"))
-    return make(client, endpoint, token)
+    const kv = yield* KV.Service
+    const budgeted = make(client, endpoint, token, kv)
+    // Restart replay uses this runtime's current bridge credentials. No secret
+    // or endpoint is retained in the callback journal.
+    yield* budgeted.maintain.pipe(Effect.forkScoped)
+    return budgeted
   }),
 ).pipe(Layer.provide(LLMClient.layer))
