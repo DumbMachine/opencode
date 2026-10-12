@@ -299,3 +299,53 @@ test("interrupt waits for confirmed usage to finish its completion callback", as
     server.stop(true)
   }
 })
+
+test("budgeted native compaction fails explicitly before HTTP or journaling for multiple routes", async () => {
+  const events: string[] = []
+  const server = Bun.serve({
+    port: 0,
+    fetch(req) {
+      events.push(new URL(req.url).pathname)
+      return new Response("unexpected request", { status: 500 })
+    },
+  })
+  const layer = Layer.merge(
+    LayerNode.compile(KV.node),
+    LLMClient.layer.pipe(Layer.provide(RequestExecutor.layer.pipe(Layer.provide(FetchHttpClient.layer)))),
+  )
+  try {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const base = yield* LLMClient.Service
+        const journal = yield* KV.Service
+        const client = ModelBudget.make(base, server.url.origin, "fixture", journal)
+        for (const id of ["compact-first", "compact-second"]) {
+          const model = OpenAIResponses.route
+            .with({ id, endpoint: { baseURL: server.url.origin + "/v1/" }, auth: Auth.bearer("fixture") })
+            .model({ id: "test" })
+          const input = LLM.request({ model, http: { headers: { "x-opencode-session": id } }, prompt: "fixture" })
+          if (!LLMClient.canCompact(input)) throw new Error("fixture requires an endpoint compaction route")
+          yield* client.compact(input).pipe(
+            Effect.flip,
+            Effect.tap((error) =>
+              Effect.sync(() => {
+                expect(error.reason._tag).toBe("UnsupportedOperation")
+                expect(error.message).toContain("Native compaction is unavailable")
+              }),
+            ),
+          )
+          if (!LLMClient.canCompact(input, { mechanism: "trigger" }))
+            throw new Error("fixture requires a trigger compaction route")
+          yield* client.compact(input, { mechanism: "trigger" }).pipe(
+            Effect.flip,
+            Effect.tap((error) => Effect.sync(() => expect(error.reason._tag).toBe("UnsupportedOperation"))),
+          )
+        }
+        expect((yield* journal.scan({ prefix: "model-budget:callbacks/" })).entries).toEqual([])
+        expect(events).toEqual([])
+      }).pipe(Effect.provide(layer)),
+    )
+  } finally {
+    server.stop(true)
+  }
+})

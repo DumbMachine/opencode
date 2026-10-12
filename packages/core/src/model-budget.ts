@@ -8,6 +8,7 @@ import {
   LLMRequest,
   LLMResponse,
   QuotaExceededError,
+  UnsupportedOperationError,
 } from "@opencode/ai"
 import { LLMClient, type LLMClientShape } from "@opencode/ai/route"
 import { Cause, Effect, Exit, Layer, Option, Schema, Schedule, Semaphore, Stream } from "effect"
@@ -289,10 +290,21 @@ export const make = (client: LLMClientShape, endpoint: string, token: string, kv
         return result ? Effect.succeed(result) : Effect.fail(failure("Model response was incomplete"))
       }),
     )
+  const compact: LLMClientShape["compact"] = (request) =>
+    Effect.fail(
+      new AIError({
+        reason: new UnsupportedOperationError({
+          operation: "compact",
+          provider: request.model.provider,
+          route: request.model.route.id,
+          message: "Native compaction is unavailable while model budgets are enforced",
+        }),
+      }),
+    )
   return {
     stream,
     generate,
-    compact: client.compact,
+    compact,
     flush,
     replay,
     maintain: replay.pipe(
