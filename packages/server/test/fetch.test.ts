@@ -110,7 +110,7 @@ it.live("serves the HttpApi and enforces Basic auth like the Node server", () =>
     )
     expect(response.headers.get("x-opencode-input-config")).toBe("1")
     expect(response.headers.get("x-opencode-model-budget")).toBe(
-      process.env.OPENCODE_MODEL_BUDGET_ENDPOINT && process.env.OPENCODE_MODEL_BUDGET_TOKEN ? "3" : null,
+      process.env.OPENCODE_MODEL_BUDGET_ENDPOINT && process.env.OPENCODE_MODEL_BUDGET_TOKEN ? "4" : null,
     )
     expect(body.version).toBe("test-version")
     expect(body.paths.tmp).toEndWith("opencode")
