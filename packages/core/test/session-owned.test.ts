@@ -75,6 +75,7 @@ const setup = Effect.fnUntraced(function* (options?: {
   skills?: (ref: Location.Ref) => Layer.Layer<Skill.Service>
   snapshot?: (ref: Location.Ref) => Layer.Layer<Snapshot.Service>
 }) {
+  yield* SessionExecutionCapability.clear(sessionID)
   const database = yield* Database.Service
   const bus = yield* Bus.Service
   const store = yield* SessionStore.Service
@@ -297,20 +298,26 @@ describe("Session-owned handles", () => {
             headers: { authorization: "Bearer first" },
           },
         }
-        yield* handle.renewInboxCapability(id, { mcp, revision: 2 })
+        const claim = `renew_${suffix}`
+        yield* handle.beginInboxCapabilityRenewal(id, claim)
+        yield* handle.renewInboxCapability(id, { mcp, revision: 2, claim })
         yield* handle.renewInboxCapability(id, {
           mcp: {
             host: { headers: { authorization: "Bearer first" }, url: "https://host.example.test", type: "remote" },
           },
           revision: 2,
+          claim,
         })
         expect(yield* handle.inbox()).toContainEqual(original)
         expect((yield* SessionExecutionCapability.get(sessionID, id))?.mcp).toEqual(mcp)
         for (const input of [{ mcp, revision: 1 }, { mcp }, { mcp: {}, revision: 2 }]) {
-          expect(yield* handle.renewInboxCapability(id, input).pipe(Effect.flip)).toBeInstanceOf(InboxConflictError)
+          expect(yield* handle.renewInboxCapability(id, { ...input, claim }).pipe(Effect.flip)).toBeInstanceOf(
+            InboxConflictError,
+          )
         }
         expect((yield* SessionExecutionCapability.get(sessionID, id))?.mcp).toEqual(mcp)
-        yield* handle.renewInboxCapability(id, { mcp: {}, revision: 3 })
+        yield* handle.beginInboxCapabilityRenewal(id, claim + "_next")
+        yield* handle.renewInboxCapability(id, { mcp: {}, revision: 3, claim: claim + "_next" })
         expect((yield* SessionExecutionCapability.get(sessionID, id))?.mcp).toEqual({})
         expect(
           yield* fixture.sessions.forSession(otherID).renewInboxCapability(id, { mcp, revision: 4 }).pipe(Effect.flip),
@@ -1277,6 +1284,76 @@ describe("SessionInbox command contracts", () => {
         defect,
       )
       expect(yield* SessionInbox.list(fixture.db, sessionID)).toEqual([pending])
+    }),
+  )
+  it.live(
+    "claims park prepared pending inputs and committed retries never readmit or restore settled credentials",
+    () =>
+      Effect.gen(function* () {
+        const fixture = yield* setup()
+        const handle = fixture.sessions.forSession(sessionID)
+        for (const suffix of ["first", "second"]) {
+          const id = SessionMessage.ID.make("msg_claim_" + suffix)
+          const mcp = {
+            host: {
+              type: "remote" as const,
+              url: "https://host.example.test",
+              headers: { authorization: "Bearer synthetic" },
+            },
+          }
+          yield* handle.prompt({ id, text: "original", mcp, mcpRevision: 1, resume: false })
+          expect(yield* SessionExecutionCapability.ready(sessionID, id)).toBe(true)
+          const claim = "claim_" + suffix
+          const receipt = yield* handle.beginInboxCapabilityRenewal(id, claim)
+          expect(receipt.claim).toBe(claim)
+          expect(yield* handle.beginInboxCapabilityRenewal(id, claim)).toEqual(receipt)
+          expect(yield* handle.beginInboxCapabilityRenewal(id, claim + "_other").pipe(Effect.flip)).toBeInstanceOf(
+            InboxConflictError,
+          )
+          expect(yield* SessionExecutionCapability.ready(sessionID, id)).toBe(false)
+          expect(
+            yield* SessionInbox.promote(fixture.db, fixture.bus, sessionID, "input", () => Effect.succeed(true)),
+          ).toBe("blocked")
+          expect(yield* handle.message(id)).toBeUndefined()
+          expect((yield* handle.inbox()).map((item) => item.id)).toEqual([id])
+          expect(
+            yield* handle.renewInboxCapability(id, { mcp, revision: 2, claim: "wrong_claim" }).pipe(Effect.flip),
+          ).toBeInstanceOf(InboxConflictError)
+          expect(yield* SessionExecutionCapability.set(sessionID, { inputID: id, mcp, revision: 2 })).toBe(false)
+          yield* handle.renewInboxCapability(id, { mcp, revision: 2, claim })
+          expect(yield* SessionExecutionCapability.ready(sessionID, id)).toBe(true)
+          // A delayed duplicate begin must not suspend its committed grant again.
+          yield* handle.beginInboxCapabilityRenewal(id, claim)
+          expect(yield* SessionExecutionCapability.ready(sessionID, id)).toBe(true)
+          expect(yield* SessionInbox.promote(fixture.db, fixture.bus, sessionID, "input")).toBe(1)
+          expect(yield* handle.beginInboxCapabilityRenewal(id, "delivered_claim").pipe(Effect.flip)).toBeInstanceOf(
+            InboxConflictError,
+          )
+          yield* SessionExecutionCapability.retain(sessionID, new Set())
+          yield* handle.renewInboxCapability(id, { mcp, revision: 2, claim })
+          expect(yield* SessionExecutionCapability.ready(sessionID, id)).toBe(false)
+          expect(yield* handle.inbox()).toEqual([])
+          expect((yield* handle.message(id))?.id).toBe(id)
+          expect(
+            yield* handle.renewInboxCapability(id, { mcp: {}, revision: 2, claim }).pipe(Effect.flip),
+          ).toBeInstanceOf(InboxConflictError)
+        }
+        expect(fixture.wakes).toEqual([])
+      }),
+  )
+
+  it.live("delivery winning before a renewal claim preserves the installed credential", () =>
+    Effect.gen(function* () {
+      const fixture = yield* setup()
+      const handle = fixture.sessions.forSession(sessionID)
+      const id = SessionMessage.ID.make("msg_claim_delivery_wins")
+      const mcp = { host: { type: "remote" as const, url: "https://host.example.test" } }
+      yield* handle.prompt({ id, text: "original", mcp, mcpRevision: 4, resume: false })
+      expect(yield* SessionInbox.promote(fixture.db, fixture.bus, sessionID, "input")).toBe(1)
+      expect(yield* handle.beginInboxCapabilityRenewal(id, "too_late").pipe(Effect.flip)).toBeInstanceOf(
+        InboxConflictError,
+      )
+      expect((yield* SessionExecutionCapability.get(sessionID, id))?.revision).toBe(4)
     }),
   )
 })

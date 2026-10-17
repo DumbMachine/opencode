@@ -233,15 +233,8 @@ export const make = Effect.fn("SessionInbox.make")(function* () {
     )
   })
 
-  // A credential refresh cannot admit work. Cancellation and promotion use
-  // this same local serialization boundary; credentials never enter the log.
-  const renewCapability = Effect.fn("SessionInbox.renewCapability")(
-    (
-      input: PendingRef & {
-        readonly mcp: Mcp.RequestServers
-        readonly revision?: number
-      },
-    ) =>
+  const beginCapabilityRenewal = Effect.fn("SessionInbox.beginCapabilityRenewal")(
+    (input: PendingRef & { readonly claim: string }) =>
       serialized(
         input.sessionID,
         Effect.gen(function* () {
@@ -253,11 +246,43 @@ export const make = Effect.fn("SessionInbox.make")(function* () {
             !pending.payload.capabilities?.includes("mcp")
           )
             return yield* new LifecycleConflict({ id: input.id })
-          const installed = yield* SessionExecutionCapability.set(input.sessionID, {
-            inputID: input.id,
-            mcp: input.mcp,
-            revision: input.revision,
-          })
+          const renewal = yield* SessionExecutionCapability.beginRenewal(input.sessionID, input.id, input.claim)
+          if (!renewal) return yield* new LifecycleConflict({ id: input.id })
+          return renewal
+        }),
+      ).pipe(Effect.uninterruptible),
+  )
+
+  // A credential refresh cannot admit work. Cancellation and promotion use
+  // this same local serialization boundary; credentials never enter the log.
+  const renewCapability = Effect.fn("SessionInbox.renewCapability")(
+    (
+      input: PendingRef & {
+        readonly mcp: Mcp.RequestServers
+        readonly revision?: number
+        readonly claim?: string
+      },
+    ) =>
+      serialized(
+        input.sessionID,
+        Effect.gen(function* () {
+          yield* SessionLifecycle.check(db, input.sessionID)
+          const grant = { inputID: input.id, mcp: input.mcp, revision: input.revision }
+          if (input.claim && (yield* SessionExecutionCapability.committedRenewal(input.sessionID, grant, input.claim)))
+            return
+          const pending = yield* find(db, input.id)
+          if (
+            pending?.sessionID !== input.sessionID ||
+            pending.type !== "user" ||
+            !pending.payload.capabilities?.includes("mcp")
+          )
+            return yield* new LifecycleConflict({ id: input.id })
+          // Claim readiness before the host changes its issuer row. An
+          // unversioned request cannot bypass an interrupted claimed handoff.
+          if (!input.claim) return yield* new LifecycleConflict({ id: input.id })
+          const installed = input.claim
+            ? yield* SessionExecutionCapability.commitRenewal(input.sessionID, grant, input.claim)
+            : yield* SessionExecutionCapability.set(input.sessionID, grant)
           if (!installed) return yield* new LifecycleConflict({ id: input.id })
         }),
       ).pipe(Effect.uninterruptible),
@@ -302,6 +327,7 @@ export const make = Effect.fn("SessionInbox.make")(function* () {
     reconcile,
     admit,
     admitCompaction,
+    beginCapabilityRenewal,
     renewCapability,
     cancel,
     steer,
@@ -540,7 +566,14 @@ export const promotionInput = Effect.fn("SessionInbox.promotionInput")(function*
   sessionID: SessionSchema.ID,
   scope: Promotable,
 ) {
-  return lastInput((yield* promotionRows(db, sessionID, scope)) ?? [])
+  return yield* serialized(
+    sessionID,
+    Effect.gen(function* () {
+      const rows = (yield* promotionRows(db, sessionID, scope)) ?? []
+      if (!(yield* readyRows(sessionID, rows))) return "blocked" as const
+      return lastInput(rows)
+    }),
+  )
 })
 
 /**
@@ -561,13 +594,16 @@ export const promote = Effect.fn("SessionInbox.promote")(function* (
     sessionID,
     Effect.gen(function* () {
       const rows = yield* promotionRows(db, sessionID, scope)
-      if (!rows || (accept && !(yield* accept(lastInput(rows))))) return undefined
+      if (!rows) return undefined
+      if (!(yield* readyRows(sessionID, rows))) return "blocked" as const
+      if (accept && !(yield* accept(lastInput(rows)))) return undefined
       const promoted = yield* publish(db, bus, sessionID, rows)
       if (rows[0]?.delivery !== "queue") return promoted
       const steers = yield* pendingSteers(db, sessionID)
       const control = steers.findIndex((row) => row.type === "compaction" || row.type === "move")
       const arrived = control === -1 ? steers : steers.slice(0, control)
       // A steer admitted during queued publication must be prepared before any model call.
+      if (!(yield* readyRows(sessionID, arrived))) return { promoted, reprepare: true as const }
       if (arrived.length > 0 && accept && !(yield* accept(lastInput(arrived))))
         return { promoted, reprepare: true as const }
       return promoted + (yield* publish(db, bus, sessionID, arrived))
@@ -628,3 +664,17 @@ const pendingSteers = (db: DatabaseService, sessionID: SessionSchema.ID) =>
         return rows
       }),
     )
+
+const readyRows = (sessionID: SessionSchema.ID, rows: ReadonlyArray<typeof SessionInboxTable.$inferSelect>) =>
+  Effect.gen(function* () {
+    for (const row of rows) {
+      const input = fromRow(row)
+      if (
+        input.type === "user" &&
+        input.payload.capabilities?.includes("mcp") &&
+        !(yield* SessionExecutionCapability.ready(sessionID, input.id))
+      )
+        return false
+    }
+    return true
+  })

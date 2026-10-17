@@ -90,6 +90,19 @@ export const RequestRevision = PositiveInt.check(
   description: "An exact positive JavaScript integer identifying a monotonic host credential revision.",
 })
 
+export type RequestClaim = typeof RequestClaim.Type
+export const RequestClaim = Schema.String.check(
+  Schema.isMinLength(1),
+  Schema.isMaxLength(128),
+  Schema.isPattern(/^[a-zA-Z0-9_-]+$/),
+).annotate({ identifier: "Mcp.RequestClaim" })
+
+export interface RequestClaimReceipt extends Schema.Schema.Type<typeof RequestClaimReceipt> {}
+export const RequestClaimReceipt = Schema.Struct({
+  claim: RequestClaim,
+  expiresAt: PositiveInt,
+}).annotate({ identifier: "Mcp.RequestClaimReceipt" })
+
 export const RequestServers = Schema.Record(Schema.String, RequestRemoteConfig).annotate({
   identifier: "Mcp.RequestServers",
 })

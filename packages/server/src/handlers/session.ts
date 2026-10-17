@@ -549,6 +549,30 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
         }),
       )
       .handle(
+        "session.inbox.beginCapabilityRenewal",
+        Effect.fn(function* (ctx) {
+          return {
+            data: yield* session
+              .beginInboxCapabilityRenewal({
+                sessionID: ctx.params.sessionID,
+                inboxID: ctx.params.inboxID,
+                claim: ctx.payload.claim,
+              })
+              .pipe(
+                Effect.catchTag("Session.NotFoundError", missingSession),
+                Effect.catchTag(
+                  "Session.InboxConflictError",
+                  (error) =>
+                    new ConflictError({
+                      resource: error.inboxID,
+                      message: `Pending input cannot claim capability renewal: ${error.inboxID}`,
+                    }),
+                ),
+              ),
+          }
+        }),
+      )
+      .handle(
         "session.inbox.renewCapability",
         Effect.fn(function* (ctx) {
           return yield* pendingMutation(

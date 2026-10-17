@@ -1061,7 +1061,7 @@ describe("SessionRunnerLLM", () => {
     expect((yield* s.context).map((message) => message.type)).toEqual(["user", "assistant", "user", "assistant"])
   })
 
-  scenario("an input requiring MCP fails explicitly when its own grant is unavailable", function* (s) {
+  scenario("parks an MCP input without its own grant ahead of a separately ready queued input", function* (s) {
     const first = yield* s.session.prompt({ sessionID, text: "First", capabilities: ["mcp"], resume: false })
     const second = yield* s.session.prompt({
       sessionID,
@@ -1072,8 +1072,15 @@ describe("SessionRunnerLLM", () => {
     })
     yield* SessionExecutionCapability.set(sessionID, { inputID: second.id, mcp: {} })
     const exit = yield* s.resume.pipe(Effect.exit)
-    expect(Exit.isFailure(exit)).toBe(true)
+    expect(Exit.isSuccess(exit)).toBe(true)
     expect(s.requests).toHaveLength(0)
+    expect((yield* s.inbox).map((item) => item.id)).toEqual([first.id, second.id])
+    expect((yield* s.messages).filter((message) => message.type === "user")).toHaveLength(0)
+    yield* SessionExecutionCapability.set(sessionID, { inputID: first.id, mcp: {} })
+    yield* s.llm.push(TestLLM.stop(), TestLLM.stop())
+    yield* s.resume
+    expect(s.requests).toHaveLength(2)
+    expect(yield* s.inbox).toEqual([])
   })
 
   scenario("generates the title while the first model step is still running", function* (s) {
@@ -1447,6 +1454,76 @@ describe("SessionRunnerLLM", () => {
     },
   )
 
+  for (const boundary of ["publication", "continuation"] as const) {
+    for (const agent of ["reviewer", "removed-agent"]) {
+      scenario(`keeps delivered work running when claimed ${agent} steering arrives during ${boundary}`, function* (s) {
+        const execution = {
+          model: { id: ID.make("fake-model"), providerID: Provider.ID.make("fake") },
+          agent: Agent.ID.make("build"),
+          instructions: "Delivered input instructions",
+        }
+        const first = yield* s.session.prompt({
+          sessionID,
+          text: "Finish delivered work",
+          execution,
+          delivery: "queue",
+          resume: false,
+        })
+        let blockedID: SessionMessage.ID | undefined
+        const claimSteer = Effect.gen(function* () {
+          const payload = {
+            text: "Still pending recovery",
+            capabilities: ["mcp" as const],
+            execution: { ...execution, agent: Agent.ID.make(agent), instructions: "Blocked private instructions" },
+          }
+          // The publication hook already holds the inbox mutex. Use the
+          // admission service directly there instead of reacquiring that lock.
+          const blocked =
+            boundary === "publication"
+              ? yield* s.sessionInbox.admit({
+                  id: SessionMessage.ID.create(),
+                  sessionID,
+                  item: { type: "user", delivery: "steer", payload },
+                })
+              : yield* s.session.prompt({ sessionID, ...payload, resume: false })
+          blockedID = blocked.id
+          yield* SessionExecutionCapability.set(sessionID, { inputID: blocked.id, mcp: {}, revision: 1 })
+          if (boundary === "publication") {
+            yield* SessionExecutionCapability.beginRenewal(sessionID, blocked.id, "blocked_steer")
+          } else {
+            yield* s.session.beginInboxCapabilityRenewal({ sessionID, inboxID: blocked.id, claim: "blocked_steer" })
+          }
+        }).pipe(Effect.orDie)
+        yield* s.llm.push(TestLLM.tool("call-delivered", "echo", { text: "finish" }), TestLLM.stop())
+        if (boundary === "publication") {
+          s.afterPublish = (event) => {
+            if (event.type !== SessionEvent.InboxDelivered.type) return Effect.void
+            if (Schema.decodeUnknownSync(SessionEvent.InboxDelivered.data)(event.data).inboxID !== first.id)
+              return Effect.void
+            s.afterPublish = () => Effect.void
+            return claimSteer
+          }
+          yield* s.resume
+        } else {
+          const paused = yield* s.resumePaused
+          yield* claimSteer
+          yield* paused.finish
+        }
+        if (!blockedID) throw new Error("Missing claimed steer")
+        expect(s.requests).toHaveLength(2)
+        for (const request of s.requests) {
+          expect(userTexts(request)).toEqual(["Finish delivered work"])
+          expect(request.system.map((part) => part.text)).toContain(execution.instructions)
+          expect(JSON.stringify(request)).not.toContain("Blocked private instructions")
+        }
+        expect(s.authorizations.map((context) => context.inputID)).toEqual([first.id])
+        expect((yield* s.inbox).map((item) => item.id)).toEqual([blockedID])
+        expect((yield* s.messages).map((message) => message.id)).not.toContain(blockedID)
+        expect(yield* SessionExecutionCapability.ready(sessionID, blockedID)).toBe(false)
+      })
+    }
+  }
+
   for (const outcome of ["cancel", "compact", "move"] as const) {
     scenario(`keeps delivered queue work when changed-config steering is cancelled before ${outcome}`, function* (s) {
       const execution = {
@@ -1467,12 +1544,18 @@ describe("SessionRunnerLLM", () => {
           if (Schema.decodeUnknownSync(SessionEvent.InboxDelivered.data)(event.data).inboxID !== queued.id) return
           s.afterPublish = () => Effect.void
           // After the actual queue publication commits, before promotion rechecks steers.
-          const steer = yield* s.session
-            .prompt({
+          const steer = yield* s.sessionInbox
+            .admit({
+              id: SessionMessage.ID.create(),
               sessionID,
-              text: "Arrived configuration",
-              resume: false,
-              execution: { ...execution, agent: Agent.ID.make("reviewer") },
+              item: {
+                type: "user",
+                delivery: "steer",
+                payload: {
+                  text: "Arrived configuration",
+                  execution: { ...execution, agent: Agent.ID.make("reviewer") },
+                },
+              },
             })
             .pipe(Effect.orDie)
           s.systemLoadHook = Effect.gen(function* () {

@@ -69,6 +69,8 @@ import type {
   SessionDiffOutput,
   SessionInboxListInput,
   SessionInboxListOutput,
+  SessionInboxBeginCapabilityRenewalInput,
+  SessionInboxBeginCapabilityRenewalOutput,
   SessionInboxRenewCapabilityInput,
   SessionInboxRenewCapabilityOutput,
   SessionInboxCancelInput,
@@ -905,12 +907,24 @@ export function make(options: ClientOptions) {
             },
             requestOptions,
           ).then((value) => value.data),
+        beginCapabilityRenewal: (input: SessionInboxBeginCapabilityRenewalInput, requestOptions?: RequestOptions) =>
+          request<{ readonly data: SessionInboxBeginCapabilityRenewalOutput }>(
+            {
+              method: "POST",
+              path: `/api/session/${encodeURIComponent(input.sessionID)}/inbox/${encodeURIComponent(input.inboxID)}/capability/claim`,
+              body: { claim: input["claim"] },
+              successStatus: 200,
+              declaredStatuses: [400, 401, 404, 409],
+              empty: false,
+            },
+            requestOptions,
+          ).then((value) => value.data),
         renewCapability: (input: SessionInboxRenewCapabilityInput, requestOptions?: RequestOptions) =>
           request<SessionInboxRenewCapabilityOutput>(
             {
               method: "PUT",
               path: `/api/session/${encodeURIComponent(input.sessionID)}/inbox/${encodeURIComponent(input.inboxID)}/capability`,
-              body: { mcp: input["mcp"], revision: input["revision"] },
+              body: { mcp: input["mcp"], revision: input["revision"], claim: input["claim"] },
               successStatus: 204,
               declaredStatuses: [400, 401, 404, 409],
               empty: true,

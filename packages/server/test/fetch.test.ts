@@ -110,7 +110,7 @@ it.live("serves the HttpApi and enforces Basic auth like the Node server", () =>
     )
     expect(response.headers.get("x-opencode-input-config")).toBe("1")
     expect(response.headers.get("x-opencode-session-retirement")).toBe("1")
-    expect(response.headers.get("x-opencode-inbox-capability-renewal")).toBe("1")
+    expect(response.headers.get("x-opencode-inbox-capability-renewal")).toBe("2")
     expect(response.headers.get("x-opencode-model-budget")).toBe(
       process.env.OPENCODE_MODEL_BUDGET_ENDPOINT && process.env.OPENCODE_MODEL_BUDGET_TOKEN ? "4" : null,
     )
@@ -555,7 +555,15 @@ it.live("renews only pending MCP inputs through the authenticated API without re
         )).status,
       ).toBe(401)
       expect((yield* request(path, "PUT", { mcp: {}, revision: Number.MAX_SAFE_INTEGER + 1 })).status).toBe(400)
-      expect((yield* request(path, "PUT", { mcp: {}, revision: 2 })).status).toBe(204)
+      const claim = "claim_" + id
+      const claimed = yield* request(path + "/claim", "POST", { claim })
+      expect(claimed.status).toBe(200)
+      const receipt = (yield* Effect.promise(() => claimed.json())) as { data: { claim: string; expiresAt: number } }
+      expect(receipt.data.claim).toBe(claim)
+      expect(receipt.data.expiresAt).toBeGreaterThan(Date.now())
+      expect((yield* request(path, "PUT", { mcp: {}, revision: 2 })).status).toBe(409)
+      expect((yield* request(path, "PUT", { mcp: {}, revision: 2, claim })).status).toBe(204)
+      expect((yield* request(path, "PUT", { mcp: {}, revision: 2, claim })).status).toBe(204)
       expect((yield* request(path, "PUT", { mcp: {}, revision: 1 })).status).toBe(409)
       expect(
         (yield* request(`${base}/prompt`, "POST", {

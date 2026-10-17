@@ -173,7 +173,11 @@ const layer = Layer.effect(
                   // history may still end with a completed turn whose request-scoped
                   // capability has expired; resolve the grant only after promotion.
                   const scope = entering && !continuing ? promotable : "steer"
-                  const selected = yield* prepareSelection(sessionID, scope)
+                  const candidate = yield* SessionInbox.promotionInput(db, sessionID, scope)
+                  if (candidate === "blocked" && !force && !continuing) return DrainResult.Complete()
+                  // Never resolve a claimed input's agent/configuration. It has
+                  // no execution obligation until readiness commits.
+                  const selected = yield* prepareSelection(sessionID, candidate === "blocked" ? undefined : candidate)
                   const promoted = yield* SessionInbox.promote(db, bus, sessionID, scope, (pending) =>
                     Effect.gen(function* () {
                       const actual = pending ?? (yield* SessionHistory.latestInput(db, sessionID).pipe(Effect.orDie))
@@ -181,6 +185,22 @@ const layer = Layer.effect(
                     }),
                   )
                   // A control admitted during context preparation owns this boundary.
+                  if (promoted === "blocked") {
+                    // An unready steer stays pending, but cannot discharge work
+                    // already delivered by this drain or an active continuation.
+                    if (
+                      !continuing &&
+                      (!force || !(yield* SessionHistory.latestInput(db, sessionID).pipe(Effect.orDie)))
+                    )
+                      return DrainResult.Complete()
+                    return {
+                      _tag: "Ready" as const,
+                      context: yield* loadWithGrant(
+                        sessionID,
+                        candidate === "blocked" ? selected : yield* prepareSelection(sessionID),
+                      ),
+                    }
+                  }
                   if (promoted === undefined) return undefined
                   if (typeof promoted === "object") {
                     // A queued input already committed. Carry its work through re-preparation,
@@ -255,9 +275,8 @@ const layer = Layer.effect(
 
     const prepareSelection = Effect.fn("SessionRunner.prepareSelection")(function* (
       sessionID: SessionSchema.ID,
-      scope?: SessionInbox.Promotable,
+      pending?: SessionMessage.User | SessionMessage.Synthetic,
     ) {
-      const pending = scope ? yield* SessionInbox.promotionInput(db, sessionID, scope) : undefined
       const selected = yield* context.select(sessionID, undefined, pending ? { input: pending } : undefined)
       // Preserve chronological shared updates and leave blocked initial input pending.
       yield* InstructionState.prepare(db, bus, selected.instructions, sessionID)

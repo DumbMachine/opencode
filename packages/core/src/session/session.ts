@@ -130,10 +130,20 @@ export const make = Effect.fn("Session.make")(function* () {
     yield* get(sessionID)
     return yield* admission.list(sessionID)
   })
+  const beginInboxCapabilityRenewal = Effect.fn("Session.beginInboxCapabilityRenewal")(function* (
+    sessionID: SessionSchema.ID,
+    inboxID: SessionMessage.ID,
+    claim: string,
+  ) {
+    yield* get(sessionID)
+    return yield* admission
+      .beginCapabilityRenewal({ sessionID, id: inboxID, claim })
+      .pipe(Effect.catchTag("SessionInbox.LifecycleConflict", () => new InboxConflictError({ sessionID, inboxID })))
+  })
   const renewInboxCapability = Effect.fn("Session.renewInboxCapability")(function* (
     sessionID: SessionSchema.ID,
     inboxID: SessionMessage.ID,
-    input: { readonly mcp: Mcp.RequestServers; readonly revision?: number },
+    input: { readonly mcp: Mcp.RequestServers; readonly revision?: number; readonly claim?: string },
   ) {
     yield* get(sessionID)
     yield* admission
@@ -390,6 +400,7 @@ export const make = Effect.fn("Session.make")(function* () {
     switchAgent,
     switchModel,
     inbox,
+    beginInboxCapabilityRenewal,
     renewInboxCapability,
     prompt,
     synthetic,
@@ -415,6 +426,7 @@ export const make = Effect.fn("Session.make")(function* () {
     const switchAgent = operations.switchAgent.bind(undefined, sessionID)
     const switchModel = operations.switchModel.bind(undefined, sessionID)
     const inbox = operations.inbox.bind(undefined, sessionID)
+    const beginInboxCapabilityRenewal = operations.beginInboxCapabilityRenewal.bind(undefined, sessionID)
     const renewInboxCapability = operations.renewInboxCapability.bind(undefined, sessionID)
     const prompt = operations.prompt.bind(undefined, sessionID)
     const synthetic = operations.synthetic.bind(undefined, sessionID)
@@ -443,6 +455,7 @@ export const make = Effect.fn("Session.make")(function* () {
       switchAgent,
       switchModel,
       inbox,
+      beginInboxCapabilityRenewal,
       renewInboxCapability,
       prompt,
       synthetic,

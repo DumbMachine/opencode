@@ -3497,6 +3497,111 @@
         "summary": "List session inbox"
       }
     },
+    "/api/session/{sessionID}/inbox/{inboxID}/capability/claim": {
+      "post": {
+        "tags": ["session"],
+        "operationId": "session.inbox.beginCapabilityRenewal",
+        "parameters": [
+          {
+            "name": "sessionID",
+            "in": "path",
+            "schema": {
+              "type": "string",
+              "pattern": "^ses"
+            },
+            "required": true
+          },
+          {
+            "name": "inboxID",
+            "in": "path",
+            "schema": {
+              "type": "string",
+              "pattern": "^msg_"
+            },
+            "required": true
+          }
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/Mcp.RequestClaimReceipt"
+                    }
+                  },
+                  "required": ["data"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "SessionNotFoundError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionNotFoundErrorEncoded"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "ConflictError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConflictErrorEncoded"
+                }
+              }
+            }
+          }
+        },
+        "description": "Suspend MCP readiness for an exact existing pending user input before host credential replacement. Never admits or wakes work. The bounded process-local claim must be committed before promotion; expiry or restart never restores the old grant.",
+        "summary": "Claim pending input capability renewal",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "claim": {
+                    "$ref": "#/components/schemas/Mcp.RequestClaim"
+                  }
+                },
+                "required": ["claim"],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": true
+        }
+      }
+    },
     "/api/session/{sessionID}/inbox/{inboxID}/capability": {
       "put": {
         "tags": ["session"],
@@ -3567,7 +3672,7 @@
             }
           }
         },
-        "description": "Replace process-local MCP credentials only for an existing pending user input admitted with MCP capabilities. Never admits or wakes work. Rejects missing, cancelled, delivered or retired inputs and stale credential revisions.",
+        "description": "Commit process-local MCP credentials for an exact pending user input. Renewal requires its active claim. Identical committed-claim retries acknowledge success after delivery without changing credentials. Never admits or wakes work; rejects stale claims and revisions.",
         "summary": "Renew pending input capability",
         "requestBody": {
           "content": {
@@ -3582,6 +3687,16 @@
                     "anyOf": [
                       {
                         "$ref": "#/components/schemas/Mcp.RequestRevision"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "claim": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/components/schemas/Mcp.RequestClaim"
                       },
                       {
                         "type": "null"
@@ -15688,6 +15803,26 @@
           }
         },
         "required": ["type", "url"],
+        "additionalProperties": false
+      },
+      "Mcp.RequestClaim": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "pattern": "^[a-zA-Z0-9_-]+$"
+      },
+      "Mcp.RequestClaimReceipt": {
+        "type": "object",
+        "properties": {
+          "claim": {
+            "$ref": "#/components/schemas/Mcp.RequestClaim"
+          },
+          "expiresAt": {
+            "type": "integer",
+            "exclusiveMinimum": 0
+          }
+        },
+        "required": ["claim", "expiresAt"],
         "additionalProperties": false
       },
       "Mcp.RequestRemoteConfigEncoded": {

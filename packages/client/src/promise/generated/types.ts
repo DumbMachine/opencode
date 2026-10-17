@@ -172,6 +172,8 @@ export type SessionInboxSyntheticPayload = { text: string; description?: string;
 
 export type SessionInboxCompactionPayload = {}
 
+export type McpRequestClaim = string
+
 export type InstructionEntryKey = string
 
 export type SessionGenerateResponse = { data: { text: string } }
@@ -566,6 +568,8 @@ export type SessionInboxCompaction = {
   payload: SessionInboxCompactionPayload
   delivery: SessionInboxDelivery
 }
+
+export type McpRequestClaimReceipt = { claim: McpRequestClaim; expiresAt: number }
 
 export type InstructionEntryInfo = { key: InstructionEntryKey; value: JsonValue }
 
@@ -4863,6 +4867,14 @@ export type SessionInboxListInput = { readonly sessionID: { readonly sessionID: 
 
 export type SessionInboxListOutput = { data: Array<SessionInboxInfo> }["data"]
 
+export type SessionInboxBeginCapabilityRenewalInput = {
+  readonly sessionID: { readonly sessionID: string; readonly inboxID: string }["sessionID"]
+  readonly inboxID: { readonly sessionID: string; readonly inboxID: string }["inboxID"]
+  readonly claim: { readonly claim: string }["claim"]
+}
+
+export type SessionInboxBeginCapabilityRenewalOutput = { data: McpRequestClaimReceipt }["data"]
+
 export type SessionInboxRenewCapabilityInput = {
   readonly sessionID: { readonly sessionID: string; readonly inboxID: string }["sessionID"]
   readonly inboxID: { readonly sessionID: string; readonly inboxID: string }["inboxID"]
@@ -4879,6 +4891,7 @@ export type SessionInboxRenewCapabilityInput = {
       }
     }
     readonly revision?: number | null
+    readonly claim?: string | null
   }["mcp"]
   readonly revision?: {
     readonly mcp: {
@@ -4893,7 +4906,23 @@ export type SessionInboxRenewCapabilityInput = {
       }
     }
     readonly revision?: number | null
+    readonly claim?: string | null
   }["revision"]
+  readonly claim?: {
+    readonly mcp: {
+      readonly [x: string]: {
+        readonly type: "remote"
+        readonly url: string
+        readonly headers?: { readonly [x: string]: string }
+        readonly oauth?: false
+        readonly codemode?: boolean
+        readonly approval_bridge?: ReadonlyArray<string>
+        readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
+      }
+    }
+    readonly revision?: number | null
+    readonly claim?: string | null
+  }["claim"]
 }
 
 export type SessionInboxRenewCapabilityOutput = void

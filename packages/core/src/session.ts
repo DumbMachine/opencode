@@ -26,6 +26,7 @@ import path from "path"
 import { SessionRunner } from "./session/runner/index.js"
 import { SessionStore } from "./session/store.js"
 import { SessionExecution } from "./session/execution.js"
+import { SessionExecutionCapability } from "./session/execution-capability.js"
 import {
   AttachmentError,
   BusyError,
@@ -156,8 +157,11 @@ export interface Interface {
    * unhandled compaction barriers.
    */
   readonly inbox: (sessionID: SessionSchema.ID) => Effect.Effect<SessionInbox.Info[], NotFoundError>
+  readonly beginInboxCapabilityRenewal: (
+    input: InboxItemRef & { readonly claim: string },
+  ) => Effect.Effect<Mcp.RequestClaimReceipt, NotFoundError | InboxConflictError>
   readonly renewInboxCapability: (
-    input: InboxItemRef & { readonly mcp: Mcp.RequestServers; readonly revision?: number },
+    input: InboxItemRef & { readonly mcp: Mcp.RequestServers; readonly revision?: number; readonly claim?: string },
   ) => Effect.Effect<void, NotFoundError | InboxConflictError>
   readonly cancelInbox: (input: InboxItemRef) => Effect.Effect<void, NotFoundError | InboxConflictError>
   readonly steerInbox: (input: InboxItemRef) => Effect.Effect<void, NotFoundError | InboxConflictError>
@@ -389,6 +393,7 @@ const layer = Layer.effect(
         yield* execution.interrupt(sessionID)
         yield* execution.awaitIdle(sessionID)
         yield* transport.close(sessionID)
+        yield* SessionExecutionCapability.clear(sessionID)
         const children = yield* result.list({ parentID: sessionID })
         yield* Effect.forEach(children.data, (child) => result.retire(child.id), { concurrency: 1, discard: true })
         yield* environments.clear(sessionID)
@@ -419,6 +424,8 @@ const layer = Layer.effect(
         })
       }),
       inbox: (sessionID) => sessions.forSession(sessionID).inbox(),
+      beginInboxCapabilityRenewal: (input) =>
+        sessions.forSession(input.sessionID).beginInboxCapabilityRenewal(input.inboxID, input.claim),
       renewInboxCapability: (input) => sessions.forSession(input.sessionID).renewInboxCapability(input.inboxID, input),
       cancelInbox: (input) => sessions.forSession(input.sessionID).cancelInbox(input.inboxID),
       steerInbox: (input) => sessions.forSession(input.sessionID).steerInbox(input.inboxID),

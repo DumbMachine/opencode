@@ -628,9 +628,32 @@ export const makeSessionGroup = <I extends HttpApiMiddleware.AnyId, S, FormI ext
       ),
     )
     .add(
+      HttpApiEndpoint.post(
+        "session.inbox.beginCapabilityRenewal",
+        "/api/session/:sessionID/inbox/:inboxID/capability/claim",
+        {
+          params: { sessionID: Session.ID, inboxID: SessionMessage.ID },
+          payload: Schema.Struct({ claim: Mcp.RequestClaim }),
+          success: Schema.Struct({ data: Mcp.RequestClaimReceipt }),
+          error: [ConflictError, SessionNotFoundError],
+        },
+      ).annotateMerge(
+        OpenApi.annotations({
+          identifier: "session.inbox.beginCapabilityRenewal",
+          summary: "Claim pending input capability renewal",
+          description:
+            "Suspend MCP readiness for an exact existing pending user input before host credential replacement. Never admits or wakes work. The bounded process-local claim must be committed before promotion; expiry or restart never restores the old grant.",
+        }),
+      ),
+    )
+    .add(
       HttpApiEndpoint.put("session.inbox.renewCapability", "/api/session/:sessionID/inbox/:inboxID/capability", {
         params: { sessionID: Session.ID, inboxID: SessionMessage.ID },
-        payload: Schema.Struct({ mcp: Mcp.RequestServers, revision: Mcp.RequestRevision.pipe(Schema.optional) }),
+        payload: Schema.Struct({
+          mcp: Mcp.RequestServers,
+          revision: Mcp.RequestRevision.pipe(Schema.optional),
+          claim: Mcp.RequestClaim.pipe(Schema.optional),
+        }),
         success: HttpApiSchema.NoContent,
         error: [ConflictError, SessionNotFoundError],
       }).annotateMerge(
@@ -638,7 +661,7 @@ export const makeSessionGroup = <I extends HttpApiMiddleware.AnyId, S, FormI ext
           identifier: "session.inbox.renewCapability",
           summary: "Renew pending input capability",
           description:
-            "Replace process-local MCP credentials only for an existing pending user input admitted with MCP capabilities. Never admits or wakes work. Rejects missing, cancelled, delivered or retired inputs and stale credential revisions.",
+            "Commit process-local MCP credentials for an exact pending user input. Renewal requires its active claim. Identical committed-claim retries acknowledge success after delivery without changing credentials. Never admits or wakes work; rejects stale claims and revisions.",
         }),
       ),
     )

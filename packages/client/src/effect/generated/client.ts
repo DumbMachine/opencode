@@ -75,6 +75,8 @@ import type {
   SessionDiffOutput,
   SessionInboxListInput,
   SessionInboxListOutput,
+  SessionInboxBeginCapabilityRenewalInput,
+  SessionInboxBeginCapabilityRenewalOutput,
   SessionInboxRenewCapabilityInput,
   SessionInboxRenewCapabilityOutput,
   SessionInboxCancelInput,
@@ -631,12 +633,24 @@ const EndpointSessionInboxList = (raw: RawClient["server.session"]) => (input: S
     ),
   )
 
+const EndpointSessionInboxBeginCapabilityRenewal =
+  (raw: RawClient["server.session"]) => (input: SessionInboxBeginCapabilityRenewalInput) =>
+    preserveEffect<SessionInboxBeginCapabilityRenewalOutput>()(
+      raw["session.inbox.beginCapabilityRenewal"]({
+        params: { sessionID: input["sessionID"], inboxID: input["inboxID"] },
+        payload: { claim: input["claim"] },
+      }).pipe(
+        Effect.mapError(mapClientError),
+        Effect.map((value) => value.data),
+      ),
+    )
+
 const EndpointSessionInboxRenewCapability =
   (raw: RawClient["server.session"]) => (input: SessionInboxRenewCapabilityInput) =>
     preserveEffect<SessionInboxRenewCapabilityOutput>()(
       raw["session.inbox.renewCapability"]({
         params: { sessionID: input["sessionID"], inboxID: input["inboxID"] },
-        payload: { mcp: input["mcp"], revision: input["revision"] },
+        payload: { mcp: input["mcp"], revision: input["revision"], claim: input["claim"] },
       }).pipe(Effect.mapError(mapClientError)),
     )
 
@@ -823,6 +837,7 @@ const adaptGroupSession = (raw: RawClient["server.session"]) => ({
   diff: EndpointSessionDiff(raw),
   inbox: {
     list: EndpointSessionInboxList(raw),
+    beginCapabilityRenewal: EndpointSessionInboxBeginCapabilityRenewal(raw),
     renewCapability: EndpointSessionInboxRenewCapability(raw),
     cancel: EndpointSessionInboxCancel(raw),
     update: EndpointSessionInboxUpdate(raw),
