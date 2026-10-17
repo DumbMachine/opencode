@@ -1457,6 +1457,7 @@ export type ModelCompatibility = {
   reasoningField?: ModelReasoningField
   requireReasoning?: boolean
   maxTokensField?: ModelMaxTokensField
+  supportsMaxOutputTokens?: boolean
   requireFinishReason?: boolean
   requireAssistantAfterTool?: boolean
   supportsPromptCacheKey?: boolean
@@ -4033,6 +4034,7 @@ export type SessionPromptInput = {
         readonly headers?: { readonly [x: string]: string }
         readonly oauth?: false
         readonly codemode?: boolean
+        readonly approval_bridge?: ReadonlyArray<string>
         readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
       }
     }
@@ -4064,6 +4066,7 @@ export type SessionPromptInput = {
         readonly headers?: { readonly [x: string]: string }
         readonly oauth?: false
         readonly codemode?: boolean
+        readonly approval_bridge?: ReadonlyArray<string>
         readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
       }
     }
@@ -4095,6 +4098,7 @@ export type SessionPromptInput = {
         readonly headers?: { readonly [x: string]: string }
         readonly oauth?: false
         readonly codemode?: boolean
+        readonly approval_bridge?: ReadonlyArray<string>
         readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
       }
     }
@@ -4126,6 +4130,7 @@ export type SessionPromptInput = {
         readonly headers?: { readonly [x: string]: string }
         readonly oauth?: false
         readonly codemode?: boolean
+        readonly approval_bridge?: ReadonlyArray<string>
         readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
       }
     }
@@ -4157,6 +4162,7 @@ export type SessionPromptInput = {
         readonly headers?: { readonly [x: string]: string }
         readonly oauth?: false
         readonly codemode?: boolean
+        readonly approval_bridge?: ReadonlyArray<string>
         readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
       }
     }
@@ -4188,6 +4194,7 @@ export type SessionPromptInput = {
         readonly headers?: { readonly [x: string]: string }
         readonly oauth?: false
         readonly codemode?: boolean
+        readonly approval_bridge?: ReadonlyArray<string>
         readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
       }
     }
@@ -4219,6 +4226,7 @@ export type SessionPromptInput = {
         readonly headers?: { readonly [x: string]: string }
         readonly oauth?: false
         readonly codemode?: boolean
+        readonly approval_bridge?: ReadonlyArray<string>
         readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
       }
     }
@@ -4250,6 +4258,7 @@ export type SessionPromptInput = {
         readonly headers?: { readonly [x: string]: string }
         readonly oauth?: false
         readonly codemode?: boolean
+        readonly approval_bridge?: ReadonlyArray<string>
         readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
       }
     }
@@ -4281,6 +4290,7 @@ export type SessionPromptInput = {
         readonly headers?: { readonly [x: string]: string }
         readonly oauth?: false
         readonly codemode?: boolean
+        readonly approval_bridge?: ReadonlyArray<string>
         readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
       }
     }
@@ -4311,6 +4321,17 @@ export type SessionCommandInput = {
       readonly id: string
       readonly mention?: { readonly start: number; readonly end: number; readonly text: string }
     }>
+    readonly mcp?: {
+      readonly [x: string]: {
+        readonly type: "remote"
+        readonly url: string
+        readonly headers?: { readonly [x: string]: string }
+        readonly oauth?: false
+        readonly codemode?: boolean
+        readonly approval_bridge?: ReadonlyArray<string>
+        readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
+      }
+    }
     readonly delivery?: ("steer" | "queue") | null
   }["name"]
   readonly text: {
@@ -4330,6 +4351,17 @@ export type SessionCommandInput = {
       readonly id: string
       readonly mention?: { readonly start: number; readonly end: number; readonly text: string }
     }>
+    readonly mcp?: {
+      readonly [x: string]: {
+        readonly type: "remote"
+        readonly url: string
+        readonly headers?: { readonly [x: string]: string }
+        readonly oauth?: false
+        readonly codemode?: boolean
+        readonly approval_bridge?: ReadonlyArray<string>
+        readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
+      }
+    }
     readonly delivery?: ("steer" | "queue") | null
   }["text"]
   readonly files?: {
@@ -4349,6 +4381,17 @@ export type SessionCommandInput = {
       readonly id: string
       readonly mention?: { readonly start: number; readonly end: number; readonly text: string }
     }>
+    readonly mcp?: {
+      readonly [x: string]: {
+        readonly type: "remote"
+        readonly url: string
+        readonly headers?: { readonly [x: string]: string }
+        readonly oauth?: false
+        readonly codemode?: boolean
+        readonly approval_bridge?: ReadonlyArray<string>
+        readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
+      }
+    }
     readonly delivery?: ("steer" | "queue") | null
   }["files"]
   readonly agents?: {
@@ -4368,6 +4411,17 @@ export type SessionCommandInput = {
       readonly id: string
       readonly mention?: { readonly start: number; readonly end: number; readonly text: string }
     }>
+    readonly mcp?: {
+      readonly [x: string]: {
+        readonly type: "remote"
+        readonly url: string
+        readonly headers?: { readonly [x: string]: string }
+        readonly oauth?: false
+        readonly codemode?: boolean
+        readonly approval_bridge?: ReadonlyArray<string>
+        readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
+      }
+    }
     readonly delivery?: ("steer" | "queue") | null
   }["agents"]
   readonly skills?: {
@@ -4387,8 +4441,49 @@ export type SessionCommandInput = {
       readonly id: string
       readonly mention?: { readonly start: number; readonly end: number; readonly text: string }
     }>
+    readonly mcp?: {
+      readonly [x: string]: {
+        readonly type: "remote"
+        readonly url: string
+        readonly headers?: { readonly [x: string]: string }
+        readonly oauth?: false
+        readonly codemode?: boolean
+        readonly approval_bridge?: ReadonlyArray<string>
+        readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
+      }
+    }
     readonly delivery?: ("steer" | "queue") | null
   }["skills"]
+  readonly mcp?: {
+    readonly name: string
+    readonly text: string
+    readonly files?: ReadonlyArray<{
+      readonly uri: string
+      readonly name?: string
+      readonly description?: string
+      readonly mention?: { readonly start: number; readonly end: number; readonly text: string }
+    }>
+    readonly agents?: ReadonlyArray<{
+      readonly name: string
+      readonly mention?: { readonly start: number; readonly end: number; readonly text: string }
+    }>
+    readonly skills?: ReadonlyArray<{
+      readonly id: string
+      readonly mention?: { readonly start: number; readonly end: number; readonly text: string }
+    }>
+    readonly mcp?: {
+      readonly [x: string]: {
+        readonly type: "remote"
+        readonly url: string
+        readonly headers?: { readonly [x: string]: string }
+        readonly oauth?: false
+        readonly codemode?: boolean
+        readonly approval_bridge?: ReadonlyArray<string>
+        readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
+      }
+    }
+    readonly delivery?: ("steer" | "queue") | null
+  }["mcp"]
   readonly delivery?: {
     readonly name: string
     readonly text: string
@@ -4406,6 +4501,17 @@ export type SessionCommandInput = {
       readonly id: string
       readonly mention?: { readonly start: number; readonly end: number; readonly text: string }
     }>
+    readonly mcp?: {
+      readonly [x: string]: {
+        readonly type: "remote"
+        readonly url: string
+        readonly headers?: { readonly [x: string]: string }
+        readonly oauth?: false
+        readonly codemode?: boolean
+        readonly approval_bridge?: ReadonlyArray<string>
+        readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
+      }
+    }
     readonly delivery?: ("steer" | "queue") | null
   }["delivery"]
 }

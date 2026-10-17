@@ -511,6 +511,7 @@ const EndpointSessionCommand = (raw: RawClient["server.session"]) => (input: Ses
         files: input["files"],
         agents: input["agents"],
         skills: input["skills"],
+        mcp: input["mcp"],
         delivery: input["delivery"],
       },
     }).pipe(Effect.mapError(mapClientError)),
