@@ -616,6 +616,26 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
         }),
       )
       .handle(
+        "session.execution",
+        Effect.fn(function* (ctx) {
+          return yield* session
+            .inspectExecution(ctx.params.sessionID)
+            .pipe(Effect.catchTag("Session.NotFoundError", missingSession))
+        }),
+      )
+      .handle(
+        "session.interruptInput",
+        Effect.fn(function* (ctx) {
+          yield* session.get(ctx.params.sessionID).pipe(Effect.catchTag("Session.NotFoundError", missingSession))
+          return {
+            interrupted: yield* session.interrupt(ctx.params.sessionID, {
+              inputID: ctx.payload.inputID,
+              resume: ctx.payload.resume,
+            }),
+          }
+        }),
+      )
+      .handle(
         "session.interrupt",
         Effect.fn(function* (ctx) {
           return { interrupted: yield* session.interrupt(ctx.params.sessionID, { resume: ctx.query.resume }) }

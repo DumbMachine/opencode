@@ -1341,6 +1341,22 @@ export type SessionLogOutput =
   | EventLog.Synced
 export type SessionLogOperation<E = never> = (input: SessionLogInput) => Stream.Stream<SessionLogOutput, E>
 
+export type SessionExecutionInput = { readonly sessionID: Session.ID }
+export type SessionExecutionOutput = { readonly active: boolean; readonly inputID?: SessionMessage.ID }
+export type SessionExecutionOperation<E = never> = (
+  input: SessionExecutionInput,
+) => Effect.Effect<SessionExecutionOutput, E>
+
+export type SessionInterruptInputInput = {
+  readonly sessionID: Session.ID
+  readonly inputID: SessionMessage.ID
+  readonly resume?: boolean | undefined
+}
+export type SessionInterruptInputOutput = { readonly interrupted: boolean }
+export type SessionInterruptInputOperation<E = never> = (
+  input: SessionInterruptInputInput,
+) => Effect.Effect<SessionInterruptInputOutput, E>
+
 export type SessionInterruptInput = { readonly sessionID: Session.ID; readonly resume?: boolean | undefined }
 export type SessionInterruptOutput = { readonly interrupted: boolean }
 export type SessionInterruptOperation<E = never> = (
@@ -1452,6 +1468,8 @@ export interface SessionApi<E = never> {
   }
   readonly generate: SessionGenerateOperation<E>
   readonly log: SessionLogOperation<E>
+  readonly execution: SessionExecutionOperation<E>
+  readonly interruptInput: SessionInterruptInputOperation<E>
   readonly interrupt: SessionInterruptOperation<E>
   readonly background: SessionBackgroundOperation<E>
   readonly message: { readonly get: SessionMessageGetOperation<E> }

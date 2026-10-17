@@ -14,6 +14,7 @@ import { ProjectTable } from "@opencode/core/project/sql"
 import { AbsolutePath } from "@opencode/core/schema"
 import { Session } from "@opencode/core/session"
 import { SessionExecution } from "@opencode/core/session/execution"
+import { SessionExecutionCapability } from "@opencode/core/session/execution-capability"
 import { SessionRestart } from "@opencode/core/session/execution/restart"
 import { UserInterruptedError } from "@opencode/core/session/error"
 import { SessionEvent } from "@opencode/core/session/event"
@@ -143,6 +144,70 @@ describe("SessionExecution lifecycle", () => {
       expect(yield* execution.interrupt(sessionID)).toBeTrue()
       yield* execution.awaitIdle(sessionID)
       expect((yield* claims(database))[sessionID]).toBe(false)
+    }),
+  )
+
+  it.effect("conditional control targets the selected input and isolates other sessions", () =>
+    Effect.gen(function* () {
+      const database = yield* Database.Service
+      const first = Session.ID.make("ses_input_control_first")
+      const second = Session.ID.make("ses_input_control_second")
+      const firstInput = SessionMessage.ID.make("msg_input_control_first")
+      const secondInput = SessionMessage.ID.make("msg_input_control_second")
+      yield* seedSessions(database, [first, second])
+      const running = yield* Deferred.make<void>()
+      let drains = 0
+      const scope = yield* Scope.make()
+      yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void))
+      const context = yield* buildExecution(scope, () =>
+        Effect.sync(() => {
+          drains++
+          if (drains === 2) Deferred.doneUnsafe(running, Effect.void)
+        }).pipe(Effect.andThen(Effect.never)),
+      )
+      const execution = Context.get(context, SessionExecution.Service)
+      yield* SessionExecutionCapability.select(first, firstInput)
+      yield* SessionExecutionCapability.select(second, secondInput)
+      yield* execution.wake(first)
+      yield* execution.wake(second)
+      yield* Deferred.await(running)
+      expect(yield* execution.inspect(first)).toEqual({ active: true, inputID: firstInput })
+      expect(yield* execution.inspect(second)).toEqual({ active: true, inputID: secondInput })
+      expect(yield* execution.interrupt(first, { inputID: secondInput, resume: true })).toBeFalse()
+      expect(yield* execution.isActive(first)).toBeTrue()
+      expect(yield* execution.isActive(second)).toBeTrue()
+      expect(yield* execution.interrupt(first, { inputID: firstInput, awaitSettlement: true })).toBeTrue()
+      expect(yield* execution.inspect(first)).toEqual({ active: false })
+      expect(yield* execution.isActive(second)).toBeTrue()
+      expect(yield* execution.interrupt(second, { inputID: firstInput, resume: true })).toBeFalse()
+      expect(yield* execution.interrupt(second, { inputID: secondInput, awaitSettlement: true })).toBeTrue()
+      expect(drains).toBe(2)
+      yield* SessionExecutionCapability.drop(first, firstInput)
+      yield* SessionExecutionCapability.drop(second, secondInput)
+    }),
+  )
+
+  it.effect("committed user delivery selects the current input before context loading", () =>
+    Effect.gen(function* () {
+      const database = yield* Database.Service
+      const bus = yield* Bus.Service
+      const admission = yield* SessionInbox.Service
+      const sessionID = Session.ID.make("ses_input_delivery_selection")
+      yield* seedSessions(database, [sessionID])
+      const first = SessionMessage.ID.make("msg_delivery_selection_first")
+      const second = SessionMessage.ID.make("msg_delivery_selection_second")
+      for (const id of [first, second]) {
+        yield* admission.admit({
+          id,
+          sessionID,
+          item: { type: "user", payload: { text: "User input" }, delivery: "queue" },
+        })
+        expect(yield* SessionInbox.promote(database.db, bus, sessionID, "input")).toBe(1)
+        expect(SessionExecutionCapability.selectedInput(sessionID)).toBe(id)
+      }
+      yield* SessionExecutionCapability.get(sessionID, undefined)
+      expect(SessionExecutionCapability.selectedInput(sessionID)).toBeUndefined()
+      yield* SessionExecutionCapability.retain(sessionID, new Set())
     }),
   )
 

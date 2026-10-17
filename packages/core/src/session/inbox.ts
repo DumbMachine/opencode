@@ -21,6 +21,7 @@ import { Bus } from "../bus.js"
 import { KeyedMutex } from "../effect/keyed-mutex.js"
 import { SessionEvent } from "./event.js"
 import { SessionMessage } from "./message.js"
+import { SessionExecutionCapability } from "./execution-capability.js"
 import { SessionSchema } from "./schema.js"
 import { SessionInboxTable, SessionMessageTable } from "./sql.js"
 
@@ -463,25 +464,33 @@ const publish = Effect.fn("SessionInbox.publish")(function* (
 ) {
   yield* Effect.forEach(
     rows,
-    (row) => {
-      const entry = fromRow(row)
-      if (entry.type === "compaction") return Effect.die(new LifecycleConflict({ id: entry.id }))
-      return bus
-        .publish(SessionEvent.InboxDelivered, {
-          sessionID,
-          inboxID: entry.id,
-        })
-        .pipe(
-          Effect.catchDefect((defect) =>
-            defect instanceof LifecycleConflict
-              ? promotedFromMessage(db, sessionID, entry.id, entry.delivery).pipe(
-                  Effect.flatMap((stored) => (stored !== undefined ? Effect.void : Effect.die(defect))),
-                  Effect.orDie,
-                )
-              : Effect.die(defect),
-          ),
-        )
-    },
+    (row) =>
+      Effect.gen(function* () {
+        const entry = fromRow(row)
+        if (entry.type === "compaction") return yield* Effect.die(new LifecycleConflict({ id: entry.id }))
+        // Deny conditional controls during delivery instead of exposing the
+        // previous input while a new user message is committing. This also
+        // fails closed if publication aborts before context is reloaded.
+        if (entry.type === "user") yield* SessionExecutionCapability.clearSelection(sessionID)
+        return yield* bus
+          .publish(SessionEvent.InboxDelivered, {
+            sessionID,
+            inboxID: entry.id,
+          })
+          .pipe(
+            Effect.tap(() =>
+              entry.type === "user" ? SessionExecutionCapability.select(sessionID, entry.id) : Effect.void,
+            ),
+            Effect.catchDefect((defect) =>
+              defect instanceof LifecycleConflict
+                ? promotedFromMessage(db, sessionID, entry.id, entry.delivery).pipe(
+                    Effect.flatMap((stored) => (stored !== undefined ? Effect.void : Effect.die(defect))),
+                    Effect.orDie,
+                  )
+                : Effect.die(defect),
+            ),
+          )
+      }),
     { discard: true },
   )
   return rows.length

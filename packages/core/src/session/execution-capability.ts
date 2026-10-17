@@ -17,9 +17,26 @@ const selected = new Map<SessionSchema.ID, SessionMessage.ID>()
 
 export const get = (sessionID: SessionSchema.ID, inputID: SessionMessage.ID | undefined) =>
   Effect.sync(() => {
-    if (inputID === undefined) return undefined
+    if (inputID === undefined) {
+      selected.delete(sessionID)
+      return undefined
+    }
     selected.set(sessionID, inputID)
     return grants.get(sessionID)?.get(inputID)
+  })
+
+// Input identity is process-local, like its installed credentials. During
+// delivery it is unknown until the durable user message commits.
+export const selectedInput = (sessionID: SessionSchema.ID) => selected.get(sessionID)
+
+export const clearSelection = (sessionID: SessionSchema.ID) =>
+  Effect.sync(() => {
+    selected.delete(sessionID)
+  })
+
+export const select = (sessionID: SessionSchema.ID, inputID: SessionMessage.ID) =>
+  Effect.sync(() => {
+    selected.set(sessionID, inputID)
   })
 
 export const set = (sessionID: SessionSchema.ID, grant: Grant) =>

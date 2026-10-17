@@ -207,10 +207,14 @@ export interface Interface {
   ) => Effect.Effect<SessionInbox.Compaction, NotFoundError | CompactionConflictError>
   readonly wait: (id: SessionSchema.ID) => Effect.Effect<void, NotFoundError>
   readonly active: Effect.Effect<ReadonlySet<SessionSchema.ID>>
+  readonly inspectExecution: (sessionID: SessionSchema.ID) => Effect.Effect<SessionExecution.State, NotFoundError>
   readonly background: (sessionID: SessionSchema.ID) => Effect.Effect<void, NotFoundError>
   readonly resume: (sessionID: SessionSchema.ID) => Effect.Effect<void, NotFoundError | SessionRunner.RunError>
   readonly wake: (sessionID: SessionSchema.ID) => Effect.Effect<void>
-  readonly interrupt: (sessionID: SessionSchema.ID, options?: { readonly resume?: boolean }) => Effect.Effect<boolean>
+  readonly interrupt: (
+    sessionID: SessionSchema.ID,
+    options?: { readonly resume?: boolean; readonly inputID?: SessionMessage.ID },
+  ) => Effect.Effect<boolean>
   readonly synthetic: (
     input: Parameters<Session.Handle["synthetic"]>[0] & { sessionID: SessionSchema.ID },
   ) => ReturnType<Session.Handle["synthetic"]>
@@ -449,6 +453,10 @@ const layer = Layer.effect(
       }),
       resume: (sessionID) => sessions.forSession(sessionID).resume(),
       synthetic: (input) => sessions.forSession(input.sessionID).synthetic(input),
+      inspectExecution: Effect.fn("Session.inspectExecution")(function* (sessionID) {
+        yield* result.get(sessionID)
+        return yield* execution.inspect(sessionID)
+      }),
       interrupt: (sessionID, options) => sessions.forSession(sessionID).interrupt(options),
       revert: {
         stage: (input) => sessions.forSession(input.sessionID).revert.stage(input),

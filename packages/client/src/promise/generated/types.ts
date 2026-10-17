@@ -205,6 +205,10 @@ export type SessionMessageToolStateRunning1 = {
 
 export type EventLogSynced = { type: "log.synced"; aggregateID: string; seq?: number }
 
+export type SessionExecutionSnapshot = { active: boolean; inputID?: string }
+
+export type SessionInputInterruptResponse = { interrupted: boolean }
+
 export type SessionInterruptResponse = { interrupted: boolean }
 
 export type FormMetadata = { [x: string]: JsonValue }
@@ -4696,6 +4700,18 @@ export type SessionLogInput = {
 }
 
 export type SessionLogOutput = SessionLogItem
+
+export type SessionExecutionInput = { readonly sessionID: { readonly sessionID: string }["sessionID"] }
+
+export type SessionExecutionOutput = SessionExecutionSnapshot
+
+export type SessionInterruptInputInput = {
+  readonly sessionID: { readonly sessionID: string }["sessionID"]
+  readonly inputID: { readonly inputID: string; readonly resume?: boolean | undefined }["inputID"]
+  readonly resume?: { readonly inputID: string; readonly resume?: boolean | undefined }["resume"]
+}
+
+export type SessionInterruptInputOutput = SessionInputInterruptResponse
 
 export type SessionInterruptInput = {
   readonly sessionID: { readonly sessionID: string }["sessionID"]

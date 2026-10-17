@@ -116,6 +116,7 @@ const executionNode = makeGlobalNode({
       return SessionExecution.Service.of({
         active: Effect.succeed(new Set()),
         isActive: () => Effect.succeed(false),
+        inspect: () => Effect.succeed({ active: false }),
         resume: complete,
         wake: () => Effect.void,
         interrupt: () => Effect.succeed(false),
@@ -1309,9 +1310,7 @@ describe("ShellTool", () => {
               expect(settled.status).toBe("completed")
               expect(settled.metadata).toMatchObject({ exit: 7, truncated: false })
               expect(settled.content?.[0]).toEqual({ type: "text", text: "body" })
-              expect(settled.content?.[1]).toMatchObject(
-                Expected.text(expect.stringContaining("Exited with code 7")),
-              )
+              expect(settled.content?.[1]).toMatchObject(Expected.text(expect.stringContaining("Exited with code 7")))
             }),
           ),
         )
@@ -1338,9 +1337,7 @@ describe("ShellTool", () => {
                 if (!content || content.type !== "text") throw new Error("Expected text content")
                 expect(content.text.includes("output-start")).toBe(false)
                 expect(content.text.includes("output-end")).toBe(true)
-                expect(content).toMatchObject(
-                  Expected.text(expect.stringContaining("full output saved to ")),
-                )
+                expect(content).toMatchObject(Expected.text(expect.stringContaining("full output saved to ")))
               }),
             ),
           )

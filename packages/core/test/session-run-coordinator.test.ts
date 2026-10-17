@@ -331,9 +331,7 @@ describe("SessionRunCoordinator", () => {
       yield* coordinator.wake("session")
       yield* Deferred.await(started)
       yield* coordinator.wake("session")
-      expect(
-        yield* coordinator.interrupt("session", "user", { when: () => false, awaitSettlement: true }),
-      ).toBeFalse()
+      expect(yield* coordinator.interrupt("session", "user", { when: () => false, awaitSettlement: true })).toBeFalse()
       expect(yield* coordinator.isActive("session")).toBeTrue()
       yield* Deferred.succeed(release, undefined)
       yield* coordinator.awaitIdle("session")
@@ -364,15 +362,19 @@ describe("SessionRunCoordinator", () => {
       yield* coordinator.wake("session")
       yield* Deferred.await(started)
       yield* coordinator.wake("session")
-      const interrupted = yield* coordinator.interrupt("session", "user", {
-        when: () => true,
-        awaitSettlement: true,
-      }).pipe(
-        Effect.tap(() => Effect.sync(() => {
-          returned = true
-        })),
-        Effect.forkChild,
-      )
+      const interrupted = yield* coordinator
+        .interrupt("session", "user", {
+          when: () => true,
+          awaitSettlement: true,
+        })
+        .pipe(
+          Effect.tap(() =>
+            Effect.sync(() => {
+              returned = true
+            }),
+          ),
+          Effect.forkChild,
+        )
       yield* Deferred.await(cleanupStarted)
       expect(returned).toBeFalse()
       yield* Deferred.succeed(cleanupGate, undefined)
@@ -397,9 +399,7 @@ describe("SessionRunCoordinator", () => {
       current = "next-input"
       expect(yield* stale).toBeFalse()
       expect(yield* coordinator.isActive("session")).toBeTrue()
-      expect(
-        yield* coordinator.interrupt("session", undefined, { when: () => current === "next-input" }),
-      ).toBeTrue()
+      expect(yield* coordinator.interrupt("session", undefined, { when: () => current === "next-input" })).toBeTrue()
       yield* coordinator.awaitIdle("session")
     }),
   )

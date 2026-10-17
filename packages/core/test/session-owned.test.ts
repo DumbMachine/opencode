@@ -99,6 +99,7 @@ const setup = Effect.fnUntraced(function* (options?: {
   const execution = SessionExecution.Service.of({
     active: Effect.succeed(new Set<SessionSchema.ID>()),
     isActive: () => Effect.succeed(false),
+    inspect: () => Effect.succeed({ active: false }),
     resume: (id) =>
       Effect.sync(() => {
         resumes.push(id)
@@ -628,6 +629,7 @@ describe("Session-owned handles", () => {
         execution: SessionExecution.Service.of({
           active: coordinator.active,
           isActive: coordinator.isActive,
+          inspect: (sessionID) => coordinator.isActive(sessionID).pipe(Effect.map((active) => ({ active }))),
           resume: (id) =>
             Effect.gen(function* () {
               resumes.push(id)

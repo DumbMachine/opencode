@@ -10,17 +10,24 @@ import { SessionEvent } from "./event.js"
 import { SessionRunCoordinator } from "./run-coordinator.js"
 import { SessionRunner } from "./runner/index.js"
 import { SessionSchema } from "./schema.js"
+import { SessionMessage } from "./message.js"
 import { SessionStore } from "./store.js"
 import { toSessionError } from "./to-session-error.js"
 import { UserInterruptedError } from "./error.js"
 import { SessionExecutionCapability } from "./execution-capability.js"
 import { SessionInbox } from "./inbox.js"
 
+export interface State {
+  readonly active: boolean
+  readonly inputID?: SessionMessage.ID
+}
+
 export interface Interface {
   /** Snapshots active execution owned by this process. */
   readonly active: Effect.Effect<ReadonlySet<SessionSchema.ID>>
   /** Checks process-local ownership, including interruption cleanup and terminal settlement. */
   readonly isActive: (sessionID: SessionSchema.ID) => Effect.Effect<boolean>
+  readonly inspect: (sessionID: SessionSchema.ID) => Effect.Effect<State>
   /** Starts execution while idle or joins the active execution. */
   readonly resume: (sessionID: SessionSchema.ID) => Effect.Effect<void, SessionRunner.RunError>
   /** Registers newly recorded work. Repeated wakeups may coalesce. */
@@ -38,6 +45,7 @@ export interface Interface {
       readonly resume?: boolean
       readonly reason?: "user" | "inactivity"
       readonly awaitSettlement?: boolean
+      readonly inputID?: SessionMessage.ID
     },
   ) => Effect.Effect<boolean>
   /** Resolves once this process owns no active execution for the Session. Returns immediately when idle and never starts work. */
@@ -159,9 +167,23 @@ export const layer = Layer.effect(
     return Service.of({
       active: coordinator.active,
       isActive: coordinator.isActive,
+      inspect: (sessionID) =>
+        coordinator.isActive(sessionID).pipe(
+          Effect.map((active) => {
+            const inputID = active ? SessionExecutionCapability.selectedInput(sessionID) : undefined
+            return inputID === undefined ? { active } : { active, inputID }
+          }),
+        ),
       interrupt: (sessionID, options) =>
         Effect.gen(function* () {
-          const interrupted = yield* coordinator.interrupt(sessionID, options?.reason ?? "user", options)
+          const inputID = options?.inputID
+          const interrupted = yield* coordinator.interrupt(sessionID, options?.reason ?? "user", {
+            awaitSettlement: options?.awaitSettlement,
+            when:
+              inputID === undefined ? undefined : () => SessionExecutionCapability.selectedInput(sessionID) === inputID,
+          })
+          // A refused conditional control must not wake somebody else's work.
+          if (!interrupted && inputID !== undefined) return false
           if (!options?.resume) return interrupted
           // Resume steering input and between-turn control work from the interrupted
           // intent. Queued next-turn prompts stay parked: a steer-scoped drain never
@@ -196,6 +218,7 @@ export const noopLayer = Layer.succeed(
   Service.of({
     active: Effect.succeed(new Set()),
     isActive: () => Effect.succeed(false),
+    inspect: () => Effect.succeed({ active: false }),
     resume: () => Effect.void,
     wake: () => Effect.void,
     interrupt: () => Effect.succeed(false),

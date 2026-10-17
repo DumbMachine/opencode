@@ -81,6 +81,10 @@ import type {
   SessionGenerateOutput,
   SessionLogInput,
   SessionLogOutput,
+  SessionExecutionInput,
+  SessionExecutionOutput,
+  SessionInterruptInputInput,
+  SessionInterruptInputOutput,
   SessionInterruptInput,
   SessionInterruptOutput,
   SessionBackgroundInput,
@@ -963,6 +967,29 @@ export function make(options: ClientOptions) {
             method: "GET",
             path: `/api/experimental/session/${encodeURIComponent(input.sessionID)}/log`,
             query: { after: input["after"], follow: input["follow"] },
+            successStatus: 200,
+            declaredStatuses: [400, 401, 404],
+            empty: false,
+          },
+          requestOptions,
+        ),
+      execution: (input: SessionExecutionInput, requestOptions?: RequestOptions) =>
+        request<SessionExecutionOutput>(
+          {
+            method: "GET",
+            path: `/api/session/${encodeURIComponent(input.sessionID)}/execution`,
+            successStatus: 200,
+            declaredStatuses: [400, 401, 404],
+            empty: false,
+          },
+          requestOptions,
+        ),
+      interruptInput: (input: SessionInterruptInputInput, requestOptions?: RequestOptions) =>
+        request<SessionInterruptInputOutput>(
+          {
+            method: "POST",
+            path: `/api/session/${encodeURIComponent(input.sessionID)}/interrupt-input`,
+            body: { inputID: input["inputID"], resume: input["resume"] },
             successStatus: 200,
             declaredStatuses: [400, 401, 404],
             empty: false,

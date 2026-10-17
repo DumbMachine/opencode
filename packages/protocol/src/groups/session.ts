@@ -170,12 +170,10 @@ export const SessionsQuery = Schema.Struct({
   cursor: SessionsQueryCursor.pipe(Schema.optional),
 }).annotate({ identifier: "SessionsQuery" })
 
-export const makeSessionGroup = <
-  I extends HttpApiMiddleware.AnyId,
-  S,
-  FormI extends HttpApiMiddleware.AnyId,
-  FormS,
->(sessionLocationMiddleware: Context.Key<I, S>, formLocationMiddleware: Context.Key<FormI, FormS>) =>
+export const makeSessionGroup = <I extends HttpApiMiddleware.AnyId, S, FormI extends HttpApiMiddleware.AnyId, FormS>(
+  sessionLocationMiddleware: Context.Key<I, S>,
+  formLocationMiddleware: Context.Key<FormI, FormS>,
+) =>
   HttpApiGroup.make("server.session")
     .add(
       HttpApiEndpoint.get("session.list", "/api/session", {
@@ -559,9 +557,7 @@ export const makeSessionGroup = <
         error: [SessionNotFoundError, SessionBusyError],
       })
         .middleware(sessionLocationMiddleware)
-        .annotateMerge(
-          OpenApi.annotations({ identifier: "session.revert.commit", summary: "Commit staged revert" }),
-        ),
+        .annotateMerge(OpenApi.annotations({ identifier: "session.revert.commit", summary: "Commit staged revert" })),
     )
     .add(
       HttpApiEndpoint.get("session.context", "/api/session/:sessionID/context", {
@@ -739,6 +735,43 @@ export const makeSessionGroup = <
             "Experimental durable session event log. Reads events after an exclusive aggregate sequence and continues with live events when follow=true.",
         }),
       ),
+    )
+    .add(
+      HttpApiEndpoint.get("session.execution", "/api/session/:sessionID/execution", {
+        params: { sessionID: Session.ID },
+        success: Schema.Struct({ active: Schema.Boolean, inputID: Schema.optionalKey(SessionMessage.ID) }).annotate({
+          identifier: "SessionExecutionSnapshot",
+        }),
+        error: SessionNotFoundError,
+      })
+        .middleware(sessionLocationMiddleware)
+        .annotateMerge(
+          OpenApi.annotations({
+            identifier: "session.execution",
+            summary: "Inspect active session input",
+            description:
+              "Inspect process-local execution and its selected native user input. An unknown transition input is omitted. The snapshot is not a control permit.",
+          }),
+        ),
+    )
+    .add(
+      HttpApiEndpoint.post("session.interruptInput", "/api/session/:sessionID/interrupt-input", {
+        params: { sessionID: Session.ID },
+        payload: Schema.Struct({ inputID: SessionMessage.ID, resume: Schema.optional(Schema.Boolean) }),
+        success: Schema.Struct({ interrupted: Schema.Boolean }).annotate({
+          identifier: "SessionInputInterruptResponse",
+        }),
+        error: SessionNotFoundError,
+      })
+        .middleware(sessionLocationMiddleware)
+        .annotateMerge(
+          OpenApi.annotations({
+            identifier: "session.interruptInput",
+            summary: "Interrupt the selected native input",
+            description:
+              "Atomically interrupt only while the expected native user input is still selected and active. A stale/unknown input returns interrupted=false without stopping or waking work. No unconditional fallback is performed.",
+          }),
+        ),
     )
     .add(
       HttpApiEndpoint.post("session.interrupt", "/api/session/:sessionID/interrupt", {
