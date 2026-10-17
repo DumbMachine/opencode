@@ -4232,7 +4232,7 @@
             }
           }
         },
-        "description": "Atomically interrupt only while the expected native user input is still selected and active. A stale/unknown input returns interrupted=false without stopping or waking work. Queued admission wakes survive a successful conditional stop. Steered user delivery changes the selected input; inspect again before controlling it. No unconditional fallback is performed.",
+        "description": "Atomically interrupt only while the expected native user input is still selected and active. A stale/unknown input returns interrupted=false without stopping or waking work. After a successful conditional stop, remaining admitted inputs, steers and controls always continue. Steered user delivery changes the selected input; inspect again before controlling it. No unconditional fallback is performed.",
         "summary": "Interrupt the selected native input",
         "requestBody": {
           "content": {
@@ -4243,16 +4243,6 @@
                   "inputID": {
                     "type": "string",
                     "pattern": "^msg_"
-                  },
-                  "resume": {
-                    "anyOf": [
-                      {
-                        "type": "boolean"
-                      },
-                      {
-                        "type": "null"
-                      }
-                    ]
                   }
                 },
                 "required": ["inputID"],

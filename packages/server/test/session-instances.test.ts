@@ -193,12 +193,11 @@ it.live(
         expect(yield* Effect.promise<unknown>(() => inspection.json())).toEqual({ active: false })
         const stale = yield* request(`/api/session/${config.id}/interrupt-input`, {
           inputID: "msg_missing",
-          resume: true,
         })
         expect(stale.status).toBe(200)
         expect(yield* Effect.promise<unknown>(() => stale.json())).toEqual({ interrupted: false })
         expect((yield* sessions.inspectExecution(config.id)).active).toBeFalse()
-        expect((yield* request(`/api/session/${config.id}/interrupt-input`, { resume: true })).status).toBe(400)
+        expect((yield* request(`/api/session/${config.id}/interrupt-input`, {})).status).toBe(400)
       }
       expect((yield* request("/api/session/ses_missing/execution")).status).toBe(404)
       expect((yield* request("/api/session/ses_missing/interrupt-input", { inputID: "msg_missing" })).status).toBe(404)

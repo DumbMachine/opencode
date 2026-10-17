@@ -14,7 +14,8 @@ export interface Coordinator<Key, E, Reason = never> {
   /** Rings the doorbell: an idle key starts an execution; an active one drains again before settling. */
   readonly wake: (key: Key, scope?: Promotable) => Effect.Effect<void>
   /**
-   * Stops the active execution. Session-wide interruption claims recorded wakes; conditional interruption preserves them. No-op when idle. Resolves once the
+   * Stops the active execution. Session-wide interruption claims recorded wakes;
+   * conditional interruption preserves them. No-op when idle. Resolves once the
    * interruption is accepted, not when cleanup settles: the execution fiber finishes its
    * finalizers and settled hook on its own time. Returns whether an active execution was
    * interrupted. `awaitSettlement` waits for this execution's cleanup and settled hook,

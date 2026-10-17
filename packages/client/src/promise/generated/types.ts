@@ -4707,8 +4707,7 @@ export type SessionExecutionOutput = SessionExecutionSnapshot
 
 export type SessionInterruptInputInput = {
   readonly sessionID: { readonly sessionID: string }["sessionID"]
-  readonly inputID: { readonly inputID: string; readonly resume?: boolean | undefined }["inputID"]
-  readonly resume?: { readonly inputID: string; readonly resume?: boolean | undefined }["resume"]
+  readonly inputID: { readonly inputID: string }["inputID"]
 }
 
 export type SessionInterruptInputOutput = SessionInputInterruptResponse

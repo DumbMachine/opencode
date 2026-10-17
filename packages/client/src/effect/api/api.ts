@@ -1347,11 +1347,7 @@ export type SessionExecutionOperation<E = never> = (
   input: SessionExecutionInput,
 ) => Effect.Effect<SessionExecutionOutput, E>
 
-export type SessionInterruptInputInput = {
-  readonly sessionID: Session.ID
-  readonly inputID: SessionMessage.ID
-  readonly resume?: boolean | undefined
-}
+export type SessionInterruptInputInput = { readonly sessionID: Session.ID; readonly inputID: SessionMessage.ID }
 export type SessionInterruptInputOutput = { readonly interrupted: boolean }
 export type SessionInterruptInputOperation<E = never> = (
   input: SessionInterruptInputInput,

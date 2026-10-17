@@ -24,7 +24,7 @@ import { SessionRunner } from "@opencode/core/session/runner/index"
 import { SessionInboxTable, SessionTable } from "@opencode/core/session/sql"
 import { SessionStore } from "@opencode/core/session/store"
 import { Cause, Context, Deferred, Effect, Exit, Fiber, Layer, LayerMap, Scope } from "effect"
-import { eq } from "drizzle-orm"
+import { eq, sql } from "drizzle-orm"
 import { testEffect } from "./lib/effect"
 
 const it = testEffect(
@@ -184,6 +184,39 @@ describe("SessionExecution lifecycle", () => {
       expect(drains).toBe(2)
       yield* SessionExecutionCapability.drop(first, firstInput)
       yield* SessionExecutionCapability.drop(second, secondInput)
+    }),
+  )
+
+  it.effect("acknowledges an accepted input stop when remaining-inbox inspection fails", () =>
+    Effect.gen(function* () {
+      const database = yield* Database.Service
+      const sessionID = Session.ID.make("ses_control_inbox_unavailable")
+      const inputID = SessionMessage.ID.make("msg_control_inbox_unavailable")
+      yield* seedSessions(database, [sessionID])
+      const running = yield* Deferred.make<void>()
+      let drains = 0
+      const scope = yield* Scope.make()
+      yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void))
+      const context = yield* buildExecution(scope, () =>
+        Effect.sync(() => ++drains).pipe(
+          Effect.flatMap((count) =>
+            count === 1 ? Deferred.succeed(running, undefined).pipe(Effect.andThen(Effect.never)) : Effect.void,
+          ),
+        ),
+      )
+      const execution = Context.get(context, SessionExecution.Service)
+      yield* SessionExecutionCapability.select(sessionID, inputID)
+      yield* execution.wake(sessionID)
+      yield* Deferred.await(running)
+      // Fail the real post-stop SQL read, with the fixture restored even on failure.
+      const interrupted = yield* Effect.acquireUseRelease(
+        database.db.run(sql`ALTER TABLE session_inbox RENAME TO unavailable_inbox`).pipe(Effect.orDie),
+        () => execution.interrupt(sessionID, { inputID, awaitSettlement: true }),
+        () => database.db.run(sql`ALTER TABLE unavailable_inbox RENAME TO session_inbox`).pipe(Effect.orDie),
+      )
+      expect(interrupted).toBeTrue()
+      yield* execution.awaitIdle(sessionID)
+      expect(drains).toBe(2)
     }),
   )
 

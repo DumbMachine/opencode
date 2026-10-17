@@ -188,7 +188,18 @@ export const layer = Layer.effect(
             // The interrupted drain may have consumed the doorbell for several
             // queued inputs. Only the selected input was cancelled; let the
             // native inbox continue every remaining admitted item.
-            if (yield* SessionInbox.nextPromotable(db, sessionID, "input")) yield* coordinator.wake(sessionID, "input")
+            const pending = yield* SessionInbox.nextPromotable(db, sessionID, "input").pipe(
+              Effect.map((item) => item !== undefined),
+              Effect.catchDefect((error) =>
+                Effect.logError("Failed to inspect remaining input after interruption", error).pipe(
+                  Effect.annotateLogs({ sessionID, inputID }),
+                  // A stop already happened. Preserve its acknowledgement and let
+                  // the ordinary drain retry the native inbox instead of stranding it.
+                  Effect.as(true),
+                ),
+              ),
+            )
+            if (pending) yield* coordinator.wake(sessionID, "input")
             return true
           }
           if (!options?.resume) return interrupted

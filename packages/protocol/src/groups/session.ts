@@ -757,7 +757,7 @@ export const makeSessionGroup = <I extends HttpApiMiddleware.AnyId, S, FormI ext
     .add(
       HttpApiEndpoint.post("session.interruptInput", "/api/session/:sessionID/interrupt-input", {
         params: { sessionID: Session.ID },
-        payload: Schema.Struct({ inputID: SessionMessage.ID, resume: Schema.optional(Schema.Boolean) }),
+        payload: Schema.Struct({ inputID: SessionMessage.ID }),
         success: Schema.Struct({ interrupted: Schema.Boolean }).annotate({
           identifier: "SessionInputInterruptResponse",
         }),
@@ -769,7 +769,7 @@ export const makeSessionGroup = <I extends HttpApiMiddleware.AnyId, S, FormI ext
             identifier: "session.interruptInput",
             summary: "Interrupt the selected native input",
             description:
-              "Atomically interrupt only while the expected native user input is still selected and active. A stale/unknown input returns interrupted=false without stopping or waking work. Queued admission wakes survive a successful conditional stop. Steered user delivery changes the selected input; inspect again before controlling it. No unconditional fallback is performed.",
+              "Atomically interrupt only while the expected native user input is still selected and active. A stale/unknown input returns interrupted=false without stopping or waking work. After a successful conditional stop, remaining admitted inputs, steers and controls always continue. Steered user delivery changes the selected input; inspect again before controlling it. No unconditional fallback is performed.",
           }),
         ),
     )

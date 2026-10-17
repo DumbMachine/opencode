@@ -5151,29 +5151,34 @@ describe("SessionRunnerLLM", () => {
   })
 
   for (const admission of ["before execution", "during execution"] as const) {
-    scenario(`stopping one input continues an unwoken prompt admitted ${admission}`, function* (s) {
-      const execution = yield* nativeInputControl
-      const first = yield* s.admit("Interrupted actor input")
-      const queued = () =>
-        s.session.prompt({ sessionID, text: "Pending other actor", delivery: "queue", resume: false })
-      const before = admission === "before execution" ? yield* queued() : undefined
-      const stream = yield* s.llm.gate
-      const run = yield* execution.resume(sessionID).pipe(Effect.forkChild)
-      yield* stream.started
-      const second = before ?? (yield* queued())
-      yield* s.llm.push(TestLLM.stop())
-      // No wake for the second input exists. Stopping A must still let B run.
-      expect(yield* execution.interrupt(sessionID, { inputID: first.id, awaitSettlement: true })).toBeTrue()
-      expect(Exit.isFailure(yield* Fiber.await(run))).toBeTrue()
-      yield* stream.release
-      yield* execution.awaitIdle(sessionID)
-      expect(s.requests.map(userTexts)).toEqual([
-        ["Interrupted actor input"],
-        ["Interrupted actor input", "Pending other actor"],
-      ])
-      expect((yield* s.messages).some((message) => message.id === second.id)).toBeTrue()
-      expect(yield* s.inbox).toEqual([])
-    })
+    for (const awaitSettlement of [false, true]) {
+      scenario(
+        `stopping one input continues an unwoken prompt admitted ${admission} (awaitSettlement=${awaitSettlement})`,
+        function* (s) {
+          const execution = yield* nativeInputControl
+          const first = yield* s.admit("Interrupted actor input")
+          const queued = () =>
+            s.session.prompt({ sessionID, text: "Pending other actor", delivery: "queue", resume: false })
+          const before = admission === "before execution" ? yield* queued() : undefined
+          const stream = yield* s.llm.gate
+          const run = yield* execution.resume(sessionID).pipe(Effect.forkChild)
+          yield* stream.started
+          const second = before ?? (yield* queued())
+          yield* s.llm.push(TestLLM.stop())
+          // No wake for the second input exists. Stopping A must still let B run.
+          expect(yield* execution.interrupt(sessionID, { inputID: first.id, awaitSettlement })).toBeTrue()
+          expect(Exit.isFailure(yield* Fiber.await(run))).toBeTrue()
+          yield* stream.release
+          yield* execution.awaitIdle(sessionID)
+          expect(s.requests.map(userTexts)).toEqual([
+            ["Interrupted actor input"],
+            ["Interrupted actor input", "Pending other actor"],
+          ])
+          expect((yield* s.messages).some((message) => message.id === second.id)).toBeTrue()
+          expect(yield* s.inbox).toEqual([])
+        },
+      )
+    }
   }
 
   scenario("durably fails blocked local tools when a step is interrupted", function* (s) {
