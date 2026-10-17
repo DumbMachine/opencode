@@ -2,6 +2,8 @@ import { expect, test } from "bun:test"
 import { Effect } from "effect"
 import { Database } from "@opencode/core/database/database"
 import { DatabaseMigration } from "@opencode/core/database/migration"
+import { Global } from "@opencode/util/global"
+import { tmpdir } from "./fixture/tmpdir"
 import viewed from "../src/database/migration/20260819222447_session_viewed_state"
 import binding from "../src/database/migration/20260823191254_nullable_workspace_binding"
 import permission from "../src/database/migration/20260910120000_clear_v1_session_permission"
@@ -11,6 +13,7 @@ import active from "../src/database/migration/20260923013825_project_time_active
 const url = process.env.OPENCODE_TEST_DATABASE_URL
 
 test.skipIf(!url)("upgrades existing PostgreSQL rows and preserves workspace references", async () => {
+  await using tmp = await tmpdir()
   await Effect.runPromise(
     Effect.gen(function* () {
       const { db } = yield* Database.Service
@@ -55,6 +58,9 @@ test.skipIf(!url)("upgrades existing PostgreSQL rows and preserves workspace ref
           yield* tx.run(`DROP SCHEMA "${schema}" CASCADE`)
         }),
       )
-    }).pipe(Effect.provide(Database.postgresDatabaseLayer(url!))),
+    }).pipe(
+      Effect.provideService(Global.Service, Global.make({ data: tmp.path })),
+      Effect.provide(Database.postgresDatabaseLayer(url!)),
+    ),
   )
 })
