@@ -754,6 +754,10 @@ const messageTexts = (request: LLMRequest, role: "user" | "system") =>
 const userTexts = (request: LLMRequest) => messageTexts(request, "user")
 const systemTexts = (request: LLMRequest) => messageTexts(request, "system")
 const messageRoles = (request: LLMRequest | undefined) => request?.messages.map((message) => message.role)
+const withoutInputHeader = (http: LLMRequest["http"]) => ({
+  ...http,
+  headers: Object.fromEntries(Object.entries(http?.headers ?? {}).filter(([name]) => name !== "x-opencode-input")),
+})
 
 const recordedEventTypes = (id: Session.ID) =>
   Effect.gen(function* () {
@@ -2107,21 +2111,15 @@ describe("SessionRunnerLLM", () => {
   })
 
   scenario("keeps the initial instructions stable and derives a chronological update from values", function* (s) {
-    yield* s.runPrompt("First")
+    const first = yield* s.runPrompt("First")
     s.systemBaseline = "Changed context"
-    yield* s.runPrompt("Second")
+    const second = yield* s.runPrompt("Second")
 
-    for (const field of [
-      "model",
-      "generation",
-      "providerOptions",
-      "http",
-      "toolChoice",
-      "cache",
-      "tools",
-      "system",
-    ] as const)
+    for (const field of ["model", "generation", "providerOptions", "toolChoice", "cache", "tools", "system"] as const)
       expect(s.requests[1][field]).toEqual(s.requests[0][field])
+    expect(withoutInputHeader(s.requests[1].http)).toEqual(withoutInputHeader(s.requests[0].http))
+    expect(s.requests[0].http?.headers?.["x-opencode-input"]).toBe(first.id)
+    expect(s.requests[1].http?.headers?.["x-opencode-input"]).toBe(second.id)
     expect(s.requests[0].messages).toHaveLength(1)
     expect(s.requests[1].messages.slice(0, 1)).toEqual([...s.requests[0].messages])
     expect(s.requests.map((request) => request.system.map((part) => part.text))).toEqual([
@@ -2961,15 +2959,15 @@ describe("SessionRunnerLLM", () => {
             LLMEvent.textDelta({ id: "prefix-summary", text: "## Objective\n- Checkpoint summary" }),
           ),
         )
-        yield* s.runPrompt("Review these changes")
+        const original = yield* s.runPrompt("Review these changes")
         if (reason === "manual") {
           yield* s.session.compact({ sessionID })
           yield* s.resume
         }
         if (reason === "auto") {
           yield* s.llm.push(TestLLM.text("Continued", "prefix-continued"))
-          yield* s.runPrompt("Retained recent request")
         }
+        const recent = reason === "auto" ? yield* s.runPrompt("Retained recent request") : undefined
 
         const normal = s.requests[1]
         const compact = s.requests[2]
@@ -2988,9 +2986,11 @@ describe("SessionRunnerLLM", () => {
           "toolChoice",
           "cache",
           "promptCacheKey",
-          "http",
         ] as const)
           expect(compact[field]).toEqual(normal[field])
+        expect(withoutInputHeader(compact.http)).toEqual(withoutInputHeader(normal.http))
+        expect(normal.http?.headers?.["x-opencode-input"]).toBe(original.id)
+        expect(compact.http?.headers?.["x-opencode-input"]).toBe(recent?.id)
         expect(compact.toolChoice).toBeUndefined()
         expect(compact.system.map((part) => part.text)).toContain("Review the project carefully.")
         expect(requestAgents[2]).toBe(agentID)
@@ -5053,7 +5053,7 @@ describe("SessionRunnerLLM", () => {
   })
 
   scenario("adds session correlation headers to model requests", function* (s) {
-    yield* s.runPrompt("Run correlated request")
+    const input = yield* s.runPrompt("Run correlated request")
 
     expect(s.requests[0]?.http?.headers).toEqual({
       "x-session-affinity": sessionID,
@@ -5061,8 +5061,46 @@ describe("SessionRunnerLLM", () => {
       "User-Agent": App.useragent(App.make()),
       "x-opencode-project": Project.ID.global,
       "x-opencode-session": sessionID,
+      "x-opencode-input": input.id,
       "x-opencode-client": "opencode",
     })
+  })
+
+  scenario("model request hooks cannot substitute another session or input billing identity", function* (s) {
+    const hooks = yield* PluginHooks.Service
+    yield* hooks.register("session", "model.request", (event) =>
+      Effect.sync(() => {
+        event.headers["X-OpenCode-Session"] = "ses_forged"
+        event.headers["x-opencode-session"] = "ses_forged_again"
+        event.headers["X-OpenCode-Input"] = "msg_forged"
+        event.headers["x-opencode-input"] = "msg_forged_again"
+        event.headers["authorization"] = "Bearer provider-fixture"
+      }),
+    )
+    const input = yield* s.runPrompt("Real initiating input")
+    const headers = s.requests[0]?.http?.headers
+    expect(headers?.["x-opencode-session"]).toBe(sessionID)
+    expect(headers?.["x-opencode-input"]).toBe(input.id)
+    expect(headers?.["X-OpenCode-Session"]).toBeUndefined()
+    expect(headers?.["X-OpenCode-Input"]).toBeUndefined()
+    expect(headers?.authorization).toBe("Bearer provider-fixture")
+    yield* s.session.synthetic({ sessionID, text: "Independent work", resume: false })
+    yield* s.llm.push([])
+    yield* s.resume
+    expect(s.requests.at(-1)?.http?.headers?.["x-opencode-input"]).toBeUndefined()
+    expect(s.requests.at(-1)?.http?.headers?.["X-OpenCode-Input"]).toBeUndefined()
+  })
+
+  scenario("manual compaction cannot borrow the preceding user's model billing identity", function* (s) {
+    const previous = yield* s.runPrompt("Preceding user")
+    s.requests.length = 0
+    yield* s.session.compact({ sessionID })
+    yield* s.llm.push(TestLLM.text("## Objective\n- Existing conversation", "summary-manual-cause"))
+    yield* s.resume
+    expect(s.requests).toHaveLength(1)
+    expect(s.requests[0]?.http?.headers?.["x-opencode-session"]).toBe(sessionID)
+    expect(s.requests[0]?.http?.headers?.["x-opencode-input"]).toBeUndefined()
+    expect((yield* s.messages).map((message) => message.id)).toContain(previous.id)
   })
 
   scenario("uses parent cache affinity for child model requests", function* (s) {

@@ -25,7 +25,7 @@ const titleChanged = Symbol("Session title changed")
 
 export interface Interface {
   /** Generates an initial title or regenerates one from bounded conversation history. */
-  readonly generate: (sessionID: SessionSchema.ID) => Effect.Effect<void>
+  readonly generate: (sessionID: SessionSchema.ID, inputID?: SessionMessage.ID) => Effect.Effect<void>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/SessionTitle") {}
@@ -50,7 +50,7 @@ export const layer = Layer.effect(
       readonly session: SessionSchema.Info
       readonly agent: Agent.Info
       readonly text: string
-      readonly inputID: SessionMessage.ID
+      readonly inputID?: SessionMessage.ID
       readonly model: SessionRunnerModel.Resolved
     }) {
       const chunks: string[] = []
@@ -100,7 +100,10 @@ export const layer = Layer.effect(
         .find((line) => line.length > 0)
     })
 
-    const generate = Effect.fn("SessionTitle.generate")(function* (sessionID: SessionSchema.ID) {
+    const generate = Effect.fn("SessionTitle.generate")(function* (
+      sessionID: SessionSchema.ID,
+      inputID?: SessionMessage.ID,
+    ) {
       const session = yield* store.get(sessionID)
       if (!session) return
       const firstUser = yield* SessionHistory.firstUserMessage(db, session.id)
@@ -130,9 +133,9 @@ export const layer = Layer.effect(
       const selection = yield* context.selectTitle(session, firstUser.execution?.model)
       if (!selection) return
       const title =
-        (yield* attempt({ session, inputID: firstUser.id, agent: selection.agent, text, model: selection.selected })) ??
+        (yield* attempt({ session, inputID, agent: selection.agent, text, model: selection.selected })) ??
         (selection.primary && !isDeepStrictEqual(selection.selected.ref, selection.primary.ref)
-          ? yield* attempt({ session, inputID: firstUser.id, agent: selection.agent, text, model: selection.primary })
+          ? yield* attempt({ session, inputID, agent: selection.agent, text, model: selection.primary })
           : undefined)
       if (!title) return
       const expectedSequence = (yield* Bus.latestSequence(db, sessionID)) + 1

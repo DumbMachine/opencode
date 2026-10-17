@@ -20,12 +20,12 @@ const layer = (path = ":memory:") =>
     LLMClient.layer.pipe(Layer.provide(RequestExecutor.layer.pipe(Layer.provide(FetchHttpClient.layer)))),
     LayerNode.compile(KV.node, { replacements: [Database.node.replace(Database.sqliteDatabaseLayer(path))] }),
   )
-const request = (origin: string, session: string) =>
+const request = (origin: string, session: string, input?: string) =>
   LLM.request({
     model: OpenAIChat.route
       .with({ endpoint: { baseURL: origin + "/v1/" }, auth: Auth.bearer("fixture") })
       .model({ id: "test" }),
-    http: { headers: { "x-opencode-session": session } },
+    http: { headers: { "x-opencode-session": session, ...(input === undefined ? {} : { "x-opencode-input": input }) } },
     prompt: "fixture",
     generation: { maxTokens: 128 },
   })
@@ -141,6 +141,7 @@ test("lost admission response cancels only the exact attempt without invoking a 
       expect(body).toEqual({
         operation: "cancel",
         session_id: "lost-admission",
+        input_id: "msg_lost_admission",
         attempt_id: accepted!,
         provider_id: "openai",
         model_id: "test",
@@ -156,7 +157,9 @@ test("lost admission response cancels only the exact attempt without invoking a 
           const base = yield* LLMClient.Service
           const journal = yield* KV.Service
           const client = ModelBudget.make(base, server.url.origin, "fixture", journal, 128)
-          return yield* client.stream(request(server.url.origin, "lost-admission")).pipe(Stream.runCollect)
+          return yield* client
+            .stream(request(server.url.origin, "lost-admission", "msg_lost_admission"))
+            .pipe(Stream.runCollect)
         }).pipe(Effect.provide(layer())),
       ),
     ).rejects.toThrow()
@@ -546,5 +549,85 @@ test("one session's held completion cannot queue another session's completion", 
   } finally {
     release.resolve()
     server.stop(true)
+  }
+})
+
+test("a KV restart preserves two input identities in one session and leaves legacy callbacks unknown", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "opencode-input-budget-journal-"))
+  const database = join(directory, "journal.sqlite")
+  const old = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const path = new URL(req.url).pathname
+      if (path === "/reserve") return Response.json({ ok: true })
+      if (path === "/complete") return new Response("fixture callback outage", { status: 503 })
+      return providerReply()
+    },
+  })
+  let pending: KV.Entry[] = []
+  try {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const base = yield* LLMClient.Service
+        const journal = yield* KV.Service
+        const client = ModelBudget.make(base, old.url.origin, "fixture", journal, 128)
+        // Concurrent title/primary work can finish with separate durable callbacks in the same Session.
+        yield* Effect.all(
+          ["msg_first_input", "msg_second_input"].map((input) =>
+            client.stream(request(old.url.origin, "same-session", input)).pipe(Stream.runCollect),
+          ),
+          { concurrency: "unbounded" },
+        )
+        const legacy = {
+          operation: "complete",
+          session_id: "same-session",
+          attempt_id: "legacy-attempt",
+          provider_id: "openai",
+          model_id: "test",
+          usage: zero,
+        }
+        yield* journal.set(prefix + "same-session/legacy-attempt", legacy)
+        pending = [...(yield* journal.scan({ prefix })).entries]
+      }).pipe(Effect.provide(layer(database)), Effect.provide(Logger.layer([]))),
+    )
+    expect(pending).toHaveLength(3)
+    const values = pending.map((entry) => entry.value)
+    expect(values).toContainEqual(expect.objectContaining({ input_id: "msg_first_input" }))
+    expect(values).toContainEqual(expect.objectContaining({ input_id: "msg_second_input" }))
+    expect(values).toContainEqual({
+      operation: "complete",
+      session_id: "same-session",
+      attempt_id: "legacy-attempt",
+      provider_id: "openai",
+      model_id: "test",
+      usage: zero,
+    })
+    old.stop(true)
+    const received: unknown[] = []
+    const replay = Bun.serve({
+      port: 0,
+      async fetch(req) {
+        expect(new URL(req.url).pathname).toBe("/complete")
+        received.push(await req.json())
+        return Response.json({ ok: true })
+      },
+    })
+    try {
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const base = yield* LLMClient.Service
+          const journal = yield* KV.Service
+          expect((yield* journal.scan({ prefix })).entries).toEqual(pending)
+          yield* ModelBudget.make(base, replay.url.origin, "fixture-new", journal).flush("same-session")
+          expect((yield* journal.scan({ prefix })).entries).toEqual([])
+        }).pipe(Effect.provide(layer(database))),
+      )
+      expect(received).toEqual(pending.map((entry) => entry.value))
+    } finally {
+      replay.stop(true)
+    }
+  } finally {
+    old.stop(true)
+    await rm(directory, { recursive: true, force: true })
   }
 })

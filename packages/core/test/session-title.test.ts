@@ -163,6 +163,7 @@ const prompt = (sessionID: Session.ID, text: string) =>
       sessionID,
       inboxID: messageID,
     })
+    return messageID
   })
 
 const small = Model.Info.make({
@@ -579,5 +580,36 @@ it.effect("preserves a manual rename completed while generation is in flight", (
     const store = yield* SessionStore.Service
     expect(requests).toHaveLength(1)
     expect((yield* store.get(sessionID))?.title).toBe("Manual title")
+  }),
+)
+
+it.effect("automatic title fallback retains its causal input independently of first-user content", () =>
+  Effect.gen(function* () {
+    titleStream = () =>
+      requests.length === 1
+        ? Stream.make(LLMEvent.providerError({ message: "Small model unavailable" }))
+        : successfulTitle()
+    selectedSmall = lowSmall
+    yield* enableTitleAgent
+    const sessionID = Session.ID.make("ses_title_causal_fallback")
+    yield* insertSession(
+      sessionID,
+      undefined,
+      undefined,
+      Model.Ref.make({ providerID: Provider.ID.make("test"), id: Model.ID.make("title-model") }),
+    )
+    const original = yield* prompt(sessionID, "Original content to title")
+    const cause = yield* prompt(sessionID, "Later actor causes automatic retry")
+    const title = yield* SessionTitle.Service
+    yield* title.generate(sessionID, cause)
+    expect(requests).toHaveLength(2)
+    expect(requests.every((request) => request.http?.headers?.["x-opencode-input"] === cause)).toBe(true)
+    expect(JSON.stringify(requests[0]?.messages)).toContain("Original content to title")
+    expect(cause).not.toBe(original)
+    requests.length = 0
+    titleStream = successfulTitle
+    yield* title.generate(sessionID)
+    expect(requests).toHaveLength(1)
+    expect(requests[0]?.http?.headers?.["x-opencode-input"]).toBeUndefined()
   }),
 )

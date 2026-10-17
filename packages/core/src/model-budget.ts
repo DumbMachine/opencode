@@ -26,6 +26,7 @@ const tokenCount = Schema.Int.check(
 const completion = Schema.Struct({
   operation: Schema.Literals(["complete", "cancel"]),
   session_id: Schema.String,
+  input_id: Schema.optionalKey(Schema.String),
   attempt_id: Schema.String,
   provider_id: Schema.String,
   model_id: Schema.String,
@@ -208,7 +209,9 @@ export const make = (client: LLMClientShape, endpoint: string, token: string, kv
   const stream: LLMClientShape["stream"] = (request, options) =>
     Stream.unwrap(
       Effect.gen(function* () {
+        // Capture both identities before replay or admission can await host responses.
         const session = request.http?.headers?.["x-opencode-session"]
+        const inputID = request.http?.headers?.["x-opencode-input"]
         if (!session) return yield* failure("Model request has no billing session")
         if (request.tools.some((tool) => "native" in tool && tool.native !== undefined))
           return yield* failure("Provider-hosted tools require a separately priced budget")
@@ -239,6 +242,7 @@ export const make = (client: LLMClientShape, endpoint: string, token: string, kv
         yield* flush(session)
         const attempt = {
           session_id: session,
+          ...(inputID === undefined ? {} : { input_id: inputID }),
           attempt_id: crypto.randomUUID(),
           provider_id: request.model.provider,
           model_id: request.model.id,

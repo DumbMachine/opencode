@@ -133,7 +133,6 @@ const layer = Layer.effect(
                       inputID: pending.id,
                       context: {
                         session: selected.session,
-                        input: selected.input,
                         agent: selected.agent,
                         tools: selected.tools,
                         model,
@@ -190,15 +189,27 @@ const layer = Layer.effect(
                     continuing = true
                     entering = false
                     step = 1
-                    if (!selected.session.parentID && SessionTitle.isUntitled(selected.session))
-                      yield* FiberMap.run(titles, sessionID, title.generate(sessionID), { onlyIfMissing: true })
+                    if (!selected.session.parentID && SessionTitle.isUntitled(selected.session)) {
+                      const cause = yield* SessionHistory.latestInput(db, sessionID).pipe(Effect.orDie)
+                      yield* FiberMap.run(
+                        titles,
+                        sessionID,
+                        title.generate(sessionID, cause?.type === "user" ? cause.id : undefined),
+                        { onlyIfMissing: true },
+                      )
+                    }
                     return undefined
                   }
                   const loaded = yield* loadWithGrant(sessionID, selected)
                   if (promoted > 0 && !loaded.session.parentID && SessionTitle.isUntitled(loaded.session))
-                    yield* FiberMap.run(titles, sessionID, title.generate(sessionID), {
-                      onlyIfMissing: true,
-                    })
+                    yield* FiberMap.run(
+                      titles,
+                      sessionID,
+                      title.generate(sessionID, loaded.input?.type === "user" ? loaded.input.id : undefined),
+                      {
+                        onlyIfMissing: true,
+                      },
+                    )
                   if (promoted > 0) step = 1
                   return {
                     _tag: "Ready" as const,

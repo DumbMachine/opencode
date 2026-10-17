@@ -274,11 +274,19 @@ export const layer = Layer.effect(
         modelHook.baseURL !== undefined && modelHook.baseURL !== baseURL
           ? base.model.route.with({ endpoint: { baseURL: modelHook.baseURL } })
           : base.model.route
+      // Plugins may route/provider-authorize requests, but cannot lend another input's billing authority.
+      const headers = Object.fromEntries(
+        Object.entries(modelHook.headers).filter(
+          ([key]) => key.toLowerCase() !== "x-opencode-session" && key.toLowerCase() !== "x-opencode-input",
+        ),
+      )
+      headers["x-opencode-session"] = scope.sessionID
+      if (inputID !== undefined) headers["x-opencode-input"] = inputID
       const request = LLMRequest.update(base, {
         model: route === base.model.route ? base.model : LanguageModel.update(base.model, { route }),
         http: new HttpOptions({
           body: base.http?.body,
-          headers: Object.keys(modelHook.headers).length === 0 ? undefined : modelHook.headers,
+          headers,
           query: base.http?.query,
         }),
       })

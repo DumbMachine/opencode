@@ -20,6 +20,8 @@ test("admission precedes provider execution and sends an enforced output limit",
       const path = new URL(req.url).pathname
       const body = (await req.json()) as Record<string, unknown>
       events.push(path)
+      if (path === "/reserve" || path === "/complete" || path === "/cancel")
+        expect(body.input_id).toBe("msg_budget_input")
       if (path === "/reserve") {
         expect(body.output_token_limit).toBe(128)
         expect(body.output_token_estimate).toBe(128)
@@ -52,7 +54,7 @@ test("admission precedes provider execution and sends an enforced output limit",
       model: OpenAIChat.route
         .with({ endpoint: { baseURL: server.url.origin + "/v1/" }, auth: Auth.bearer("test") })
         .model({ id: "test" }),
-      http: { headers: { "x-opencode-session": "s1" } },
+      http: { headers: { "x-opencode-session": "s1", "x-opencode-input": "msg_budget_input" } },
       prompt: "hello",
       generation: { maxTokens: 5000 },
     })
