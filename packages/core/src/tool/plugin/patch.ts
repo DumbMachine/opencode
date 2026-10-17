@@ -103,6 +103,7 @@ export const Plugin = {
               const source = {
                 type: "tool" as const,
                 messageID: context.messageID,
+                ...(context.inputID === undefined ? {} : { inputID: context.inputID }),
                 id: context.id,
               }
               if (!input.patchText) return yield* new ToolFailure({ message: "patchText is required" })

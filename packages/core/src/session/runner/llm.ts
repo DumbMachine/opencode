@@ -268,6 +268,7 @@ const layer = Layer.effect(
         })
         const prepared = yield* context.request.primary({
           session: loaded.session,
+          inputID: loaded.messages.findLast((message) => message.type === "user")?.id,
           agent: loaded.agent.id,
           model: loaded.model,
           tools: loaded.tools,

@@ -1193,6 +1193,7 @@ describe("SessionRunnerLLM", () => {
         sessionID,
         agent: Agent.ID.make("build"),
         messageID: expect.stringMatching(/^msg_/),
+        inputID: expect.stringMatching(/^msg_/),
         id: Tool.CallID.make("call-location"),
         progress: expect.any(Function),
       },
@@ -1203,6 +1204,22 @@ describe("SessionRunnerLLM", () => {
       Expected.assistant({}, [
         Expected.completedTool({ id: "call-location" }, { content: [Expected.text('{"answer":"HELLO"}')] }),
       ]),
+    ])
+  })
+
+  scenario("keeps tool provenance on its frozen input while another input is admitted", function* (s) {
+    const first = yield* s.admit("First requester")
+    yield* s.llm.push(
+      TestLLM.tool("call-first-input", "echo", { text: "first" }),
+      TestLLM.tool("call-second-input", "echo", { text: "second" }),
+      [],
+    )
+    const paused = yield* s.resumePaused
+    const second = yield* s.admit("Second requester")
+    yield* paused.finish
+    expect(s.authorizations.map((context) => ({ inputID: context.inputID, callID: context.id }))).toEqual([
+      { inputID: first.id, callID: Tool.CallID.make("call-first-input") },
+      { inputID: second.id, callID: Tool.CallID.make("call-second-input") },
     ])
   })
 

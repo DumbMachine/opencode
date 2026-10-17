@@ -15,6 +15,8 @@ export interface Context {
   readonly sessionID: Session.ID
   readonly agent: Agent.ID
   readonly messageID: SessionMessage.ID
+  /** Latest user input in the frozen model request; absent for unattributed execution. */
+  readonly inputID?: SessionMessage.ID
   readonly id: CallID
   readonly progress: (update: Metadata) => Effect.Effect<void>
 }

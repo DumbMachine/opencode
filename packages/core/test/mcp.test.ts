@@ -29,6 +29,7 @@ import { McpClient } from "@opencode/core/mcp/client"
 import { McpStdio } from "@opencode/core/mcp/stdio"
 import { Permission } from "@opencode/core/permission"
 import { AbsolutePath } from "@opencode/core/schema"
+import { SessionMessage } from "@opencode/core/session/message"
 import { Session } from "@opencode/core/session"
 import { State } from "@opencode/core/state"
 import { McpTool } from "@opencode/core/tool/mcp"
@@ -2499,6 +2500,7 @@ it.effect("waits for permission before calling an MCP tool", () =>
     const fiber = yield* toolSet
       .execute({
         sessionID: Session.ID.make("ses_mcp_permission"),
+        inputID: SessionMessage.ID.make("msg_mcp_input"),
         ...toolIdentity,
         call: {
           type: "tool-call",
@@ -2518,6 +2520,7 @@ it.effect("waits for permission before calling an MCP tool", () =>
       source: {
         type: "tool",
         messageID: toolIdentity.messageID,
+        inputID: SessionMessage.ID.make("msg_mcp_input"),
         id: "call_mcp_permission",
       },
     })

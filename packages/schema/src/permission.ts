@@ -4,6 +4,7 @@ import { Schema } from "effect"
 import { optional } from "./schema.js"
 import { ephemeral, inventory } from "./event.js"
 import { ascending } from "./identifier.js"
+import { SessionMessageID } from "./session-message-id.js"
 import { SessionID } from "./session-id.js"
 import { statics } from "./schema.js"
 
@@ -17,6 +18,7 @@ export const Source = Schema.Union([
   Schema.Struct({
     type: Schema.Literal("tool"),
     messageID: Schema.String,
+    inputID: SessionMessageID.pipe(optional),
     id: Schema.String,
   }),
 ]).annotate({ identifier: "Permission.Source" })

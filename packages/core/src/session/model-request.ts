@@ -62,6 +62,7 @@ export interface Prepared<Event = SessionRequest> {
 export interface Input {
   readonly session: SessionSchema.Info
   readonly agent: Agent.ID
+  readonly inputID?: SessionMessage.ID
   readonly model: SessionRunnerModel.Resolved
   readonly tools?: Tool.Snapshot
   readonly system: Array<SystemPart>
@@ -208,6 +209,7 @@ export const layer = Layer.effect(
     const prepare = Effect.fn("SessionModelRequest.prepare")(function* <
       S extends SessionRequest & { tools?: Definitions },
     >(kind: SessionRequestKind, input: Input, shape: (draft: SessionRequest, tools: Definitions) => Effect.Effect<S>) {
+      const inputID = input.inputID
       const session = input.session
       const model = input.model
       const scope = { sessionID: session.id, agent: input.agent, model: model.ref, kind }
@@ -360,7 +362,7 @@ export const layer = Layer.effect(
         // Permission.assert and the question tool throw declines as defects so tools cannot
         // catch them and turn a "no" into model-visible output. Recover them here as failures.
         executeTool: (call: Parameters<Prepared["executeTool"]>[0]) =>
-          tools.execute({ ...call, definitions: hooked }).pipe(
+          tools.execute({ ...call, inputID, definitions: hooked }).pipe(
             Effect.catchCauseFilter(
               (cause) => {
                 const decline = cause.reasons.flatMap((r) =>

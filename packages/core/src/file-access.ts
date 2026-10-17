@@ -43,7 +43,7 @@ export interface Target {
   readonly externalDirectory?: ExternalDirectoryAuthorization
 }
 
-export type Invocation = Pick<Tool.Context, "sessionID" | "agent" | "messageID" | "id">
+export type Invocation = Pick<Tool.Context, "sessionID" | "agent" | "messageID" | "inputID" | "id">
 
 export interface ReadOptions {
   /** A target already authorized by this invocation, used for filename recovery. */
@@ -86,7 +86,12 @@ const slash = (value: string) => value.replaceAll("\\", "/")
 const invocation = (context: Invocation) => ({
   sessionID: context.sessionID,
   agent: context.agent,
-  source: { type: "tool" as const, messageID: context.messageID, id: context.id },
+  source: {
+    type: "tool" as const,
+    messageID: context.messageID,
+    ...(context.inputID === undefined ? {} : { inputID: context.inputID }),
+    id: context.id,
+  },
 })
 
 const layer = Layer.effect(

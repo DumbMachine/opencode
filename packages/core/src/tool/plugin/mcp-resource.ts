@@ -40,7 +40,12 @@ export const Plugin = {
                 metadata: {},
                 sessionID: context.sessionID,
                 agent: context.agent,
-                source: { type: "tool", messageID: context.messageID, id: context.id },
+                source: {
+                  type: "tool",
+                  messageID: context.messageID,
+                  ...(context.inputID === undefined ? {} : { inputID: context.inputID }),
+                  id: context.id,
+                },
               })
               if (input.server === undefined) return { output: yield* mcp.resourceCatalog() }
               return { output: yield* mcp.resources({ server: input.server }) }
@@ -69,7 +74,12 @@ export const Plugin = {
                 metadata: { server: input.server, uri: input.uri },
                 sessionID: context.sessionID,
                 agent: context.agent,
-                source: { type: "tool", messageID: context.messageID, id: context.id },
+                source: {
+                  type: "tool",
+                  messageID: context.messageID,
+                  ...(context.inputID === undefined ? {} : { inputID: context.inputID }),
+                  id: context.id,
+                },
               })
               const resource = yield* mcp.readResource(input)
               if (!resource)

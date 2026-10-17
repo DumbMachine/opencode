@@ -92,7 +92,12 @@ export const layer = Layer.effect(
                   metadata: {},
                   sessionID: context.sessionID,
                   agent: context.agent,
-                  source: { type: "tool", messageID: context.messageID, id: context.id },
+                  source: {
+                    type: "tool",
+                    messageID: context.messageID,
+                    ...(context.inputID === undefined ? {} : { inputID: context.inputID }),
+                    id: context.id,
+                  },
                 })
               const call = (meta?: Readonly<Record<string, unknown>>) =>
                 execution
@@ -126,7 +131,12 @@ export const layer = Layer.effect(
                   metadata: approval.metadata,
                   sessionID: context.sessionID,
                   agent: context.agent,
-                  source: { type: "tool", messageID: context.messageID, id: context.id },
+                  source: {
+                    type: "tool",
+                    messageID: context.messageID,
+                    ...(context.inputID === undefined ? {} : { inputID: context.inputID }),
+                    id: context.id,
+                  },
                 })
                 result = yield* call({
                   [APPROVAL_CONTINUATION_META]: {
@@ -194,6 +204,7 @@ export const layer = Layer.effect(
                       source: {
                         type: "tool",
                         messageID: context.messageID,
+                        ...(context.inputID === undefined ? {} : { inputID: context.inputID }),
                         id: context.id,
                       },
                     })

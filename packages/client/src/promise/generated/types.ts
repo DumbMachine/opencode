@@ -307,7 +307,7 @@ export type ProjectCommands = { start?: string }
 
 export type ProjectTime = { created: number; updated: number; active: number }
 
-export type PermissionSource = { type: "tool"; messageID: string; id: string }
+export type PermissionSource = { type: "tool"; messageID: string; inputID?: string; id: string }
 
 export type PermissionSavedInfo = {
   id: string
@@ -5995,7 +5995,12 @@ export type PermissionCreateInput = {
     readonly resources: ReadonlyArray<string>
     readonly save?: ReadonlyArray<string>
     readonly metadata?: { readonly [x: string]: JsonValue }
-    readonly source?: { readonly type: "tool"; readonly messageID: string; readonly id: string }
+    readonly source?: {
+      readonly type: "tool"
+      readonly messageID: string
+      readonly inputID?: string
+      readonly id: string
+    }
     readonly agent?: string | null
   }["id"]
   readonly action: {
@@ -6004,7 +6009,12 @@ export type PermissionCreateInput = {
     readonly resources: ReadonlyArray<string>
     readonly save?: ReadonlyArray<string>
     readonly metadata?: { readonly [x: string]: JsonValue }
-    readonly source?: { readonly type: "tool"; readonly messageID: string; readonly id: string }
+    readonly source?: {
+      readonly type: "tool"
+      readonly messageID: string
+      readonly inputID?: string
+      readonly id: string
+    }
     readonly agent?: string | null
   }["action"]
   readonly resources: {
@@ -6013,7 +6023,12 @@ export type PermissionCreateInput = {
     readonly resources: ReadonlyArray<string>
     readonly save?: ReadonlyArray<string>
     readonly metadata?: { readonly [x: string]: JsonValue }
-    readonly source?: { readonly type: "tool"; readonly messageID: string; readonly id: string }
+    readonly source?: {
+      readonly type: "tool"
+      readonly messageID: string
+      readonly inputID?: string
+      readonly id: string
+    }
     readonly agent?: string | null
   }["resources"]
   readonly save?: {
@@ -6022,7 +6037,12 @@ export type PermissionCreateInput = {
     readonly resources: ReadonlyArray<string>
     readonly save?: ReadonlyArray<string>
     readonly metadata?: { readonly [x: string]: JsonValue }
-    readonly source?: { readonly type: "tool"; readonly messageID: string; readonly id: string }
+    readonly source?: {
+      readonly type: "tool"
+      readonly messageID: string
+      readonly inputID?: string
+      readonly id: string
+    }
     readonly agent?: string | null
   }["save"]
   readonly metadata?: {
@@ -6031,7 +6051,12 @@ export type PermissionCreateInput = {
     readonly resources: ReadonlyArray<string>
     readonly save?: ReadonlyArray<string>
     readonly metadata?: { readonly [x: string]: JsonValue }
-    readonly source?: { readonly type: "tool"; readonly messageID: string; readonly id: string }
+    readonly source?: {
+      readonly type: "tool"
+      readonly messageID: string
+      readonly inputID?: string
+      readonly id: string
+    }
     readonly agent?: string | null
   }["metadata"]
   readonly source?: {
@@ -6040,7 +6065,12 @@ export type PermissionCreateInput = {
     readonly resources: ReadonlyArray<string>
     readonly save?: ReadonlyArray<string>
     readonly metadata?: { readonly [x: string]: JsonValue }
-    readonly source?: { readonly type: "tool"; readonly messageID: string; readonly id: string }
+    readonly source?: {
+      readonly type: "tool"
+      readonly messageID: string
+      readonly inputID?: string
+      readonly id: string
+    }
     readonly agent?: string | null
   }["source"]
   readonly agent?: {
@@ -6049,7 +6079,12 @@ export type PermissionCreateInput = {
     readonly resources: ReadonlyArray<string>
     readonly save?: ReadonlyArray<string>
     readonly metadata?: { readonly [x: string]: JsonValue }
-    readonly source?: { readonly type: "tool"; readonly messageID: string; readonly id: string }
+    readonly source?: {
+      readonly type: "tool"
+      readonly messageID: string
+      readonly inputID?: string
+      readonly id: string
+    }
     readonly agent?: string | null
   }["agent"]
 }

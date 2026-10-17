@@ -16117,6 +16117,10 @@
               "messageID": {
                 "type": "string"
               },
+              "inputID": {
+                "type": "string",
+                "pattern": "^msg_"
+              },
               "id": {
                 "type": "string"
               }

@@ -22,6 +22,7 @@ Location-scoped built-in layers acquire `Permission.Service` and every other req
 const source = {
   type: "tool" as const,
   messageID: context.messageID,
+  ...(context.inputID === undefined ? {} : { inputID: context.inputID }),
   id: context.id,
 }
 ```

@@ -66,6 +66,7 @@ export const Plugin = {
               const source = {
                 type: "tool" as const,
                 messageID: context.messageID,
+                ...(context.inputID === undefined ? {} : { inputID: context.inputID }),
                 id: context.id,
               }
               const target = yield* access.resolve({ path: input.path, kind: "file" })

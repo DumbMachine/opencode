@@ -145,6 +145,7 @@ export const Plugin = {
                   source: {
                     type: "tool",
                     messageID: context.messageID,
+                    ...(context.inputID === undefined ? {} : { inputID: context.inputID }),
                     id: context.id,
                   },
                 })

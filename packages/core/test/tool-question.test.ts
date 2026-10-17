@@ -4,6 +4,7 @@ import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { Form } from "@opencode/core/form"
 import { Permission } from "@opencode/core/permission"
+import { SessionMessage } from "@opencode/core/session/message"
 import { Session } from "@opencode/core/session"
 import { Tool } from "@opencode/core/tool"
 import { QuestionTool } from "@opencode/core/tool/plugin/question"
@@ -161,6 +162,7 @@ describe("QuestionTool", () => {
         yield* executeTool(registry, {
           sessionID,
           ...toolIdentity,
+          inputID: SessionMessage.ID.make("msg_question_requester"),
           call: { type: "tool-call", id: "call-question", name: "question", input: { questions } },
         }),
       ).toEqual({
@@ -174,11 +176,16 @@ describe("QuestionTool", () => {
         ],
         metadata: { answers: [["Build"], ["Dev"], []] },
       })
-      expect(assertions).toMatchObject([{ sessionID, action: "question", resources: ["*"] }])
+      expect(assertions).toMatchObject([
+        { sessionID, action: "question", resources: ["*"], source: { inputID: "msg_question_requester" } },
+      ])
       expect(capturedInput()).toEqual({
         sessionID,
         title: "Questions",
-        metadata: { kind: "question", tool: { messageID: toolIdentity.messageID, id: "call-question" } },
+        metadata: {
+          kind: "question",
+          tool: { messageID: toolIdentity.messageID, inputID: "msg_question_requester", id: "call-question" },
+        },
         fields: [
           {
             key: "q0",

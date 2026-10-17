@@ -5,6 +5,7 @@ import { Effect } from "effect"
 import { FileAccess } from "@opencode/core/file-access"
 import { Location } from "@opencode/core/location"
 import { Permission } from "@opencode/core/permission"
+import { SessionMessage } from "@opencode/core/session/message"
 import { Session } from "@opencode/core/session"
 import { Tool } from "@opencode/core/tool"
 import { AbsolutePath } from "@opencode/core/schema"
@@ -51,7 +52,10 @@ describe("FileAccess.authorizeRead", () => {
     return Effect.gen(function* () {
       const access = yield* FileAccess.Service
       const location = yield* Location.Service
-      const target = yield* access.authorizeRead("src/../README.md", invocation)
+      const target = yield* access.authorizeRead("src/../README.md", {
+        ...invocation,
+        inputID: SessionMessage.ID.make("msg_file_input"),
+      })
       const absolute: AbsolutePath = target.absolute
 
       expect(absolute).toBe(AbsolutePath.make(path.join(location.directory, "README.md")))
@@ -63,7 +67,12 @@ describe("FileAccess.authorizeRead", () => {
           save: ["*"],
           sessionID: invocation.sessionID,
           agent: invocation.agent,
-          source: { type: "tool", messageID: invocation.messageID, id: invocation.id },
+          source: {
+            type: "tool",
+            messageID: invocation.messageID,
+            inputID: SessionMessage.ID.make("msg_file_input"),
+            id: invocation.id,
+          },
         },
       ])
     }).pipe(provide(requests))

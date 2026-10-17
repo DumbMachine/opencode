@@ -130,6 +130,7 @@ export const Plugin = {
               const permissionSource = {
                 type: "tool" as const,
                 messageID: context.messageID,
+                ...(context.inputID === undefined ? {} : { inputID: context.inputID }),
                 id: context.id,
               }
               if (input.oldString === input.newString) {

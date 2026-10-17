@@ -2,6 +2,7 @@ import { describe, expect } from "bun:test"
 import { OpenAIChat } from "@opencode/ai/protocols"
 import { Agent } from "@opencode/schema/agent"
 import { Money } from "@opencode/schema/money"
+import { SessionMessage } from "@opencode/schema/session-message"
 import { Session } from "@opencode/schema/session"
 import type { SessionRequestKind } from "@opencode/plugin/effect/session"
 import { Location } from "@opencode/core/location"
@@ -152,5 +153,40 @@ describe("SessionModelRequest HTTP hooks", () => {
         "receive:primary:created",
       ])
     }),
+  )
+})
+
+describe("SessionModelRequest input provenance", () => {
+  it.effect("uses the prepared input instead of a later tool caller and leaves unattributed work unknown", () =>
+    Effect.gen(function* () {
+      const requests = yield* SessionModelRequest.Service.pipe(Effect.provide(SessionModelRequest.layer))
+      const observed: Array<SessionMessage.ID | undefined> = []
+      for (const inputID of [SessionMessage.ID.make("msg_original_requester"), undefined]) {
+        const prepared = yield* requests.primary({
+          session,
+          inputID,
+          agent: Agent.ID.make("build"),
+          model,
+          system: [],
+          messages: [],
+          tools: {
+            definitions: [],
+            execute: (input) =>
+              Effect.sync(() => {
+                observed.push(input.inputID)
+                return { content: [] }
+              }),
+          },
+        })
+        yield* prepared.executeTool({
+          sessionID: session.id,
+          agent: Agent.ID.make("build"),
+          messageID: SessionMessage.ID.make("msg_assistant"),
+          inputID: SessionMessage.ID.make("msg_later_requester"),
+          call: { type: "tool-call", id: "call-frozen", name: "echo", input: {} },
+        })
+      }
+      expect(observed).toEqual([SessionMessage.ID.make("msg_original_requester"), undefined])
+    }).pipe(Effect.provideService(SessionModelTransport.Service, transport)),
   )
 })

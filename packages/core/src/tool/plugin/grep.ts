@@ -81,7 +81,12 @@ export const Plugin = {
           output: Output,
           execute: (input, context) =>
             Effect.gen(function* () {
-              const source = { type: "tool" as const, messageID: context.messageID, id: context.id }
+              const source = {
+                type: "tool" as const,
+                messageID: context.messageID,
+                ...(context.inputID === undefined ? {} : { inputID: context.inputID }),
+                id: context.id,
+              }
               const target = yield* access.resolve({ path: input.path ?? "." })
               yield* access.authorizeExternal([target], context)
               yield* permission.assert({

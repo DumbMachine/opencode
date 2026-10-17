@@ -8,9 +8,8 @@ import { Location } from "./location.js"
 import { Model } from "./model.js"
 import { Project } from "./project.js"
 import { Prompt } from "./prompt.js"
-import { DateTimeUtcFromMillis, PositiveInt, RelativePath, statics } from "./schema.js"
-import { ascending } from "./identifier.js"
-import { Event } from "./event.js"
+import { DateTimeUtcFromMillis, PositiveInt, RelativePath } from "./schema.js"
+import { SessionMessageID } from "./session-message-id.js"
 import { Shell as ShellSchema } from "./shell.js"
 import { FinishReason } from "./llm.js"
 import { SessionError } from "./session-error.js"
@@ -20,13 +19,7 @@ import { Money } from "./money.js"
 import { Snapshot } from "./snapshot.js"
 import { TokenUsage } from "./token-usage.js"
 
-export const ID = Schema.String.check(Schema.isStartsWith("msg_")).pipe(
-  Schema.brand("Session.Message.ID"),
-  statics((schema) => ({
-    create: () => schema.make("msg_" + ascending()),
-    fromEvent: (eventID: Event.ID) => schema.make(eventID.replace(/^evt_/, "msg_")),
-  })),
-)
+export const ID = SessionMessageID
 export type ID = typeof ID.Type
 
 const Base = {

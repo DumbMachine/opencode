@@ -12,6 +12,8 @@ import { SkillAttachment } from "../src/prompt.js"
 import { Provider } from "../src/provider.js"
 import { Pty } from "../src/pty.js"
 import { Session } from "../src/session.js"
+import { Permission } from "../src/permission.js"
+import { SessionMessageID } from "../src/session-message-id.js"
 import { SessionMessage } from "../src/session-message.js"
 import { SessionInbox } from "../src/session-inbox.js"
 import { FileDiff } from "../src/file-diff.js"
@@ -338,4 +340,19 @@ describe("contract hygiene", () => {
       files: [{ file: "src/index.ts", status: "modified", additions: 1, deletions: 0, patch: "@@" }],
     })
   })
+})
+
+test("permission input provenance uses the canonical message ID and omits unknown input", () => {
+  expect(SessionMessage.ID).toBe(SessionMessageID)
+  const decode = Schema.decodeUnknownSync(Permission.Source)
+  const encode = Schema.encodeSync(Permission.Source)
+  expect(encode(decode({ type: "tool", messageID: "msg_assistant", id: "call-one" }))).toEqual({
+    type: "tool",
+    messageID: "msg_assistant",
+    id: "call-one",
+  })
+  expect(
+    encode(decode({ type: "tool", messageID: "msg_assistant", id: "call-two", inputID: "msg_input" })),
+  ).toHaveProperty("inputID", "msg_input")
+  expect(() => decode({ type: "tool", messageID: "msg_assistant", id: "call-two", inputID: "wrong" })).toThrow()
 })
