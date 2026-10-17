@@ -21,6 +21,7 @@ export interface Coordinator<Key, E, Reason = never> {
    * without following fresh work admitted during cleanup. `awaitIdle` follows successors too.
    * `when` is checked synchronously with stopping and clearing the doorbell. A false guard
    * leaves ownership, wakeups and interruption reason untouched and does not wait for settlement.
+   * A conditional call after owner exit also leaves later wakes untouched, even when its guard is true.
    */
   readonly interrupt: (
     key: Key,
@@ -146,19 +147,20 @@ export const make = <Key, E, Reason = never>(options: {
         start(key, false, scope)
       })
 
-    const interrupt = (key: Key, reason?: Reason, when?: () => boolean): Effect.Effect<boolean> =>
+    const interrupt = (key: Key, reason?: Reason, when?: () => boolean) =>
       Effect.sync(() => {
         const execution = executions.get(key)
-        if (execution === undefined || execution.stopping || (when !== undefined && !when())) return false
+        if (execution === undefined || execution.stopping || (when !== undefined && !when()))
+          return { interrupted: false, execution: when === undefined ? execution : undefined }
         if (execution.owner === undefined) {
           // A conditional control targets active work, not later admissions
           // waiting behind its terminal settlement.
-          if (when !== undefined) return false
+          if (when !== undefined) return { interrupted: false, execution: undefined }
           // Settlement window: the owner exited but the settled hook has not finished. The
           // terminal outcome is already decided, so no reason attaches — but the interrupt
           // still claims the recorded wakes so settle does not start a dead-intent successor.
           execution.pendingWake = undefined
-          return false
+          return { interrupted: false, execution }
         }
         execution.stopping = true
         // Wakes recorded so far belong to the interrupted intent; the interrupt claims them.
@@ -168,7 +170,7 @@ export const make = <Key, E, Reason = never>(options: {
         // Fire and forget: nobody benefits from waiting out cleanup here, and callers like
         // the interrupt endpoint must acknowledge immediately even when finalizers are slow.
         fork(Fiber.interrupt(execution.owner))
-        return true
+        return { interrupted: true, execution }
       })
 
     // One execution's `done` already spans coalesced continuations; re-check after it
@@ -186,16 +188,14 @@ export const make = <Key, E, Reason = never>(options: {
       run,
       wake,
       interrupt: (key, reason, options) =>
-        Effect.suspend(() => {
-          const execution = executions.get(key)
-          return interrupt(key, reason, options?.when).pipe(
-            Effect.tap((interrupted) =>
-              options?.awaitSettlement && execution && (interrupted || options.when === undefined)
-                ? Deferred.await(execution.done).pipe(Effect.ignoreCause)
-                : Effect.void,
-            ),
-          )
-        }),
+        interrupt(key, reason, options?.when).pipe(
+          Effect.tap((result) =>
+            options?.awaitSettlement && result.execution
+              ? Deferred.await(result.execution.done).pipe(Effect.ignoreCause)
+              : Effect.void,
+          ),
+          Effect.map((result) => result.interrupted),
+        ),
       awaitIdle,
     }
   })

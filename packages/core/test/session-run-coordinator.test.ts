@@ -342,6 +342,48 @@ describe("SessionRunCoordinator", () => {
     }),
   )
 
+  it.effect("waits for the guarded interruption and consumes its pending wake", () =>
+    Effect.gen(function* () {
+      const started = yield* Deferred.make<void>()
+      const cleanupStarted = yield* Deferred.make<void>()
+      const cleanupGate = yield* Deferred.make<void>()
+      let runs = 0
+      let returned = false
+      const reasons: Array<string | undefined> = []
+      const coordinator = yield* SessionRunCoordinator.make<string, never, string>({
+        drain: () =>
+          Effect.sync(() => ++runs).pipe(
+            Effect.andThen(Deferred.succeed(started, undefined)),
+            Effect.andThen(Effect.never),
+            Effect.onInterrupt(() =>
+              Deferred.succeed(cleanupStarted, undefined).pipe(Effect.andThen(Deferred.await(cleanupGate))),
+            ),
+          ),
+        settled: (_key, _exit, reason) => Effect.sync(() => void reasons.push(reason)),
+      })
+      yield* coordinator.wake("session")
+      yield* Deferred.await(started)
+      yield* coordinator.wake("session")
+      const interrupted = yield* coordinator.interrupt("session", "user", {
+        when: () => true,
+        awaitSettlement: true,
+      }).pipe(
+        Effect.tap(() => Effect.sync(() => {
+          returned = true
+        })),
+        Effect.forkChild,
+      )
+      yield* Deferred.await(cleanupStarted)
+      expect(returned).toBeFalse()
+      yield* Deferred.succeed(cleanupGate, undefined)
+      expect(yield* Fiber.join(interrupted)).toBeTrue()
+      expect(returned).toBeTrue()
+      expect(runs).toBe(1)
+      expect(reasons).toEqual(["user"])
+      expect(yield* coordinator.isActive("session")).toBeFalse()
+    }),
+  )
+
   it.effect("checks the interrupt predicate at execution time rather than construction", () =>
     Effect.gen(function* () {
       const started = yield* Deferred.make<void>()
