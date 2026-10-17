@@ -46,15 +46,16 @@ export const set = (sessionID: SessionSchema.ID, grant: Grant) =>
     inputs.set(grant.inputID, grant)
   })
 
-// Keep pending inputs and the selected input for explicit continuation after
-// an interrupt. Credentials are never stored in the durable event log.
+// Keep pending grants and, after interruption, the last input grant for explicit
+// continuation. A settled execution never keeps a live control target.
+// Credentials are never stored in the durable event log.
 export const retain = (sessionID: SessionSchema.ID, pending: ReadonlySet<SessionMessage.ID>, keepSelected = false) =>
   Effect.sync(() => {
+    const current = selected.get(sessionID)
+    selected.delete(sessionID)
     const inputs = grants.get(sessionID)
     if (!inputs) return
-    for (const id of inputs.keys())
-      if (!pending.has(id) && (!keepSelected || id !== selected.get(sessionID))) inputs.delete(id)
-    if (!keepSelected) selected.delete(sessionID)
+    for (const id of inputs.keys()) if (!pending.has(id) && (!keepSelected || id !== current)) inputs.delete(id)
     if (inputs.size === 0) grants.delete(sessionID)
   })
 

@@ -22,6 +22,9 @@ import { compileRequest } from "@opencode/ai/route/client"
 import { TestLLM } from "@opencode/ai/testing"
 import type { SessionHooks } from "@opencode/plugin/effect/session"
 import { Database } from "@opencode/core/database/database"
+import { Instance } from "@opencode/core/instance/service"
+import { Job } from "@opencode/core/job"
+import type { LocationServices } from "@opencode/core/location-services"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { LayerNodePlatform } from "@opencode/core/effect/app-node-platform"
@@ -77,7 +80,21 @@ import { SessionSystemPrompt } from "@opencode/core/session/system-prompt"
 import { ID, Model } from "@opencode/core/model"
 import { Location } from "@opencode/core/location"
 import { Provider } from "@opencode/core/provider"
-import { Cause, Context, DateTime, Deferred, Effect, Exit, Fiber, Layer, Queue, Schema, Scope, Stream } from "effect"
+import {
+  Cause,
+  Context,
+  DateTime,
+  Deferred,
+  Effect,
+  Exit,
+  Fiber,
+  Layer,
+  LayerMap,
+  Queue,
+  Schema,
+  Scope,
+  Stream,
+} from "effect"
 import { TestClock } from "effect/testing"
 import { asc, desc, eq, sql } from "drizzle-orm"
 import { testEffect } from "./lib/effect"
@@ -596,6 +613,34 @@ const scenario = (
       return yield* body(s)
     }),
   )
+
+// Exercise conditional control through production execution and the real runner.
+const nativeInputControl = Effect.gen(function* () {
+  const database = yield* Database.Service
+  const bus = yield* Bus.Service
+  const store = yield* SessionStore.Service
+  const runner = yield* SessionRunner.Service
+  const locations = Layer.effect(
+    LocationServiceMap.Service,
+    LayerMap.make(
+      // These controls only require the real runner from the Location graph.
+      // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion
+      () => Layer.succeed(SessionRunner.Service, runner) as unknown as Layer.Layer<LocationServices>,
+    ),
+  )
+  const context = yield* Layer.build(
+    Layer.fresh(SessionExecution.layer).pipe(
+      Layer.provide(Layer.succeed(Database.Service, database)),
+      Layer.provide(Layer.succeed(Bus.Service, bus)),
+      Layer.provide(Layer.succeed(SessionStore.Service, store)),
+      Layer.provide(AppNodeBuilder.build(Job.node)),
+      Layer.provide(
+        AppNodeBuilder.build(Instance.node, [LocationServiceMap.node.replace(locations)]).pipe(Layer.fresh),
+      ),
+    ),
+  )
+  return Context.get(context, SessionExecution.Service)
+})
 
 // Nominal retry gaps: exponential from 2s capped at 10s, for 10 retries.
 const RETRY_GAPS = [2_000, 4_000, 8_000, ...Array<number>(7).fill(10_000)]
@@ -5029,6 +5074,78 @@ describe("SessionRunnerLLM", () => {
       "session.tool.success.2",
       "session.step.failed.1",
     ])
+  })
+
+  scenario("rejects a completed input control while the next queued input is preparing", function* (s) {
+    const execution = yield* nativeInputControl
+    const first = yield* s.admit("First input")
+    yield* s.llm.push(TestLLM.stop(), TestLLM.stop())
+    const stream = yield* s.llm.gate
+    const run = yield* execution.resume(sessionID).pipe(Effect.forkChild)
+    yield* stream.started
+    expect(yield* execution.inspect(sessionID)).toEqual({ active: true, inputID: first.id })
+    const second = yield* s.session.prompt({ sessionID, text: "Queued second", delivery: "queue", resume: false })
+    const preparing = yield* Deferred.make<void>()
+    const release = yield* Deferred.make<void>()
+    s.systemLoadHook = Deferred.succeed(preparing, undefined).pipe(Effect.andThen(Deferred.await(release)))
+    yield* stream.release
+    yield* Deferred.await(preparing)
+    expect(yield* execution.inspect(sessionID)).toEqual({ active: true })
+    expect(yield* execution.interrupt(sessionID, { inputID: first.id, resume: true })).toBeFalse()
+    expect((yield* s.inbox).map((item) => item.id)).toContain(second.id)
+    s.systemLoadHook = Effect.void
+    yield* Deferred.succeed(release, undefined)
+    yield* Fiber.join(run)
+    expect(s.requests.map(userTexts)).toEqual([["First input"], ["First input", "Queued second"]])
+    expect(yield* s.inbox).toEqual([])
+  })
+
+  scenario("rejects an interrupted input control during a later execution startup", function* (s) {
+    const execution = yield* nativeInputControl
+    const first = yield* s.admit("Interrupted first")
+    const stream = yield* s.llm.gate
+    const run = yield* execution.resume(sessionID).pipe(Effect.forkChild)
+    yield* stream.started
+    // Preserve the already selected input grant for explicit continuation.
+    yield* SessionExecutionCapability.set(sessionID, { inputID: first.id, mcp: {} })
+    expect(yield* execution.interrupt(sessionID, { inputID: first.id, awaitSettlement: true })).toBeTrue()
+    expect(Exit.isFailure(yield* Fiber.await(run))).toBeTrue()
+    yield* stream.release
+    expect(SessionExecutionCapability.selectedInput(sessionID)).toBeUndefined()
+    const second = yield* s.session.prompt({ sessionID, text: "Later input", delivery: "queue", resume: false })
+    const preparing = yield* Deferred.make<void>()
+    const release = yield* Deferred.make<void>()
+    s.systemLoadHook = Deferred.succeed(preparing, undefined).pipe(Effect.andThen(Deferred.await(release)))
+    yield* s.llm.push(TestLLM.stop())
+    yield* execution.wake(sessionID)
+    yield* Deferred.await(preparing)
+    expect(yield* execution.inspect(sessionID)).toEqual({ active: true })
+    expect(yield* execution.interrupt(sessionID, { inputID: first.id, resume: true })).toBeFalse()
+    expect((yield* s.inbox).map((item) => item.id)).toContain(second.id)
+    s.systemLoadHook = Effect.void
+    yield* Deferred.succeed(release, undefined)
+    yield* execution.awaitIdle(sessionID)
+    expect(userTexts(s.requests.at(-1)!)).toEqual(["Interrupted first", "Later input"])
+    expect(yield* s.inbox).toEqual([])
+    yield* SessionExecutionCapability.retain(sessionID, new Set())
+  })
+
+  scenario("stopping one input preserves a later queued prompt wake", function* (s) {
+    const execution = yield* nativeInputControl
+    const first = yield* s.admit("First actor input")
+    const stream = yield* s.llm.gate
+    const run = yield* execution.resume(sessionID).pipe(Effect.forkChild)
+    yield* stream.started
+    const second = yield* s.session.prompt({ sessionID, text: "Other actor input", delivery: "queue", resume: false })
+    yield* s.llm.push(TestLLM.stop())
+    yield* execution.wake(sessionID)
+    expect(yield* execution.interrupt(sessionID, { inputID: first.id, awaitSettlement: true })).toBeTrue()
+    expect(Exit.isFailure(yield* Fiber.await(run))).toBeTrue()
+    yield* stream.release
+    yield* execution.awaitIdle(sessionID)
+    expect(s.requests.map(userTexts)).toEqual([["First actor input"], ["First actor input", "Other actor input"]])
+    expect((yield* s.messages).some((message) => message.id === second.id)).toBeTrue()
+    expect(yield* s.inbox).toEqual([])
   })
 
   scenario("durably fails blocked local tools when a step is interrupted", function* (s) {

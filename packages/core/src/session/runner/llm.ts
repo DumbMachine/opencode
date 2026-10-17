@@ -61,6 +61,7 @@ const layer = Layer.effect(
       let step = input.continuation?.step ?? 1
       let entering = true
       const promotable = input.promotable ?? "input"
+      if (!continuing) yield* SessionExecutionCapability.clearSelection(sessionID)
       if (!force && !continuing) {
         const pending = yield* SessionInbox.nextPromotable(db, sessionID, "input")
         if (!pending) return DrainResult.Complete()
@@ -75,6 +76,9 @@ const layer = Layer.effect(
         Effect.uninterruptibleMask((restore) =>
           Effect.gen(function* () {
             while (true) {
+              // A completed turn no longer owns preparation of the next input
+              // or queued controls. Continuation steps keep their current target.
+              if (!continuing) yield* SessionExecutionCapability.clearSelection(sessionID)
               if (lifecycle.isClosed()) {
                 yield* restore(modelTransport.close(sessionID))
                 return DrainResult.Reloaded({ force, continuation: continuing ? { step } : undefined })

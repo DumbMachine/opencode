@@ -163,9 +163,10 @@ export const make = <Key, E, Reason = never>(options: {
           return { interrupted: false, execution }
         }
         execution.stopping = true
-        // Wakes recorded so far belong to the interrupted intent; the interrupt claims them.
-        // Wakes arriving during cleanup are new admissions and restart normally at settle.
-        execution.pendingWake = undefined
+        // Session-wide interruption claims recorded wakes. A conditional input
+        // control cannot cancel other admissions, so their doorbell survives.
+        // Wakes arriving during cleanup restart normally at settle.
+        if (when === undefined) execution.pendingWake = undefined
         execution.interruptionReason = reason
         // Fire and forget: nobody benefits from waiting out cleanup here, and callers like
         // the interrupt endpoint must acknowledge immediately even when finalizers are slow.
