@@ -63,3 +63,5 @@ Producer capture remains local to producers. Shell stores combined process outpu
 ## Current Gaps
 
 - Future Session-scoped registrations still need an explicit canonical registration design.
+
+`inputID` is native invocation provenance. Tool executors and permission/form sources receive it; mutable tool hooks do not receive or replace that authority. Public form/permission creation cannot assert it. Independently admitted synthetic inputs and legacy unknown synthetics have no human attribution; direct event notes retain the preceding input.

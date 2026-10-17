@@ -37,6 +37,7 @@ export interface Selection {
 }
 
 export interface Loaded {
+  readonly input?: SessionMessage.User | SessionMessage.Synthetic
   readonly session: SessionSchema.Info
   readonly agent: Agent.Selection & { readonly info: Agent.Info }
   readonly model: SessionRunnerModel.Resolved
@@ -209,6 +210,7 @@ const layer = Layer.effect(
         initial: history.initial,
         ephemeral: selection.ephemeral,
         messages: history.entries.map((entry) => entry.message),
+        input: history.input,
         tools: selection.tools,
       }
     })

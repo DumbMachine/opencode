@@ -1207,7 +1207,7 @@ describe("SessionRunnerLLM", () => {
     ])
   })
 
-  scenario("keeps tool provenance on its frozen input while another input is admitted", function* (s) {
+  scenario("attributes each prepared step to its own input when steering arrives later", function* (s) {
     const first = yield* s.admit("First requester")
     yield* s.llm.push(
       TestLLM.tool("call-first-input", "echo", { text: "first" }),
@@ -1221,6 +1221,26 @@ describe("SessionRunnerLLM", () => {
       { inputID: first.id, callID: Tool.CallID.make("call-first-input") },
       { inputID: second.id, callID: Tool.CallID.make("call-second-input") },
     ])
+  })
+
+  scenario("does not attribute independently admitted synthetic work to the preceding human input", function* (s) {
+    const first = yield* s.admit("Human request")
+    yield* s.llm.push(TestLLM.tool("call-human", "echo", { text: "human" }), [])
+    yield* s.resume
+    yield* s.session.synthetic({ sessionID, text: "Independent synthetic request", resume: false })
+    yield* s.llm.push(TestLLM.tool("call-synthetic", "echo", { text: "synthetic" }), [])
+    yield* s.resume
+    expect(s.authorizations.map((context) => context.inputID)).toEqual([first.id, undefined])
+  })
+
+  scenario("retains the initiating input across internal synthetic continuation notes", function* (s) {
+    const first = yield* s.admit("Human request")
+    const latest = yield* s.runPrompt("Newer human request")
+    yield* s.bus.publish(SessionEvent.Synthetic, { sessionID, text: "Native continuation note" })
+    yield* s.llm.push(TestLLM.tool("call-note", "echo", { text: "continued" }), [])
+    yield* s.resume
+    expect(s.authorizations.at(-1)?.inputID).toBe(latest.id)
+    expect(s.authorizations.at(-1)?.inputID).not.toBe(first.id)
   })
 
   scenario("executes a tool renamed by a session context hook", function* (s) {
@@ -2557,16 +2577,20 @@ describe("SessionRunnerLLM", () => {
     yield* s.llm.push(
       TestLLM.tool("call-active", "echo", { text: "active" }),
       [LLMEvent.textDelta({ id: "summary", text: "## Objective\n- durable summary" })],
-      TestLLM.text("Continued", "text-continued-after-compact"),
+      TestLLM.tool("call-after-compact", "echo", { text: "continued" }),
+      [],
     )
-    yield* s.admit("Active work")
+    const input = yield* s.session.prompt({ sessionID, text: "Active work", resume: false, capabilities: ["mcp"] })
+    yield* SessionExecutionCapability.set(sessionID, { inputID: input.id, mcp: {} })
     const active = yield* s.resumePaused
 
     const compaction = yield* s.session.compact({ sessionID })
     yield* active.finish
 
     // The compaction summary is requested before the tool turn's continuation step.
-    expect(s.requests).toHaveLength(3)
+    expect(s.requests).toHaveLength(4)
+    expect(s.authorizations.map((context) => context.inputID)).toEqual([input.id, input.id])
+    expect((yield* s.context).some((message) => message.type === "user")).toBe(false)
     expect((yield* s.messages).find((message) => message.id === compaction.id)).toMatchObject({
       type: "compaction",
       status: "completed",

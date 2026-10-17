@@ -215,11 +215,8 @@ const layer = Layer.effect(
       const preview = yield* context.load(selected)
       const grant = yield* executionGrant(
         sessionID,
-        preview.messages,
-        yield* SessionExecutionCapability.get(
-          sessionID,
-          preview.messages.toReversed().find((message) => message.type === "user")?.id,
-        ),
+        preview.input ? [preview.input] : [],
+        yield* SessionExecutionCapability.get(sessionID, preview.input?.type === "user" ? preview.input.id : undefined),
       )
       if (!grant) return preview
       const executionMcp = yield* mcp.request(grant.mcp)
@@ -268,7 +265,7 @@ const layer = Layer.effect(
         })
         const prepared = yield* context.request.primary({
           session: loaded.session,
-          inputID: loaded.messages.findLast((message) => message.type === "user")?.id,
+          inputID: loaded.input?.type === "user" ? loaded.input.id : undefined,
           agent: loaded.agent.id,
           model: loaded.model,
           tools: loaded.tools,

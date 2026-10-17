@@ -8127,7 +8127,28 @@
                     "type": "object"
                   },
                   "source": {
-                    "$ref": "#/components/schemas/Permission.Source"
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "type": "string",
+                            "enum": ["tool"]
+                          },
+                          "messageID": {
+                            "type": "string"
+                          },
+                          "id": {
+                            "type": "string"
+                          }
+                        },
+                        "required": ["type", "messageID", "id"],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "agent": {
                     "anyOf": [
@@ -14071,6 +14092,9 @@
           "metadata": {
             "$ref": "#/components/schemas/Form.Metadata"
           },
+          "source": {
+            "$ref": "#/components/schemas/Permission.Source"
+          },
           "fields": {
             "$ref": "#/components/schemas/Form.Fields"
           },
@@ -14177,6 +14201,9 @@
           },
           "metadata": {
             "$ref": "#/components/schemas/Form.Metadata"
+          },
+          "source": {
+            "$ref": "#/components/schemas/Permission.Source"
           },
           "fields": {
             "$ref": "#/components/schemas/Form.Fields"
@@ -18302,6 +18329,10 @@
             },
             "required": ["created"],
             "additionalProperties": false
+          },
+          "origin": {
+            "type": "string",
+            "enum": ["event"]
           },
           "text": {
             "type": "string"

@@ -2,6 +2,10 @@ import { expect, test } from "bun:test"
 import { Effect } from "effect"
 import { Database } from "@opencode/core/database/database"
 import { DatabaseMigration } from "@opencode/core/database/migration"
+import { SessionHistory } from "@opencode/core/session/history"
+import { SessionMessage } from "@opencode/core/session/message"
+import { SessionSchema } from "@opencode/core/session/schema"
+import { SessionMessageTable } from "@opencode/core/session/sql"
 import { Global } from "@opencode/util/global"
 import { tmpdir } from "./fixture/tmpdir"
 import viewed from "../src/database/migration/20260819222447_session_viewed_state"
@@ -56,6 +60,70 @@ test.skipIf(!url)("upgrades existing PostgreSQL rows and preserves workspace ref
             )).length,
           ).toBe(1)
           yield* tx.run(`DROP SCHEMA "${schema}" CASCADE`)
+        }),
+      )
+    }).pipe(
+      Effect.provideService(Global.Service, Global.make({ data: tmp.path })),
+      Effect.provide(Database.postgresDatabaseLayer(url!)),
+    ),
+  )
+})
+
+test.skipIf(!url)("resolves initiating input outside compaction windows in PostgreSQL", async () => {
+  await using tmp = await tmpdir()
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const { db } = yield* Database.Service
+      yield* db.transaction((tx) =>
+        Effect.gen(function* () {
+          // Shadows only this connection's message projection and disappears at commit.
+          yield* tx.run(
+            "CREATE TEMP TABLE session_message (LIKE public.session_message INCLUDING DEFAULTS) ON COMMIT DROP",
+          )
+          const first = SessionSchema.ID.make("ses_provenance_first")
+          const second = SessionSchema.ID.make("ses_provenance_second")
+          yield* tx
+            .insert(SessionMessageTable)
+            .values([
+              {
+                id: SessionMessage.ID.make("msg_first"),
+                session_id: first,
+                type: "user",
+                seq: 1,
+                data: { text: "First", time: { created: 0 } },
+              },
+              {
+                id: SessionMessage.ID.make("msg_second"),
+                session_id: second,
+                type: "user",
+                seq: 1,
+                data: { text: "Second", time: { created: 0 } },
+              },
+              {
+                id: SessionMessage.ID.make("msg_note"),
+                session_id: first,
+                type: "synthetic",
+                seq: 3,
+                data: { text: "Internal note", origin: "event", time: { created: 0 } },
+              },
+            ])
+            .run()
+          yield* tx.run(
+            `INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data) VALUES ('msg_checkpoint', 'ses_provenance_first', 'compaction', 2, 0, 0, '{}')`,
+          )
+          expect((yield* SessionHistory.latestInput(tx, first))?.id).toBe(SessionMessage.ID.make("msg_first"))
+          yield* tx
+            .insert(SessionMessageTable)
+            .values({
+              id: SessionMessage.ID.make("msg_synthetic"),
+              session_id: first,
+              type: "synthetic",
+              seq: 4,
+              data: { text: "Independent input", metadata: { origin: "event" }, time: { created: 0 } },
+            })
+            .run()
+          expect(yield* SessionHistory.latestInput(tx, first)).toMatchObject({ id: "msg_synthetic", type: "synthetic" })
+          expect((yield* SessionHistory.latestInput(tx, second))?.id).toBe(SessionMessage.ID.make("msg_second"))
         }),
       )
     }).pipe(

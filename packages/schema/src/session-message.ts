@@ -77,6 +77,8 @@ export const User = Schema.Struct({
 export interface Synthetic extends Schema.Schema.Type<typeof Synthetic> {}
 export const Synthetic = Schema.Struct({
   ...Base,
+  /** Derived by the direct-event projector; absent for admitted or legacy-unknown input. */
+  origin: Schema.Literal("event").pipe(optional),
   text: Schema.String,
   description: Schema.String.pipe(optional),
   type: Schema.tag("synthetic"),

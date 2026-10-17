@@ -184,7 +184,13 @@ describe("QuestionTool", () => {
         title: "Questions",
         metadata: {
           kind: "question",
-          tool: { messageID: toolIdentity.messageID, inputID: "msg_question_requester", id: "call-question" },
+          tool: { messageID: toolIdentity.messageID, id: "call-question" },
+        },
+        source: {
+          type: "tool",
+          messageID: toolIdentity.messageID,
+          id: "call-question",
+          inputID: SessionMessage.ID.make("msg_question_requester"),
         },
         fields: [
           {
@@ -232,6 +238,7 @@ describe("QuestionTool", () => {
         sessionID,
         title: "Questions",
         metadata: { kind: "question", tool: { messageID: toolIdentity.messageID, id: "call-question" } },
+        source: { type: "tool", messageID: toolIdentity.messageID, id: "call-question" },
         fields: [
           {
             key: "q0",

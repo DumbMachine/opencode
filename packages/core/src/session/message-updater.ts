@@ -161,6 +161,7 @@ export function update(adapter: Adapter, event: SessionEvent.DurableEvent) {
       "session.synthetic": (event) => {
         return adapter.appendMessage(
           SessionMessage.Synthetic.make({
+            origin: "event",
             text: event.data.text,
             description: event.data.description,
             metadata: event.data.metadata,

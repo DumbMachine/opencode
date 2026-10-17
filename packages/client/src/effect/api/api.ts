@@ -1812,7 +1812,7 @@ export type PermissionCreateInput = {
   readonly resources: ReadonlyArray<string>
   readonly save?: ReadonlyArray<string> | undefined
   readonly metadata?: { readonly [x: string]: unknown } | undefined
-  readonly source?: Permission.Source | undefined
+  readonly source?: { readonly type: "tool"; readonly messageID: string; readonly id: string } | undefined
   readonly agent?: Agent.ID | undefined
 }
 export type PermissionCreateOutput = { readonly id: Permission.ID; readonly effect: Permission.Effect }

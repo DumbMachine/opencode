@@ -68,7 +68,10 @@ export const makePermissionGroup = <
           resources: Permission.Request.fields.resources,
           save: Permission.Request.fields.save,
           metadata: Permission.Request.fields.metadata,
-          source: Permission.Request.fields.source,
+          // Public clients may anchor a request, but cannot assert native input ownership.
+          source: Schema.Struct({ type: Schema.Literal("tool"), messageID: Schema.String, id: Schema.String }).pipe(
+            Schema.optional,
+          ),
           agent: Agent.ID.pipe(Schema.optional),
         }),
         success: Schema.Struct({

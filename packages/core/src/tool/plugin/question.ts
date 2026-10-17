@@ -82,11 +82,13 @@ export const Plugin = {
                       title: "Questions",
                       metadata: {
                         kind: "question",
-                        tool: {
-                          messageID: context.messageID,
-                          ...(context.inputID === undefined ? {} : { inputID: context.inputID }),
-                          id: context.id,
-                        },
+                        tool: { messageID: context.messageID, id: context.id },
+                      },
+                      source: {
+                        type: "tool",
+                        messageID: context.messageID,
+                        ...(context.inputID === undefined ? {} : { inputID: context.inputID }),
+                        id: context.id,
                       },
                       fields: [
                         toField(input.questions[0], 0),

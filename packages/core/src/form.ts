@@ -130,6 +130,7 @@ export const layer = Layer.effect(
             sessionID: input.sessionID,
             title: input.title,
             ...(input.metadata === undefined ? {} : { metadata: input.metadata }),
+            ...(input.source === undefined ? {} : { source: input.source }),
             fields: input.fields,
           }
           const entry: Entry = {

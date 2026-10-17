@@ -1,6 +1,7 @@
 export * as Form from "./form.js"
 
 import { Schema } from "effect"
+import { Permission } from "./permission.js"
 import { ephemeral, inventory } from "./event.js"
 import { ascending } from "./identifier.js"
 import { NonNegativeInt, optional, statics } from "./schema.js"
@@ -128,6 +129,8 @@ const InfoBase = {
   sessionID: Schema.String,
   title: Schema.String,
   metadata: Metadata.pipe(optional),
+  /** Set by native tool execution; public form creation cannot supply this source. */
+  source: Permission.Source.pipe(optional),
 }
 
 export const Info = Schema.Struct({

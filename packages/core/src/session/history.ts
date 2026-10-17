@@ -115,6 +115,35 @@ export const load = Effect.fn("SessionHistory.load")(function* (
   return (yield* messageEntries(db, sessionID, boundary)).map((entry) => entry.message)
 })
 
+/** Input ownership survives compaction; direct event notes continue the existing input. */
+export const latestInput = Effect.fn("SessionHistory.latestInput")(function* (
+  db: Pick<DatabaseService, "select">,
+  sessionID: SessionSchema.ID,
+) {
+  const row = yield* db
+    .select()
+    .from(SessionMessageTable)
+    .where(
+      and(
+        eq(SessionMessageTable.session_id, sessionID),
+        or(
+          eq(SessionMessageTable.type, "user"),
+          and(
+            eq(SessionMessageTable.type, "synthetic"),
+            sql`coalesce(json_extract(${SessionMessageTable.data}, '$.origin'), '') <> 'event'`,
+          ),
+        ),
+      ),
+    )
+    .orderBy(desc(SessionMessageTable.seq))
+    .limit(1)
+    .get()
+    .pipe(Effect.orDie)
+  if (!row) return undefined
+  const message = yield* decodeMessageRow(row)
+  return message.type === "user" || message.type === "synthetic" ? message : undefined
+})
+
 export const entriesForRunner = Effect.fn("SessionHistory.entriesForRunner")(function* (
   db: DatabaseService,
   sessionID: SessionSchema.ID,
@@ -128,6 +157,7 @@ export const entriesForRunner = Effect.fn("SessionHistory.entriesForRunner")(fun
         return {
           initial: yield* InstructionState.initial(db, sessionID, instructions),
           entries: messages,
+          input: yield* latestInput(db, sessionID),
         }
       }),
     )

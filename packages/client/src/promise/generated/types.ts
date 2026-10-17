@@ -83,6 +83,7 @@ export type SessionMessageSynthetic = {
   id: string
   metadata?: { [x: string]: JsonValue }
   time: { created: number }
+  origin?: "event"
   text: string
   description?: string
   type: "synthetic"
@@ -213,6 +214,8 @@ export type SessionInterruptResponse = { interrupted: boolean }
 
 export type FormMetadata = { [x: string]: JsonValue }
 
+export type PermissionSource = { type: "tool"; messageID: string; inputID?: string; id: string }
+
 export type FormWhen = {
   key: string
   op: "eq" | "neq"
@@ -306,8 +309,6 @@ export type ProjectIcon = { url?: string; override?: string; color?: string }
 export type ProjectCommands = { start?: string }
 
 export type ProjectTime = { created: number; updated: number; active: number }
-
-export type PermissionSource = { type: "tool"; messageID: string; inputID?: string; id: string }
 
 export type PermissionSavedInfo = {
   id: string
@@ -1385,6 +1386,35 @@ export type SessionMessageAssistantReasoning1 = {
 
 export type ToolContent1 = ToolTextContent | ToolFileContent1
 
+export type PermissionRequest = {
+  id: string
+  sessionID: string
+  action: string
+  resources: Array<string>
+  save?: Array<string>
+  metadata?: { [x: string]: JsonValue }
+  source?: PermissionSource
+  message?: string
+}
+
+export type PermissionAsked = {
+  id: string
+  created: number
+  metadata?: { [x: string]: any }
+  type: "permission.asked"
+  location?: LocationRef
+  data: {
+    id: string
+    sessionID: string
+    action: string
+    resources: Array<string>
+    save?: Array<string>
+    metadata?: { [x: string]: any }
+    source?: PermissionSource
+    message?: string
+  }
+}
+
 export type FormNumberField = {
   key: string
   title?: string
@@ -1510,35 +1540,6 @@ export type ProjectUpdated = {
     commands?: ProjectCommands
     time: ProjectTime
     sandboxes: Array<string>
-  }
-}
-
-export type PermissionRequest = {
-  id: string
-  sessionID: string
-  action: string
-  resources: Array<string>
-  save?: Array<string>
-  metadata?: { [x: string]: JsonValue }
-  source?: PermissionSource
-  message?: string
-}
-
-export type PermissionAsked = {
-  id: string
-  created: number
-  metadata?: { [x: string]: any }
-  type: "permission.asked"
-  location?: LocationRef
-  data: {
-    id: string
-    sessionID: string
-    action: string
-    resources: Array<string>
-    save?: Array<string>
-    metadata?: { [x: string]: any }
-    source?: PermissionSource
-    message?: string
   }
 }
 
@@ -2264,13 +2265,21 @@ export type SessionMessageAssistantContentEncoded =
   | SessionMessageAssistantReasoning1
   | SessionMessageAssistantTool1
 
-export type FormInfo = { id: string; sessionID: string; title: string; metadata?: FormMetadata; fields: FormFields }
+export type FormInfo = {
+  id: string
+  sessionID: string
+  title: string
+  metadata?: FormMetadata
+  source?: PermissionSource
+  fields: FormFields
+}
 
 export type FormDetail = {
   id: string
   sessionID: string
   title: string
   metadata?: FormMetadata
+  source?: PermissionSource
   fields: FormFields
   state: FormState
 }
@@ -2279,7 +2288,14 @@ export type IntegrationOAuthMethod = { id: string; type: "oauth"; label: string;
 
 export type IntegrationKeyMethod = { type: "key"; label?: string; form?: FormFields }
 
-export type FormInfo1 = { id: string; sessionID: string; title: string; metadata?: FormMetadata1; fields: FormFields2 }
+export type FormInfo1 = {
+  id: string
+  sessionID: string
+  title: string
+  metadata?: FormMetadata1
+  source?: PermissionSource
+  fields: FormFields2
+}
 
 export type SessionMessageInfo =
   | SessionMessageAgentSelected
@@ -3090,6 +3106,7 @@ export type SessionImportInput = {
           readonly id: string
           readonly metadata?: { readonly [x: string]: JsonValue }
           readonly time: { readonly created: number }
+          readonly origin?: "event"
           readonly text: string
           readonly description?: string
           readonly type: "synthetic"
@@ -3408,6 +3425,7 @@ export type SessionImportInput = {
           readonly id: string
           readonly metadata?: { readonly [x: string]: JsonValue }
           readonly time: { readonly created: number }
+          readonly origin?: "event"
           readonly text: string
           readonly description?: string
           readonly type: "synthetic"
@@ -3726,6 +3744,7 @@ export type SessionImportInput = {
           readonly id: string
           readonly metadata?: { readonly [x: string]: JsonValue }
           readonly time: { readonly created: number }
+          readonly origin?: "event"
           readonly text: string
           readonly description?: string
           readonly type: "synthetic"
@@ -5995,12 +6014,7 @@ export type PermissionCreateInput = {
     readonly resources: ReadonlyArray<string>
     readonly save?: ReadonlyArray<string>
     readonly metadata?: { readonly [x: string]: JsonValue }
-    readonly source?: {
-      readonly type: "tool"
-      readonly messageID: string
-      readonly inputID?: string
-      readonly id: string
-    }
+    readonly source?: { readonly type: "tool"; readonly messageID: string; readonly id: string } | null
     readonly agent?: string | null
   }["id"]
   readonly action: {
@@ -6009,12 +6023,7 @@ export type PermissionCreateInput = {
     readonly resources: ReadonlyArray<string>
     readonly save?: ReadonlyArray<string>
     readonly metadata?: { readonly [x: string]: JsonValue }
-    readonly source?: {
-      readonly type: "tool"
-      readonly messageID: string
-      readonly inputID?: string
-      readonly id: string
-    }
+    readonly source?: { readonly type: "tool"; readonly messageID: string; readonly id: string } | null
     readonly agent?: string | null
   }["action"]
   readonly resources: {
@@ -6023,12 +6032,7 @@ export type PermissionCreateInput = {
     readonly resources: ReadonlyArray<string>
     readonly save?: ReadonlyArray<string>
     readonly metadata?: { readonly [x: string]: JsonValue }
-    readonly source?: {
-      readonly type: "tool"
-      readonly messageID: string
-      readonly inputID?: string
-      readonly id: string
-    }
+    readonly source?: { readonly type: "tool"; readonly messageID: string; readonly id: string } | null
     readonly agent?: string | null
   }["resources"]
   readonly save?: {
@@ -6037,12 +6041,7 @@ export type PermissionCreateInput = {
     readonly resources: ReadonlyArray<string>
     readonly save?: ReadonlyArray<string>
     readonly metadata?: { readonly [x: string]: JsonValue }
-    readonly source?: {
-      readonly type: "tool"
-      readonly messageID: string
-      readonly inputID?: string
-      readonly id: string
-    }
+    readonly source?: { readonly type: "tool"; readonly messageID: string; readonly id: string } | null
     readonly agent?: string | null
   }["save"]
   readonly metadata?: {
@@ -6051,12 +6050,7 @@ export type PermissionCreateInput = {
     readonly resources: ReadonlyArray<string>
     readonly save?: ReadonlyArray<string>
     readonly metadata?: { readonly [x: string]: JsonValue }
-    readonly source?: {
-      readonly type: "tool"
-      readonly messageID: string
-      readonly inputID?: string
-      readonly id: string
-    }
+    readonly source?: { readonly type: "tool"; readonly messageID: string; readonly id: string } | null
     readonly agent?: string | null
   }["metadata"]
   readonly source?: {
@@ -6065,12 +6059,7 @@ export type PermissionCreateInput = {
     readonly resources: ReadonlyArray<string>
     readonly save?: ReadonlyArray<string>
     readonly metadata?: { readonly [x: string]: JsonValue }
-    readonly source?: {
-      readonly type: "tool"
-      readonly messageID: string
-      readonly inputID?: string
-      readonly id: string
-    }
+    readonly source?: { readonly type: "tool"; readonly messageID: string; readonly id: string } | null
     readonly agent?: string | null
   }["source"]
   readonly agent?: {
@@ -6079,12 +6068,7 @@ export type PermissionCreateInput = {
     readonly resources: ReadonlyArray<string>
     readonly save?: ReadonlyArray<string>
     readonly metadata?: { readonly [x: string]: JsonValue }
-    readonly source?: {
-      readonly type: "tool"
-      readonly messageID: string
-      readonly inputID?: string
-      readonly id: string
-    }
+    readonly source?: { readonly type: "tool"; readonly messageID: string; readonly id: string } | null
     readonly agent?: string | null
   }["agent"]
 }
