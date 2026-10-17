@@ -272,6 +272,9 @@ export type SessionPromptInput = {
   readonly agents?: ReadonlyArray<AgentAttachment> | undefined
   readonly skills?: ReadonlyArray<PromptInput.SkillAttachment> | undefined
   readonly mcp?: Mcp.RequestServers | undefined
+  readonly execution?:
+    | { readonly model: Model.Ref; readonly agent: Agent.ID; readonly instructions?: string | undefined }
+    | undefined
   readonly metadata?: { readonly [x: string]: unknown } | undefined
   readonly delivery?: SessionInbox.Delivery | undefined
   readonly resume?: boolean | undefined

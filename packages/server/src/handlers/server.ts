@@ -24,10 +24,12 @@ export const ServerHandler = HttpApiBuilder.group(Api, "server.server", (handler
               paths: info.paths,
             },
             {
-              headers:
-                process.env.OPENCODE_MODEL_BUDGET_ENDPOINT && process.env.OPENCODE_MODEL_BUDGET_TOKEN
+              headers: {
+                "x-opencode-input-config": "1",
+                ...(process.env.OPENCODE_MODEL_BUDGET_ENDPOINT && process.env.OPENCODE_MODEL_BUDGET_TOKEN
                   ? { "x-opencode-model-budget": "3" }
-                  : {},
+                  : {}),
+              },
             },
           )
         }),

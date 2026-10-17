@@ -1,7 +1,18 @@
 import { Schema } from "effect"
+import { Agent } from "./agent.js"
+import { Model } from "./model.js"
 import { optional } from "./schema.js"
 import { statics } from "./schema.js"
 import { Skill } from "./skill.js"
+
+/** Complete nonsecret selection frozen by first admission, without changing Session defaults. */
+export interface Execution extends Schema.Schema.Type<typeof Execution> {}
+export const Execution = Schema.Struct({
+  model: Model.Ref,
+  agent: Agent.ID,
+  /** Instructions for this input's primary requests only; never chronological Session instructions. */
+  instructions: Schema.String.pipe(optional),
+}).annotate({ identifier: "Prompt.Execution" })
 
 export interface PromptMention extends Schema.Schema.Type<typeof PromptMention> {}
 export const PromptMention = Schema.Struct({

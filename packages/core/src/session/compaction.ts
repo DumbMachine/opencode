@@ -559,6 +559,7 @@ export const layer = Layer.effect(
       const base = transcript(context, messages)
       return requests.compaction({
         session: context.session,
+        inputID: context.input?.type === "user" ? context.input.id : undefined,
         agent: context.agent.id,
         model: context.model,
         tools: context.tools,
@@ -845,7 +846,15 @@ export const recentUserMessages = (
 export const estimateContext = (context: SessionContext.Loaded) => {
   const anchorIndex = context.messages.findLastIndex((message) => hasMeasuredPrompt(message, context.model.ref))
   const anchor = context.messages[anchorIndex]
-  const base = transcript(context, context.messages.slice(Math.max(0, anchorIndex)))
+  const base = SessionModelRequest.baseTranscript({
+    agent: context.agent.info,
+    model: context.model,
+    tools: context.tools,
+    initial: context.initial,
+    ephemeral: context.ephemeral,
+    instructions: context.executionInstructions,
+    messages: context.messages.slice(Math.max(0, anchorIndex)),
+  })
   // TODO: Pass compaction history the runner has already shaped. This and `recentUserMessages` repeat the
   // runner's unsupported-media and image-budget passes; here the image budget only sees images since the anchor,
   // so image-heavy sessions can estimate high.
@@ -860,7 +869,9 @@ export const estimateContext = (context: SessionContext.Loaded) => {
 
   const tokens = anchor.tokens
   const measured = tokens.input + tokens.cache.read + tokens.cache.write + tokens.output + tokens.reasoning
-  return measured + unmeasured.reduce((sum, message) => sum + estimateMessage(message), 0)
+  // Request-only text has no separately persisted measurement; retain a conservative bound after an anchor.
+  const ephemeral = Token.estimate(context.ephemeral ?? "") + Token.estimate(context.executionInstructions ?? "")
+  return measured + ephemeral + unmeasured.reduce((sum, message) => sum + estimateMessage(message), 0)
 }
 
 /** The largest request the model takes while leaving room for its reply. */

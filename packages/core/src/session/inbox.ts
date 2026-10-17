@@ -496,48 +496,81 @@ const publish = Effect.fn("SessionInbox.publish")(function* (
   return rows.length
 })
 
+/** Snapshot the last input eligible for the next boundary without consuming it. */
+export const promotionInput = Effect.fn("SessionInbox.promotionInput")(function* (
+  db: DatabaseService,
+  sessionID: SessionSchema.ID,
+  scope: Promotable,
+) {
+  return lastInput((yield* promotionRows(db, sessionID, scope)) ?? [])
+})
+
 /**
  * Promotes pending input into visible messages and returns the promoted count,
- * or undefined when the runner must first handle a pending control.
+ * or undefined when a control or changed execution configuration needs preparation.
  * Steered compaction takes priority over pending prompts, without crossing a move.
  * Only the "input" scope may fall through to one queued input.
+ * Preparation runs outside the lock; accept only performs the final configuration check.
  */
 export const promote = Effect.fn("SessionInbox.promote")(function* (
   db: DatabaseService,
   bus: Bus.Interface,
   sessionID: SessionSchema.ID,
   scope: Promotable,
+  accept?: (input: SessionMessage.User | SessionMessage.Synthetic | undefined) => Effect.Effect<boolean>,
 ) {
   return yield* serialized(
     sessionID,
     Effect.gen(function* () {
+      const rows = yield* promotionRows(db, sessionID, scope)
+      if (!rows || (accept && !(yield* accept(lastInput(rows))))) return undefined
+      const promoted = yield* publish(db, bus, sessionID, rows)
+      if (rows[0]?.delivery !== "queue") return promoted
       const steers = yield* pendingSteers(db, sessionID)
-      if (steers.length > 0 || scope === "steer") {
-        const control = steers.findIndex((row) => row.type === "compaction" || row.type === "move")
-        if (control === 0) return undefined
-        return yield* publish(db, bus, sessionID, control === -1 ? steers : steers.slice(0, control))
-      }
-
-      const queued = yield* db
-        .select()
-        .from(SessionInboxTable)
-        .where(and(eq(SessionInboxTable.session_id, sessionID), eq(SessionInboxTable.delivery, "queue")))
-        .orderBy(asc(SessionInboxTable.enqueued_seq))
-        .limit(1)
-        .get()
-        .pipe(Effect.orDie)
-      if (!queued) return 0
-      if (queued.type === "compaction" || queued.type === "move") return undefined
-      const promoted = yield* publish(db, bus, sessionID, [queued])
-      const arrivedSteers = yield* pendingSteers(db, sessionID)
-      const control = arrivedSteers.findIndex((row) => row.type === "compaction" || row.type === "move")
-      return (
-        promoted +
-        (yield* publish(db, bus, sessionID, control === -1 ? arrivedSteers : arrivedSteers.slice(0, control)))
-      )
+      const control = steers.findIndex((row) => row.type === "compaction" || row.type === "move")
+      const arrived = control === -1 ? steers : steers.slice(0, control)
+      // A steer admitted during queued publication must be prepared before any model call.
+      if (arrived.length > 0 && accept && !(yield* accept(lastInput(arrived))))
+        return { promoted, reprepare: true as const }
+      return promoted + (yield* publish(db, bus, sessionID, arrived))
     }),
   )
 })
+
+const promotionRows = Effect.fn("SessionInbox.promotionRows")(function* (
+  db: DatabaseService,
+  sessionID: SessionSchema.ID,
+  scope: Promotable,
+) {
+  const steers = yield* pendingSteers(db, sessionID)
+  if (steers.length > 0 || scope === "steer") {
+    const control = steers.findIndex((row) => row.type === "compaction" || row.type === "move")
+    if (control === 0) return undefined
+    return control === -1 ? steers : steers.slice(0, control)
+  }
+  const queued = yield* db
+    .select()
+    .from(SessionInboxTable)
+    .where(and(eq(SessionInboxTable.session_id, sessionID), eq(SessionInboxTable.delivery, "queue")))
+    .orderBy(asc(SessionInboxTable.enqueued_seq))
+    .limit(1)
+    .get()
+    .pipe(Effect.orDie)
+  if (!queued) return []
+  if (queued.type === "compaction" || queued.type === "move") return undefined
+  return [queued]
+})
+
+function lastInput(rows: ReadonlyArray<typeof SessionInboxTable.$inferSelect>) {
+  const row = rows.at(-1)
+  if (!row) return undefined
+  const input = fromRow(row)
+  if (input.type === "user")
+    return SessionMessage.User.make({ id: input.id, time: input.time, ...input.payload, type: "user" })
+  if (input.type === "synthetic")
+    return SessionMessage.Synthetic.make({ id: input.id, time: input.time, ...input.payload, type: "synthetic" })
+  return undefined
+}
 
 const pendingSteers = (db: DatabaseService, sessionID: SessionSchema.ID) =>
   db

@@ -120,7 +120,7 @@ const layer = Layer.effect(
                 const compacted = yield* restore(
                   Effect.gen(function* () {
                     const selected = yield* context.select(sessionID)
-                    const model = yield* context.resolveModel(selected.session)
+                    const model = yield* context.resolveModel({ ...selected.session, model: selected.model })
                     // Preview updates without admitting them after the already-delivered compaction marker.
                     const history = yield* SessionHistory.preview(
                       db,
@@ -133,6 +133,7 @@ const layer = Layer.effect(
                       inputID: pending.id,
                       context: {
                         session: selected.session,
+                        input: selected.input,
                         agent: selected.agent,
                         tools: selected.tools,
                         model,
@@ -172,23 +173,36 @@ const layer = Layer.effect(
                   // Validate the baseline before exposing admitted input. The visible
                   // history may still end with a completed turn whose request-scoped
                   // capability has expired; resolve the grant only after promotion.
-                  const selected = yield* prepareSelection(sessionID)
-                  const promoted = yield* SessionInbox.promote(
-                    db,
-                    bus,
-                    sessionID,
-                    entering && !continuing ? promotable : "steer",
+                  const scope = entering && !continuing ? promotable : "steer"
+                  const selected = yield* prepareSelection(sessionID, scope)
+                  const promoted = yield* SessionInbox.promote(db, bus, sessionID, scope, (pending) =>
+                    Effect.gen(function* () {
+                      const actual = pending ?? (yield* SessionHistory.latestInput(db, sessionID).pipe(Effect.orDie))
+                      return SessionContext.sameExecution(actual, selected.input)
+                    }),
                   )
                   // A control admitted during context preparation owns this boundary.
                   if (promoted === undefined) return undefined
-                  if (promoted > 0 && !selected.session.parentID && SessionTitle.isUntitled(selected.session))
+                  if (typeof promoted === "object") {
+                    // A queued input already committed. Carry its work through re-preparation,
+                    // including a later cancellation, compaction, or Location move.
+                    force = true
+                    continuing = true
+                    entering = false
+                    step = 1
+                    if (!selected.session.parentID && SessionTitle.isUntitled(selected.session))
+                      yield* FiberMap.run(titles, sessionID, title.generate(sessionID), { onlyIfMissing: true })
+                    return undefined
+                  }
+                  const loaded = yield* loadWithGrant(sessionID, selected)
+                  if (promoted > 0 && !loaded.session.parentID && SessionTitle.isUntitled(loaded.session))
                     yield* FiberMap.run(titles, sessionID, title.generate(sessionID), {
                       onlyIfMissing: true,
                     })
                   if (promoted > 0) step = 1
                   return {
                     _tag: "Ready" as const,
-                    context: yield* loadWithGrant(sessionID, selected),
+                    context: loaded,
                   }
                 }),
               )
@@ -220,14 +234,21 @@ const layer = Layer.effect(
       )
       if (!grant) return preview
       const executionMcp = yield* mcp.request(grant.mcp)
-      const next = yield* context.select(sessionID, executionMcp)
+      const next = yield* context.select(sessionID, executionMcp, {
+        input: preview.input,
+        selection: { ...selected, model: preview.model.ref },
+      })
       yield* InstructionState.prepare(db, bus, next.instructions, sessionID)
       return yield* context.load(next)
     })
 
-    const prepareSelection = Effect.fn("SessionRunner.prepareSelection")(function* (sessionID: SessionSchema.ID) {
-      const selected = yield* context.select(sessionID)
-      // A blocked initial instruction baseline must leave admitted input pending.
+    const prepareSelection = Effect.fn("SessionRunner.prepareSelection")(function* (
+      sessionID: SessionSchema.ID,
+      scope?: SessionInbox.Promotable,
+    ) {
+      const pending = scope ? yield* SessionInbox.promotionInput(db, sessionID, scope) : undefined
+      const selected = yield* context.select(sessionID, undefined, pending ? { input: pending } : undefined)
+      // Preserve chronological shared updates and leave blocked initial input pending.
       yield* InstructionState.prepare(db, bus, selected.instructions, sessionID)
       return selected
     })
@@ -261,6 +282,7 @@ const layer = Layer.effect(
           tools: loaded.tools,
           initial: loaded.initial,
           ephemeral: loaded.ephemeral,
+          instructions: loaded.executionInstructions,
           messages: loaded.messages,
         })
         const prepared = yield* context.request.primary({

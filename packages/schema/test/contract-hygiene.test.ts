@@ -8,6 +8,7 @@ import { Form } from "../src/form.js"
 import { Mcp } from "../src/mcp.js"
 import { Model } from "../src/model.js"
 import { Project } from "../src/project.js"
+import { Execution } from "../src/prompt.js"
 import { SkillAttachment } from "../src/prompt.js"
 import { Provider } from "../src/provider.js"
 import { Pty } from "../src/pty.js"
@@ -355,4 +356,15 @@ test("permission input provenance uses the canonical message ID and omits unknow
     encode(decode({ type: "tool", messageID: "msg_assistant", id: "call-two", inputID: "msg_input" })),
   ).toHaveProperty("inputID", "msg_input")
   expect(() => decode({ type: "tool", messageID: "msg_assistant", id: "call-two", inputID: "wrong" })).toThrow()
+})
+
+test("an input execution configuration freezes complete model and agent selections", () => {
+  const decode = Schema.decodeUnknownSync(Execution)
+  const encode = Schema.encodeSync(Execution)
+  expect(encode(decode({ model: { id: "model-one", providerID: "provider-one" }, agent: "agent-one" }))).toEqual({
+    model: { id: "model-one", providerID: "provider-one" },
+    agent: "agent-one",
+  })
+  expect(() => decode({ agent: "agent-one" })).toThrow()
+  expect(() => decode({ model: { id: "model-one", providerID: "provider-one" } })).toThrow()
 })

@@ -507,6 +507,8 @@ export type SessionMessageModelSelected = {
   previous?: ModelRef
 }
 
+export type PromptExecution = { model: ModelRef; agent: string; instructions?: string }
+
 export type PromptFileAttachment = {
   data: PromptBase64
   mime: string
@@ -1738,6 +1740,7 @@ export type SessionMessageUser = {
   id: string
   metadata?: { [x: string]: JsonValue }
   time: { created: number }
+  execution?: PromptExecution
   text: string
   files?: Array<PromptFileAttachment>
   agents?: Array<PromptAgentAttachment>
@@ -1751,6 +1754,7 @@ export type SessionInboxUserPayload = {
   files?: Array<PromptFileAttachment>
   agents?: Array<PromptAgentAttachment>
   skills?: Array<PromptSkillAttachment>
+  execution?: PromptExecution
   metadata?: { [x: string]: JsonValue }
   capabilities?: Array<string>
 }
@@ -1760,6 +1764,7 @@ export type SessionInboxUserPayload1 = {
   files?: Array<PromptFileAttachment>
   agents?: Array<PromptAgentAttachment>
   skills?: Array<PromptSkillAttachment>
+  execution?: PromptExecution
   metadata?: { [x: string]: any }
   capabilities?: Array<string>
 }
@@ -3080,6 +3085,11 @@ export type SessionImportInput = {
           readonly id: string
           readonly metadata?: { readonly [x: string]: JsonValue }
           readonly time: { readonly created: number }
+          readonly execution?: {
+            readonly model: { readonly id: string; readonly providerID: string; readonly variant?: string }
+            readonly agent: string
+            readonly instructions?: string
+          }
           readonly text: string
           readonly files?: ReadonlyArray<{
             readonly data: string
@@ -3399,6 +3409,11 @@ export type SessionImportInput = {
           readonly id: string
           readonly metadata?: { readonly [x: string]: JsonValue }
           readonly time: { readonly created: number }
+          readonly execution?: {
+            readonly model: { readonly id: string; readonly providerID: string; readonly variant?: string }
+            readonly agent: string
+            readonly instructions?: string
+          }
           readonly text: string
           readonly files?: ReadonlyArray<{
             readonly data: string
@@ -3718,6 +3733,11 @@ export type SessionImportInput = {
           readonly id: string
           readonly metadata?: { readonly [x: string]: JsonValue }
           readonly time: { readonly created: number }
+          readonly execution?: {
+            readonly model: { readonly id: string; readonly providerID: string; readonly variant?: string }
+            readonly agent: string
+            readonly instructions?: string
+          }
           readonly text: string
           readonly files?: ReadonlyArray<{
             readonly data: string
@@ -4061,6 +4081,11 @@ export type SessionPromptInput = {
         readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
       }
     }
+    readonly execution?: {
+      readonly model: { readonly id: string; readonly providerID: string; readonly variant?: string }
+      readonly agent: string
+      readonly instructions?: string
+    }
     readonly metadata?: { readonly [x: string]: JsonValue }
     readonly delivery?: ("steer" | "queue") | null
     readonly resume?: boolean | null
@@ -4092,6 +4117,11 @@ export type SessionPromptInput = {
         readonly approval_bridge?: ReadonlyArray<string>
         readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
       }
+    }
+    readonly execution?: {
+      readonly model: { readonly id: string; readonly providerID: string; readonly variant?: string }
+      readonly agent: string
+      readonly instructions?: string
     }
     readonly metadata?: { readonly [x: string]: JsonValue }
     readonly delivery?: ("steer" | "queue") | null
@@ -4125,6 +4155,11 @@ export type SessionPromptInput = {
         readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
       }
     }
+    readonly execution?: {
+      readonly model: { readonly id: string; readonly providerID: string; readonly variant?: string }
+      readonly agent: string
+      readonly instructions?: string
+    }
     readonly metadata?: { readonly [x: string]: JsonValue }
     readonly delivery?: ("steer" | "queue") | null
     readonly resume?: boolean | null
@@ -4156,6 +4191,11 @@ export type SessionPromptInput = {
         readonly approval_bridge?: ReadonlyArray<string>
         readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
       }
+    }
+    readonly execution?: {
+      readonly model: { readonly id: string; readonly providerID: string; readonly variant?: string }
+      readonly agent: string
+      readonly instructions?: string
     }
     readonly metadata?: { readonly [x: string]: JsonValue }
     readonly delivery?: ("steer" | "queue") | null
@@ -4189,6 +4229,11 @@ export type SessionPromptInput = {
         readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
       }
     }
+    readonly execution?: {
+      readonly model: { readonly id: string; readonly providerID: string; readonly variant?: string }
+      readonly agent: string
+      readonly instructions?: string
+    }
     readonly metadata?: { readonly [x: string]: JsonValue }
     readonly delivery?: ("steer" | "queue") | null
     readonly resume?: boolean | null
@@ -4221,10 +4266,52 @@ export type SessionPromptInput = {
         readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
       }
     }
+    readonly execution?: {
+      readonly model: { readonly id: string; readonly providerID: string; readonly variant?: string }
+      readonly agent: string
+      readonly instructions?: string
+    }
     readonly metadata?: { readonly [x: string]: JsonValue }
     readonly delivery?: ("steer" | "queue") | null
     readonly resume?: boolean | null
   }["mcp"]
+  readonly execution?: {
+    readonly id?: string | null
+    readonly text: string
+    readonly files?: ReadonlyArray<{
+      readonly uri: string
+      readonly name?: string
+      readonly description?: string
+      readonly mention?: { readonly start: number; readonly end: number; readonly text: string }
+    }>
+    readonly agents?: ReadonlyArray<{
+      readonly name: string
+      readonly mention?: { readonly start: number; readonly end: number; readonly text: string }
+    }>
+    readonly skills?: ReadonlyArray<{
+      readonly id: string
+      readonly mention?: { readonly start: number; readonly end: number; readonly text: string }
+    }>
+    readonly mcp?: {
+      readonly [x: string]: {
+        readonly type: "remote"
+        readonly url: string
+        readonly headers?: { readonly [x: string]: string }
+        readonly oauth?: false
+        readonly codemode?: boolean
+        readonly approval_bridge?: ReadonlyArray<string>
+        readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
+      }
+    }
+    readonly execution?: {
+      readonly model: { readonly id: string; readonly providerID: string; readonly variant?: string }
+      readonly agent: string
+      readonly instructions?: string
+    }
+    readonly metadata?: { readonly [x: string]: JsonValue }
+    readonly delivery?: ("steer" | "queue") | null
+    readonly resume?: boolean | null
+  }["execution"]
   readonly metadata?: {
     readonly id?: string | null
     readonly text: string
@@ -4252,6 +4339,11 @@ export type SessionPromptInput = {
         readonly approval_bridge?: ReadonlyArray<string>
         readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
       }
+    }
+    readonly execution?: {
+      readonly model: { readonly id: string; readonly providerID: string; readonly variant?: string }
+      readonly agent: string
+      readonly instructions?: string
     }
     readonly metadata?: { readonly [x: string]: JsonValue }
     readonly delivery?: ("steer" | "queue") | null
@@ -4285,6 +4377,11 @@ export type SessionPromptInput = {
         readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
       }
     }
+    readonly execution?: {
+      readonly model: { readonly id: string; readonly providerID: string; readonly variant?: string }
+      readonly agent: string
+      readonly instructions?: string
+    }
     readonly metadata?: { readonly [x: string]: JsonValue }
     readonly delivery?: ("steer" | "queue") | null
     readonly resume?: boolean | null
@@ -4316,6 +4413,11 @@ export type SessionPromptInput = {
         readonly approval_bridge?: ReadonlyArray<string>
         readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
       }
+    }
+    readonly execution?: {
+      readonly model: { readonly id: string; readonly providerID: string; readonly variant?: string }
+      readonly agent: string
+      readonly instructions?: string
     }
     readonly metadata?: { readonly [x: string]: JsonValue }
     readonly delivery?: ("steer" | "queue") | null

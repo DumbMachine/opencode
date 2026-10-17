@@ -28,7 +28,8 @@ export const generate = Effect.fn("SessionGenerate.generate")(function* (input: 
   return yield* Effect.gen(function* () {
     yield* Plugin.awaitActivation
     const context = yield* SessionContext.Service
-    const selection = yield* context.select(input.session.id)
+    // This independent, non-admitted operation uses Session defaults, not another input's choices.
+    const selection = yield* context.select(input.session.id, undefined, { input: undefined })
     const model = yield* context.resolveModel(selection.session)
     const history = yield* SessionHistory.preview(
       database.db,

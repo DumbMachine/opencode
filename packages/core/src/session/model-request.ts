@@ -78,6 +78,7 @@ export const baseTranscript = (input: {
   readonly tools: Tool.Snapshot
   readonly initial: string
   readonly ephemeral?: string
+  readonly instructions?: string
   readonly messages: ReadonlyArray<SessionMessage.Info>
 }) => {
   const providerMetadataKey = input.model.model.route.providerMetadataKey ?? input.model.model.provider
@@ -89,6 +90,7 @@ export const baseTranscript = (input: {
         : SessionSystemPrompt.make(input.tools.definitions.map((tool) => tool.name)),
       input.initial,
       input.ephemeral ?? "",
+      input.instructions ?? "",
     ]
       .filter((part) => part.length > 0)
       .map(SystemPart.make),

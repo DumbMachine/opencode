@@ -22,6 +22,7 @@ export type Input = {
   files?: PromptInput.Prompt["files"]
   agents?: PromptInput.Prompt["agents"]
   skills?: PromptInput.Prompt["skills"]
+  execution?: SessionInbox.UserPayload["execution"]
   capabilities?: readonly string[]
   metadata?: Record<string, unknown>
   delivery?: SessionInbox.Delivery
@@ -84,6 +85,7 @@ export const prepare = Effect.fn("SessionPrompt.prepare")(function* (request: {
           files,
           skills: selected?.length ? selected : undefined,
         }),
+        execution: request.input.execution,
         metadata: event.metadata,
         capabilities: request.input.capabilities ? [...request.input.capabilities] : undefined,
       }),

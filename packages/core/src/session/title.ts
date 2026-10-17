@@ -13,6 +13,7 @@ import { SessionContext } from "./context.js"
 import { SessionEvent } from "./event.js"
 import { SessionHistory } from "./history.js"
 import type { SessionRunnerModel } from "./runner/model.js"
+import type { SessionMessage } from "./message.js"
 import { SessionSchema } from "./schema.js"
 import { SessionUsage } from "./usage.js"
 import { SessionStore } from "./store.js"
@@ -49,6 +50,7 @@ export const layer = Layer.effect(
       readonly session: SessionSchema.Info
       readonly agent: Agent.Info
       readonly text: string
+      readonly inputID: SessionMessage.ID
       readonly model: SessionRunnerModel.Resolved
     }) {
       const chunks: string[] = []
@@ -65,6 +67,7 @@ export const layer = Layer.effect(
       )
       const prepared = yield* context.request.title({
         session: input.session,
+        inputID: input.inputID,
         agent: input.agent.id,
         model: input.model,
         system: input.agent.system ? [SystemPart.make(input.agent.system)] : [],
@@ -124,12 +127,12 @@ export const layer = Layer.effect(
             Effect.orElseSucceed(() => firstUser.text),
           )
         : firstUser.text
-      const selection = yield* context.selectTitle(session)
+      const selection = yield* context.selectTitle(session, firstUser.execution?.model)
       if (!selection) return
       const title =
-        (yield* attempt({ session, agent: selection.agent, text, model: selection.selected })) ??
+        (yield* attempt({ session, inputID: firstUser.id, agent: selection.agent, text, model: selection.selected })) ??
         (selection.primary && !isDeepStrictEqual(selection.selected.ref, selection.primary.ref)
-          ? yield* attempt({ session, agent: selection.agent, text, model: selection.primary })
+          ? yield* attempt({ session, inputID: firstUser.id, agent: selection.agent, text, model: selection.primary })
           : undefined)
       if (!title) return
       const expectedSequence = (yield* Bus.latestSequence(db, sessionID)) + 1

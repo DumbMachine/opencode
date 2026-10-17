@@ -2174,6 +2174,9 @@
                   "mcp": {
                     "$ref": "#/components/schemas/Mcp.RequestServers"
                   },
+                  "execution": {
+                    "$ref": "#/components/schemas/Prompt.Execution"
+                  },
                   "metadata": {
                     "type": "object"
                   },
@@ -16741,6 +16744,22 @@
         "type": "string",
         "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
       },
+      "Prompt.Execution": {
+        "type": "object",
+        "properties": {
+          "model": {
+            "$ref": "#/components/schemas/Model.Ref"
+          },
+          "agent": {
+            "type": "string"
+          },
+          "instructions": {
+            "type": "string"
+          }
+        },
+        "required": ["model", "agent"],
+        "additionalProperties": false
+      },
       "Prompt.FileAttachment": {
         "type": "object",
         "properties": {
@@ -17507,6 +17526,9 @@
             "items": {
               "$ref": "#/components/schemas/Prompt.SkillAttachment"
             }
+          },
+          "execution": {
+            "$ref": "#/components/schemas/Prompt.Execution"
           },
           "metadata": {
             "type": "object"
@@ -18493,6 +18515,9 @@
             },
             "required": ["created"],
             "additionalProperties": false
+          },
+          "execution": {
+            "$ref": "#/components/schemas/Prompt.Execution"
           },
           "text": {
             "type": "string"

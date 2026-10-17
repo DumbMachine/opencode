@@ -7,7 +7,7 @@ import { Content } from "./tool.js"
 import { Location } from "./location.js"
 import { Model } from "./model.js"
 import { Project } from "./project.js"
-import { Prompt } from "./prompt.js"
+import { Execution, Prompt } from "./prompt.js"
 import { DateTimeUtcFromMillis, PositiveInt, RelativePath } from "./schema.js"
 import { SessionMessageID } from "./session-message-id.js"
 import { Shell as ShellSchema } from "./shell.js"
@@ -66,6 +66,7 @@ export const LocationSwitched = Schema.Struct({
 export interface User extends Schema.Schema.Type<typeof User> {}
 export const User = Schema.Struct({
   ...Base,
+  execution: Execution.pipe(optional),
   text: Prompt.fields.text,
   files: Prompt.fields.files,
   agents: Prompt.fields.agents,

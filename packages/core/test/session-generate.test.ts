@@ -414,3 +414,44 @@ it.effect(
     }),
   { timeout: 15_000 },
 )
+
+it.effect("independent generation retains Session defaults after a configured input", () =>
+  Effect.gen(function* () {
+    requests.length = 0
+    instruction = "Initial context"
+    const { db, bus, instructions, session, instances } = yield* setup
+    yield* InstructionState.prepare(db, bus, instructions, sessionID)
+    const inboxID = SessionMessage.ID.create()
+    yield* bus.publish(SessionEvent.InboxEnqueued, {
+      sessionID,
+      inboxID,
+      item: {
+        type: "user",
+        delivery: "steer",
+        payload: {
+          text: "Configured preceding input",
+          execution: {
+            model: { id: ID.make("input-model"), providerID: Provider.ID.make("other-provider") },
+            agent: Agent.ID.make("missing-input-agent"),
+            instructions: "Input-only instructions must not enter independent generation",
+          },
+        },
+      },
+    })
+    yield* bus.publish(SessionEvent.InboxDelivered, { sessionID, inboxID })
+    const hooks = yield* PluginHooks.Service
+    yield* hooks.register("session", "generate", (event) =>
+      Effect.sync(() => {
+        expect(event.agent).toBe(Agent.ID.make("build"))
+      }),
+    )
+    const before = yield* durableState(db, sessionID)
+    yield* SessionGenerate.generate({ session, prompt: "Independent request" }).pipe(
+      Effect.provideService(Instance.Service, instances),
+    )
+    expect(requests).toHaveLength(1)
+    expect(requests[0]?.model).toBe(model)
+    expect(JSON.stringify(requests[0])).not.toContain("Input-only instructions")
+    expect(yield* durableState(db, sessionID)).toEqual(before)
+  }),
+)

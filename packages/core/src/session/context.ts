@@ -2,7 +2,8 @@ export * as SessionContext from "./context.js"
 
 import { Model } from "../model.js"
 import { Permission } from "../permission.js"
-import { Context, Effect, Layer } from "effect"
+import { Context, Effect, Layer, Schema } from "effect"
+import { Execution } from "@opencode/schema/prompt"
 import { Agent } from "../agent.js"
 import { CodeModeInstructions } from "../codemode/instructions.js"
 import { Database } from "../database/database.js"
@@ -21,6 +22,7 @@ import { Tool } from "../tool.js"
 import { AgentNotFoundError } from "./error.js"
 import { SessionHistory } from "./history.js"
 import { SessionProviderContext } from "./provider-context.js"
+import { InstructionState } from "./instruction-state.js"
 import { InstructionEntry } from "./instruction-entry.js"
 import { SessionMessage } from "./message.js"
 import { SessionModelRequest } from "./model-request.js"
@@ -29,6 +31,8 @@ import { SessionSchema } from "./schema.js"
 import { SessionStore } from "./store.js"
 
 export interface Selection {
+  readonly input?: SessionMessage.User | SessionMessage.Synthetic
+  readonly model?: Model.Ref
   readonly session: SessionSchema.Info
   readonly agent: Agent.Selection & { readonly info: Agent.Info }
   readonly instructions: Instructions.List
@@ -37,6 +41,7 @@ export interface Selection {
 }
 
 export interface Loaded {
+  readonly executionInstructions?: string
   readonly input?: SessionMessage.User | SessionMessage.Synthetic
   readonly session: SessionSchema.Info
   readonly agent: Agent.Selection & { readonly info: Agent.Info }
@@ -58,6 +63,10 @@ export interface Interface {
   readonly select: (
     sessionID: SessionSchema.ID,
     executionMcp?: Mcp.Execution,
+    captured?: {
+      readonly input?: SessionMessage.User | SessionMessage.Synthetic
+      readonly selection?: Pick<Selection, "session" | "agent" | "model">
+    },
   ) => Effect.Effect<Selection, AgentNotFoundError>
   /** Resolves the model and active history for that selection. */
   readonly load: (selection: Selection) => Effect.Effect<Loaded, SessionRunnerModel.Error>
@@ -65,7 +74,10 @@ export interface Interface {
     session: SessionSchema.Info,
   ) => Effect.Effect<SessionRunnerModel.Resolved, SessionRunnerModel.Error>
   /** Selects auxiliary title capabilities without instruction or tool preflight. */
-  readonly selectTitle: (session: SessionSchema.Info) => Effect.Effect<
+  readonly selectTitle: (
+    session: SessionSchema.Info,
+    primaryModel?: Model.Ref,
+  ) => Effect.Effect<
     | {
         readonly agent: Agent.Info
         readonly primary: SessionRunnerModel.Resolved | undefined
@@ -101,10 +113,15 @@ const layer = Layer.effect(
 
     const resolveModel = (session: SessionSchema.Info) => models.resolve(session, model.available)
 
-    const selectTitle = Effect.fn("SessionContext.selectTitle")(function* (session: SessionSchema.Info) {
+    const selectTitle = Effect.fn("SessionContext.selectTitle")(function* (
+      session: SessionSchema.Info,
+      primaryModel?: Model.Ref,
+    ) {
       const agent = yield* agents.get(Agent.ID.make("title"))
       if (!agent) return
-      const primary = yield* resolveModel(session).pipe(Effect.orElseSucceed(() => undefined))
+      const primary = yield* resolveModel({ ...session, model: primaryModel ?? session.model }).pipe(
+        Effect.orElseSucceed(() => undefined),
+      )
       const info = yield* Effect.gen(function* () {
         if (agent.model) return yield* model.get(agent.model.providerID, agent.model.id)
         if (!primary) return
@@ -127,18 +144,40 @@ const layer = Layer.effect(
       return { agent, primary, selected }
     })
 
+    const sharedInstructions = (sessionID: SessionSchema.ID) =>
+      Effect.all(
+        {
+          builtins: builtins.load(sessionID),
+          discovery: discovery.load(),
+          references: referenceInstructions.load(),
+          entries: entries.load(sessionID),
+        },
+        { concurrency: "unbounded" },
+      )
     const select = Effect.fn("SessionContext.select")(function* (
       sessionID: SessionSchema.ID,
       executionMcp?: Mcp.Execution,
+      captured?: {
+        readonly input?: SessionMessage.User | SessionMessage.Synthetic
+        readonly selection?: Pick<Selection, "session" | "agent" | "model">
+      },
     ) {
-      const session = yield* store.get(sessionID)
-      if (!session) return yield* Effect.die(new Error(`Session not found: ${sessionID}`))
-      if (session.location.directory !== location.directory || session.location.workspaceID !== location.workspaceID)
+      const current = yield* store.get(sessionID)
+      if (!current) return yield* Effect.die(new Error(`Session not found: ${sessionID}`))
+      if (current.location.directory !== location.directory || current.location.workspaceID !== location.workspaceID)
         return yield* Effect.interrupt
+      const session = captured?.selection?.session ?? current
 
+      const input =
+        captured === undefined ? yield* SessionHistory.latestInput(db, sessionID).pipe(Effect.orDie) : captured.input
+      const execution = input?.type === "user" ? input.execution : undefined
       yield* mcpTools.flush
-      const agent = yield* agents.select(session.agent)
-      if (!agent.info) return yield* new AgentNotFoundError({ sessionID: session.id, agent: session.agent ?? agent.id })
+      const agent = captured?.selection?.agent ?? (yield* agents.select(execution?.agent ?? session.agent))
+      if (!agent.info)
+        return yield* new AgentNotFoundError({
+          sessionID: session.id,
+          agent: execution?.agent ?? session.agent ?? agent.id,
+        })
       // Session permissions narrow discovery the same way they narrow the tool snapshot.
       const permissions = Permission.merge(agent.info.permissions, session.permissions ?? [])
       const executionTools = executionMcp
@@ -168,27 +207,26 @@ const layer = Layer.effect(
             permissions,
             executionTools ? { excludeGroups: ["mcp"], tools: executionTools } : undefined,
           ),
-          builtins: builtins.load(sessionID),
-          discovery: discovery.load(),
+          shared: sharedInstructions(sessionID),
           skills: skillInstructions.load(permissions),
-          references: referenceInstructions.load(),
           mcp: executionMcp ? Effect.succeed(Instructions.empty) : mcpInstructions.load(permissions),
           ephemeral: executionMcp ? mcpInstructions.ephemeral(executionMcp, permissions) : Effect.succeed(undefined),
-          entries: entries.load(sessionID),
         },
         { concurrency: "unbounded" },
       )
       return {
         session,
+        input,
+        model: captured?.selection?.model ?? execution?.model ?? session.model,
         agent: { ...agent, info: agent.info },
         instructions: Instructions.combine([
-          loaded.builtins,
+          loaded.shared.builtins,
           CodeModeInstructions.make(loaded.tools.codeModeCatalog),
-          loaded.discovery,
+          loaded.shared.discovery,
           loaded.skills,
-          loaded.references,
+          loaded.shared.references,
           loaded.mcp,
-          loaded.entries,
+          loaded.shared.entries,
         ]),
         tools: loaded.tools,
         ephemeral: loaded.ephemeral,
@@ -196,13 +234,14 @@ const layer = Layer.effect(
     })
 
     const load = Effect.fn("SessionContext.load")(function* (selection: Selection) {
-      const model = yield* resolveModel(selection.session)
+      const model = yield* resolveModel({ ...selection.session, model: selection.model })
       const history = yield* SessionHistory.entriesForRunner(
         db,
         selection.session.id,
         selection.instructions,
         SessionProviderContext.provenance(model) ?? "local",
       )
+      if (!sameExecution(history.input, selection.input)) return yield* Effect.interrupt
       return {
         session: selection.session,
         agent: selection.agent,
@@ -211,6 +250,7 @@ const layer = Layer.effect(
         ephemeral: selection.ephemeral,
         messages: history.entries.map((entry) => entry.message),
         input: history.input,
+        executionInstructions: history.input?.type === "user" ? history.input.execution?.instructions : undefined,
         tools: selection.tools,
       }
     })
@@ -244,3 +284,15 @@ export const node = makeLocationNode({
     PluginHooks.node,
   ],
 })
+
+/** Input identity may change at promotion, but its request configuration must match preparation. */
+export function sameExecution(
+  left: SessionMessage.User | SessionMessage.Synthetic | undefined,
+  right: SessionMessage.User | SessionMessage.Synthetic | undefined,
+) {
+  const a = left?.type === "user" ? left.execution : undefined
+  const b = right?.type === "user" ? right.execution : undefined
+  return a === undefined || b === undefined ? a === b : equivalentExecution(a, b)
+}
+
+const equivalentExecution = Schema.toEquivalence(Execution)

@@ -626,6 +626,7 @@ const layer = Layer.effectDiscard(
                 agents: input.payload.agents,
                 skills: input.payload.skills,
                 capabilities: input.payload.capabilities,
+                execution: input.payload.execution,
                 time: { created: DateTime.makeUnsafe(event.created) },
               }
             : {

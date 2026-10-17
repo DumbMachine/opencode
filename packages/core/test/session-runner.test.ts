@@ -230,6 +230,7 @@ const makeRunnerState = (compaction?: SessionRunnerModel.Resolved["compaction"])
     systemRemoved: false,
     systemUnavailable: false,
     systemLoadHook: Effect.void,
+    afterPublish: (_event: Event.Payload): Effect.Effect<void> => Effect.void,
     skillBaselines: new Map<Agent.ID, string>(),
     authorizations: new Array<Tool.Context>(),
     executions: new Array<string>(),
@@ -425,6 +426,17 @@ const layer = Layer.unwrap(
       default: () => Effect.undefined,
       small: () => Effect.undefined,
     })
+    const bus = Layer.effect(
+      Bus.Service,
+      Effect.gen(function* () {
+        const base = yield* Bus.Service
+        return Bus.Service.of({
+          ...base,
+          publish: (definition, data, options) =>
+            base.publish(definition, data, options).pipe(Effect.tap((event) => state.afterPublish(event))),
+        })
+      }),
+    ).pipe(Layer.provide(AppNodeBuilder.build(Bus.configured({ persist: true }))))
     const replacements: LayerNode.Replacements = [
       Snapshot.node.replace(Snapshot.noopLayer),
       LayerNodePlatform.llmClient.replace(TestLLM.clientLayer.pipe(Layer.provide(testLLM))),
@@ -504,7 +516,7 @@ const layer = Layer.unwrap(
       ]),
       [
         ...replacements,
-        Bus.node.replace(Bus.configured({ persist: true })),
+        Bus.node.replace(bus),
         LocationServiceMap.node.replace(promptLocationNode),
         Model.node.replace(promptModels),
         SessionExecution.node.replace(execution),
@@ -1242,6 +1254,293 @@ describe("SessionRunnerLLM", () => {
     expect(s.authorizations.at(-1)?.inputID).toBe(latest.id)
     expect(s.authorizations.at(-1)?.inputID).not.toBe(first.id)
   })
+
+  scenario("freezes queued execution choices without changing active requests or Session defaults", function* (s) {
+    const defaults = yield* s.session.get(sessionID)
+    const firstExecution = {
+      model: { id: ID.make("fake-model"), providerID: Provider.ID.make("fake") },
+      agent: Agent.ID.make("build"),
+      instructions: "Input-only Alpha instructions",
+    }
+    const secondExecution = {
+      model: { id: ID.make("replacement"), providerID: Provider.ID.make("fake") },
+      agent: Agent.ID.make("reviewer"),
+      instructions: "Input-only Beta instructions",
+    }
+    const first = yield* s.session.prompt({ sessionID, text: "First work", execution: firstExecution, resume: false })
+    yield* s.llm.push(
+      TestLLM.tool("call-config-first", "echo", { text: "first" }),
+      TestLLM.text("First finished", "text-config-first"),
+      TestLLM.text("Second finished", "text-config-second"),
+    )
+    const active = yield* s.resumePaused
+    const second = yield* s.session.prompt({
+      sessionID,
+      text: "Second work",
+      execution: secondExecution,
+      delivery: "queue",
+      resume: false,
+    })
+    const retry = yield* s.session.prompt({
+      sessionID,
+      id: first.id,
+      text: "Replacement payload",
+      execution: { ...secondExecution, agent: Agent.ID.make("missing-agent") },
+      resume: false,
+    })
+    expect(retry.payload.execution).toEqual(firstExecution)
+    expect(s.requests).toHaveLength(1)
+    expect(s.requests[0]?.system.map((part) => part.text)).toContain(firstExecution.instructions)
+    yield* active.finish
+    expect(s.requests.map((request) => request.model.id)).toEqual([model.id, model.id, replacementModel.id])
+    expect(
+      s.requests
+        .slice(0, 2)
+        .every((request) => request.system.some((part) => part.text === firstExecution.instructions)),
+    ).toBe(true)
+    expect(s.requests[2]?.system.map((part) => part.text)).toContain(secondExecution.instructions)
+    expect(JSON.stringify(s.requests[2])).not.toContain(firstExecution.instructions)
+    expect(JSON.stringify((yield* s.messages).filter((message) => message.type === "system"))).not.toContain(
+      "Input-only",
+    )
+    const original = (yield* s.messages).find((message) => message.id === first.id)
+    const queued = (yield* s.messages).find((message) => message.id === second.id)
+    expect(original).toMatchObject({ type: "user", execution: firstExecution })
+    expect(queued).toMatchObject({ type: "user", execution: secondExecution })
+    const current = yield* s.session.get(sessionID)
+    expect(current.model).toEqual(defaults.model)
+    expect(current.agent).toEqual(defaults.agent)
+  })
+
+  scenario("an explicit input configuration does not depend on an unavailable Session-default agent", function* (s) {
+    yield* s.db
+      .update(SessionTable)
+      .set({ agent: "missing-default" })
+      .where(eq(SessionTable.id, sessionID))
+      .run()
+      .pipe(Effect.orDie)
+    yield* s.session.prompt({
+      sessionID,
+      text: "Configured work",
+      resume: false,
+      execution: {
+        model: { id: ID.make("replacement"), providerID: Provider.ID.make("fake") },
+        agent: Agent.ID.make("build"),
+      },
+    })
+    yield* s.llm.push(TestLLM.text("Configured result", "text-config-valid"))
+    yield* s.resume
+    expect(s.requests.at(-1)?.model.id).toBe(replacementModel.id)
+    expect((yield* s.session.get(sessionID)).agent).toBe(Agent.ID.make("missing-default"))
+    yield* s.session.prompt({
+      sessionID,
+      text: "Unsupported configured agent",
+      resume: false,
+      execution: {
+        model: { id: ID.make("replacement"), providerID: Provider.ID.make("fake") },
+        agent: Agent.ID.make("missing-configured"),
+      },
+    })
+    expect(yield* s.resume.pipe(Effect.flip)).toMatchObject({
+      _tag: "Session.AgentNotFoundError",
+      agent: "missing-configured",
+    })
+    expect(s.requests).toHaveLength(1)
+  })
+
+  scenario("leaves configured input pending while initial shared instructions are unavailable", function* (s) {
+    s.systemUnavailable = true
+    const input = yield* s.session.prompt({
+      sessionID,
+      text: "Wait for shared context",
+      resume: false,
+      execution: {
+        model: { id: ID.make("replacement"), providerID: Provider.ID.make("fake") },
+        agent: Agent.ID.make("build"),
+        instructions: "Input-only pending instructions",
+      },
+    })
+    expect(yield* s.resume.pipe(Effect.flip)).toMatchObject({ _tag: "Instructions.InitializationBlocked" })
+    expect((yield* s.inbox).map((item) => item.id)).toContain(input.id)
+    expect(s.requests).toHaveLength(0)
+    s.systemUnavailable = false
+    yield* s.llm.push(TestLLM.text("Resumed", "text-config-pending"))
+    yield* s.resume
+    expect(s.requests.at(-1)?.model.id).toBe(replacementModel.id)
+  })
+
+  scenario("prepares a changed configuration when a steer arrives during instruction observation", function* (s) {
+    const first = yield* s.session.prompt({
+      sessionID,
+      text: "First selection",
+      resume: false,
+      execution: {
+        model: { id: ID.make("fake-model"), providerID: Provider.ID.make("fake") },
+        agent: Agent.ID.make("build"),
+        instructions: "First input instructions",
+      },
+    })
+    let nextID: SessionMessage.ID | undefined
+    s.systemLoadHook = Effect.gen(function* () {
+      s.systemLoadHook = Effect.void
+      const next = yield* s.session.prompt({
+        sessionID,
+        text: "Changed selection",
+        resume: false,
+        execution: {
+          model: { id: ID.make("replacement"), providerID: Provider.ID.make("fake") },
+          agent: Agent.ID.make("reviewer"),
+          instructions: "Changed input instructions",
+        },
+      })
+      nextID = next.id
+    }).pipe(Effect.orDie)
+    yield* s.llm.push(TestLLM.tool("call-changed-config", "echo", { text: "changed" }), [])
+    yield* s.resume
+    expect(s.requests.map((request) => request.model.id)).toEqual([replacementModel.id, replacementModel.id])
+    expect(s.requests[0]?.system.map((part) => part.text)).toContain("Changed input instructions")
+    expect(JSON.stringify(s.requests)).not.toContain("First input instructions")
+    expect(s.authorizations.map((context) => context.inputID)).toEqual([nextID])
+    expect(nextID).not.toBe(first.id)
+    expect(yield* s.inbox).toEqual([])
+  })
+
+  scenario(
+    "uses delivered input provenance when same-config MCP steering replaces the preparation candidate",
+    function* (s) {
+      const execution = {
+        model: { id: ID.make("replacement"), providerID: Provider.ID.make("fake") },
+        agent: Agent.ID.make("build"),
+        instructions: "Shared request configuration",
+      }
+      const first = yield* s.session.prompt({
+        sessionID,
+        text: "First identity",
+        execution,
+        capabilities: ["mcp"],
+        resume: false,
+      })
+      yield* SessionExecutionCapability.set(sessionID, { inputID: first.id, mcp: {} })
+      let nextID: SessionMessage.ID | undefined
+      s.systemLoadHook = Effect.gen(function* () {
+        s.systemLoadHook = Effect.void
+        const next = yield* s.session.prompt({
+          sessionID,
+          text: "Second identity",
+          execution,
+          capabilities: ["mcp"],
+          resume: false,
+        })
+        nextID = next.id
+        yield* SessionExecutionCapability.set(sessionID, { inputID: next.id, mcp: {} })
+      }).pipe(Effect.orDie)
+      yield* s.llm.push(TestLLM.tool("call-same-config", "echo", { text: "second" }), [])
+      yield* s.resume
+      expect(s.authorizations.map((context) => context.inputID)).toEqual([nextID])
+      expect(userTexts(s.requests[0]!)).toEqual(["First identity", "Second identity"])
+      expect(s.requests[0]?.model.id).toBe(replacementModel.id)
+      expect(yield* s.inbox).toEqual([])
+    },
+  )
+
+  for (const outcome of ["cancel", "compact", "move"] as const) {
+    scenario(`keeps delivered queue work when changed-config steering is cancelled before ${outcome}`, function* (s) {
+      const execution = {
+        model: { id: ID.make("fake-model"), providerID: Provider.ID.make("fake") },
+        agent: Agent.ID.make("build"),
+        instructions: "Queued configuration",
+      }
+      const queued = yield* s.session.prompt({
+        sessionID,
+        text: "Committed queue work",
+        execution,
+        delivery: "queue",
+        resume: false,
+      })
+      s.afterPublish = (event) =>
+        Effect.gen(function* () {
+          if (event.type !== SessionEvent.InboxDelivered.type) return
+          if (Schema.decodeUnknownSync(SessionEvent.InboxDelivered.data)(event.data).inboxID !== queued.id) return
+          s.afterPublish = () => Effect.void
+          // After the actual queue publication commits, before promotion rechecks steers.
+          const steer = yield* s.session
+            .prompt({
+              sessionID,
+              text: "Arrived configuration",
+              resume: false,
+              execution: { ...execution, agent: Agent.ID.make("reviewer") },
+            })
+            .pipe(Effect.orDie)
+          s.systemLoadHook = Effect.gen(function* () {
+            s.systemLoadHook = Effect.void
+            yield* s.session.cancelInbox({ sessionID, inboxID: steer.id }).pipe(Effect.orDie)
+            if (outcome === "compact") yield* s.session.compact({ sessionID }).pipe(Effect.orDie)
+            if (outcome === "move")
+              yield* s.sessionInbox
+                .admit({
+                  id: SessionMessage.ID.create(),
+                  sessionID,
+                  item: {
+                    type: "move",
+                    delivery: "steer",
+                    payload: {
+                      location: Location.Ref.make({ directory: AbsolutePath.make("/moved") }),
+                      projectID: Project.ID.global,
+                    },
+                  },
+                })
+                .pipe(Effect.orDie)
+          })
+        })
+      if (outcome === "compact")
+        yield* s.llm.push(TestLLM.text("## Objective\n- Execute delivered work", "summary-delivered"))
+      yield* s.llm.push(TestLLM.text("Executed delivered work", "text-delivered"))
+      const runner = yield* SessionRunner.Service
+      const result = yield* runner.drain({ sessionID, force: false })
+      if (outcome === "move") {
+        expect(result).toEqual(SessionRunner.DrainResult.Moved({ continuation: { step: 1 } }))
+        expect(s.requests).toHaveLength(0)
+      } else {
+        expect(result).toEqual(SessionRunner.DrainResult.Complete())
+        expect(s.requests).toHaveLength(outcome === "compact" ? 2 : 1)
+        expect(s.requests.at(-1)?.system.map((part) => part.text)).toContain(execution.instructions)
+        if (outcome === "cancel") expect(userTexts(s.requests[0]!)).toEqual(["Committed queue work"])
+      }
+      expect((yield* s.messages).map((message) => message.id)).toContain(queued.id)
+      expect(yield* s.inbox).toEqual([])
+    })
+  }
+
+  scenario(
+    "retains input-only instructions for overflow recovery without putting them in the summary request",
+    function* (s) {
+      yield* setupOverflowRecovery(s)
+      const instructions = "Request-only recovery instructions"
+      yield* s.session.prompt({
+        sessionID,
+        text: "Continue configured work",
+        resume: false,
+        execution: {
+          model: { id: ID.make("recovery"), providerID: Provider.ID.make("fake") },
+          agent: Agent.ID.make("build"),
+          instructions,
+        },
+      })
+      yield* s.llm.push(
+        [LLMEvent.providerError({ message: "prompt too long", classification: "context-overflow" })],
+        TestLLM.text("## Objective\n- Recover configured work", "text-config-summary"),
+        TestLLM.text("Recovered", "text-config-recovered"),
+      )
+      yield* s.resume
+      expect(s.requests).toHaveLength(3)
+      expect(s.requests[0]?.system.map((part) => part.text)).toContain(instructions)
+      expect(JSON.stringify(s.requests[1])).not.toContain(instructions)
+      expect(s.requests[2]?.system.map((part) => part.text)).toContain(instructions)
+      expect(JSON.stringify((yield* s.messages).filter((message) => message.type === "system"))).not.toContain(
+        instructions,
+      )
+    },
+  )
 
   scenario("executes a tool renamed by a session context hook", function* (s) {
     const hooks = yield* PluginHooks.Service
