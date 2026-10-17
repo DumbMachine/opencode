@@ -986,6 +986,16 @@
                 }
               }
             }
+          },
+          "404": {
+            "description": "SessionNotFoundError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionNotFoundErrorEncoded"
+                }
+              }
+            }
           }
         },
         "description": "Create a session at the requested location.",
@@ -1683,6 +1693,51 @@
           },
           "required": true
         }
+      }
+    },
+    "/api/session/{sessionID}/retire": {
+      "post": {
+        "tags": ["session"],
+        "operationId": "session.retire",
+        "parameters": [
+          {
+            "name": "sessionID",
+            "in": "path",
+            "schema": {
+              "type": "string",
+              "pattern": "^ses"
+            },
+            "required": true
+          }
+        ],
+        "security": [],
+        "responses": {
+          "204": {
+            "description": "<No Content>"
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          }
+        },
+        "description": "Permanently fence an existing or unknown session ID, then remove its session and children. Retries finish the same cleanup.",
+        "summary": "Retire session identity"
       }
     },
     "/api/session/{sessionID}/fork": {

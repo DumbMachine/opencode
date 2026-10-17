@@ -226,6 +226,7 @@ export const makeSessionGroup = <I extends HttpApiMiddleware.AnyId, S, FormI ext
           permissions: Permission.Ruleset.pipe(Schema.optional),
         }),
         success: Schema.Struct({ data: PublicSessionInfo }),
+        error: SessionNotFoundError,
       }).annotateMerge(
         OpenApi.annotations({
           identifier: "session.create",
@@ -287,6 +288,19 @@ export const makeSessionGroup = <I extends HttpApiMiddleware.AnyId, S, FormI ext
           identifier: "session.get",
           summary: "Get session",
           description: "Retrieve a session by ID.",
+        }),
+      ),
+    )
+    .add(
+      HttpApiEndpoint.post("session.retire", "/api/session/:sessionID/retire", {
+        params: { sessionID: Session.ID },
+        success: HttpApiSchema.NoContent,
+      }).annotateMerge(
+        OpenApi.annotations({
+          identifier: "session.retire",
+          summary: "Retire session identity",
+          description:
+            "Permanently fence an existing or unknown session ID, then remove its session and children. Retries finish the same cleanup.",
         }),
       ),
     )

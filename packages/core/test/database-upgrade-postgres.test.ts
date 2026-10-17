@@ -12,6 +12,7 @@ import viewed from "../src/database/migration/20260819222447_session_viewed_stat
 import binding from "../src/database/migration/20260823191254_nullable_workspace_binding"
 import permission from "../src/database/migration/20260910120000_clear_v1_session_permission"
 import active from "../src/database/migration/20260923013825_project_time_active"
+import retirement from "../src/database/migration/20261017164143_session_retirement"
 
 // Use a dedicated test database: the Database layer initializes its public schema.
 const url = process.env.OPENCODE_TEST_DATABASE_URL
@@ -38,7 +39,7 @@ test.skipIf(!url)("upgrades existing PostgreSQL rows and preserves workspace ref
           yield* tx.run(`INSERT INTO workspace VALUES ('workspace', 'existing-binding')`)
           yield* tx.run(`INSERT INTO session_v2 VALUES ('session', 'workspace', 'legacy-permission')`)
 
-          const migrations = [viewed, binding, permission, active]
+          const migrations = [viewed, binding, permission, active, retirement]
           yield* DatabaseMigration.applyOnly(tx, migrations, "postgres")
           yield* DatabaseMigration.applyOnly(tx, migrations, "postgres")
           yield* tx.run(`UPDATE session_v2 SET time_idle = 1780000000001, time_viewed = 1780000000002`)
@@ -53,7 +54,11 @@ test.skipIf(!url)("upgrades existing PostgreSQL rows and preserves workspace ref
           expect(yield* tx.get(`SELECT binding FROM workspace WHERE id = 'workspace'`)).toEqual({
             binding: "existing-binding",
           })
-          expect((yield* tx.all(`SELECT id FROM migration`)).length).toBe(5)
+          expect((yield* tx.all(`SELECT id FROM migration`)).length).toBe(6)
+          expect(yield* tx.get(`SELECT id,retired_at FROM session_lifecycle`)).toEqual({
+            id: "session",
+            retired_at: null,
+          })
           expect(
             (yield* tx.all(
               `SELECT * FROM information_schema.table_constraints WHERE table_schema = '${schema}' AND constraint_type = 'FOREIGN KEY'`,

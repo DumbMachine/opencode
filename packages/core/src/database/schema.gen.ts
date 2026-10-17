@@ -156,6 +156,12 @@ const schema: Omit<DatabaseMigration.Migration, "id"> = {
         );
       `)
       yield* tx.run(`
+        CREATE TABLE \`session_lifecycle\` (
+          \`id\` text PRIMARY KEY,
+          \`retired_at\` integer
+        );
+      `)
+      yield* tx.run(`
         CREATE TABLE \`session_message\` (
           \`id\` text PRIMARY KEY,
           \`session_id\` text NOT NULL,

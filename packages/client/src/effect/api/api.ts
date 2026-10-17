@@ -227,6 +227,10 @@ export type SessionGetInput = { readonly sessionID: Session.ID }
 export type SessionGetOutput = Session.Info
 export type SessionGetOperation<E = never> = (input: SessionGetInput) => Effect.Effect<SessionGetOutput, E>
 
+export type SessionRetireInput = { readonly sessionID: Session.ID }
+export type SessionRetireOutput = void
+export type SessionRetireOperation<E = never> = (input: SessionRetireInput) => Effect.Effect<SessionRetireOutput, E>
+
 export type SessionRemoveInput = { readonly sessionID: Session.ID }
 export type SessionRemoveOutput = void
 export type SessionRemoveOperation<E = never> = (input: SessionRemoveInput) => Effect.Effect<SessionRemoveOutput, E>
@@ -1433,6 +1437,7 @@ export interface SessionApi<E = never> {
   readonly export: SessionExportOperation<E>
   readonly active: SessionActiveOperation<E>
   readonly get: SessionGetOperation<E>
+  readonly retire: SessionRetireOperation<E>
   readonly remove: SessionRemoveOperation<E>
   readonly fork: SessionForkOperation<E>
   readonly switchAgent: SessionSwitchAgentOperation<E>

@@ -19,6 +19,13 @@ import type { Schema } from "effect"
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never
 type SessionMessageData = DistributiveOmit<(typeof SessionMessage.Info)["Encoded"], "type" | "id">
 
+// Retained independently of session/event cascades so delayed creation cannot
+// revive an original after its host has committed deletion.
+export const SessionLifecycleTable = sqliteTable("session_lifecycle", {
+  id: text().$type<SessionSchema.ID>().primaryKey(),
+  retired_at: integer(),
+})
+
 export const SessionTable = sqliteTable(
   "session_v2",
   {

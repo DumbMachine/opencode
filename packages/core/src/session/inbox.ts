@@ -23,6 +23,8 @@ import { SessionEvent } from "./event.js"
 import { SessionMessage } from "./message.js"
 import { SessionExecutionCapability } from "./execution-capability.js"
 import { SessionSchema } from "./schema.js"
+import { SessionLifecycle } from "./lifecycle.js"
+import { NotFoundError } from "./error.js"
 import { SessionInboxTable, SessionMessageTable } from "./sql.js"
 
 type DatabaseService = Database.Interface["db"]
@@ -159,6 +161,7 @@ export const make = Effect.fn("SessionInbox.make")(function* () {
     readonly type: Type
     readonly delivery: Delivery
   }) {
+    yield* SessionLifecycle.check(db, request.sessionID)
     const existing =
       (yield* find(db, request.id)) ?? (yield* promotedFromMessage(db, request.sessionID, request.id, request.delivery))
     if (existing === undefined) return undefined
@@ -189,13 +192,14 @@ export const make = Effect.fn("SessionInbox.make")(function* () {
             ...request.item,
           }),
         ),
-        Effect.catchDefect((defect) =>
-          defect instanceof LifecycleConflict
+        Effect.catchDefect((defect): Effect.Effect<Info, NotFoundError | LifecycleConflict> => {
+          if (defect instanceof NotFoundError) return Effect.fail(defect)
+          return defect instanceof LifecycleConflict
             ? find(db, request.id).pipe(
                 Effect.flatMap((stored) => (stored === undefined ? Effect.fail(defect) : Effect.succeed(stored))),
               )
-            : Effect.die(defect),
-        ),
+            : Effect.die(defect)
+        }),
       )
     if (!matches(admitted, { ...request, type: request.item.type }))
       return yield* new LifecycleConflict({ id: request.id })

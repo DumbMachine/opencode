@@ -63,6 +63,7 @@ import type { FileDiff } from "@opencode/schema/file-diff"
 import { Job } from "./job.js"
 import type { Command } from "./command.js"
 import { SessionEnvironment } from "./session/environment.js"
+import { SessionLifecycle } from "./session/lifecycle.js"
 import { InstructionEntry } from "./session/instruction-entry.js"
 
 // get project -> project.locations
@@ -129,6 +130,8 @@ export interface Interface {
   }) => Effect.Effect<SessionEnvironment.Variables | undefined, NotFoundError>
   readonly view: (input: { sessionID: SessionSchema.ID; idle: number }) => Effect.Effect<void, NotFoundError>
   readonly remove: (sessionID: SessionSchema.ID) => Effect.Effect<void, NotFoundError>
+  /** Permanently fences even an unknown ID, then finishes idempotent cleanup. */
+  readonly retire: (sessionID: SessionSchema.ID) => Effect.Effect<void>
   readonly messages: (
     input: SessionStore.MessagesInput,
   ) => Effect.Effect<SessionMessage.Info[], NotFoundError | MessageDecodeError>
@@ -254,7 +257,14 @@ const layer = Layer.effect(
     const result = Service.of({
       create: Effect.fn("Session.create")(function* (input) {
         const sessionID = input.id ?? SessionSchema.ID.create()
-        const recorded = yield* store.get(sessionID)
+        const recorded = yield* db
+          .transaction(() =>
+            Effect.gen(function* () {
+              yield* SessionLifecycle.activate(db, sessionID)
+              return yield* store.get(sessionID)
+            }),
+          )
+          .pipe(Effect.catchTag("SqlError", (error) => Effect.die(error)))
         if (recorded) return recorded
         const parent = input.parentID ? yield* store.get(input.parentID) : undefined
         if (input.parentID && parent === undefined) return yield* new NotFoundError({ sessionID: input.parentID })
@@ -292,6 +302,7 @@ const layer = Layer.effect(
           .pipe(
             Effect.as({ type: "created" } as const),
             Effect.catchDefect((defect) => {
+              if (defect instanceof NotFoundError) return Effect.fail(defect)
               if (!(defect instanceof SessionProjector.SessionAlreadyProjected)) {
                 return Effect.die(defect)
               }
@@ -342,12 +353,18 @@ const layer = Layer.effect(
         // The fork adopts the parent's newest instruction values rather than the
         // values in effect at the boundary; copied history may contain frozen
         // instruction-update text the initial baseline already reflects.
-        yield* bus.publish(SessionEvent.Forked, {
-          sessionID,
-          parentID: parent.id,
-          boundary: { type: input.before ? "before" : "through", messageID: boundary.id },
-          ...inherited,
-        })
+        yield* bus
+          .publish(SessionEvent.Forked, {
+            sessionID,
+            parentID: parent.id,
+            boundary: { type: input.before ? "before" : "through", messageID: boundary.id },
+            ...inherited,
+          })
+          .pipe(
+            Effect.catchDefect((defect) =>
+              defect instanceof NotFoundError ? Effect.fail(defect) : Effect.die(defect),
+            ),
+          )
         return yield* result.get(sessionID).pipe(Effect.orDie)
       }),
       get: (sessionID) => sessions.forSession(sessionID).get(),
@@ -359,13 +376,19 @@ const layer = Layer.effect(
       view: (input) => sessions.forSession(input.sessionID).view(input),
       remove: Effect.fn("Session.remove")(function* (sessionID) {
         yield* result.get(sessionID)
+        yield* result.retire(sessionID)
+      }),
+      retire: Effect.fn("Session.retire")(function* (sessionID) {
+        // Commit the retained fence before interrupting. Execution finalizers
+        // need the bus themselves, so no DB transaction/aggregate lock spans waits.
+        yield* SessionLifecycle.retire(db, sessionID)
         yield* execution.interrupt(sessionID)
         yield* execution.awaitIdle(sessionID)
         yield* transport.close(sessionID)
         const children = yield* result.list({ parentID: sessionID })
-        yield* Effect.forEach(children.data, (child) => result.remove(child.id), { concurrency: 1, discard: true })
+        yield* Effect.forEach(children.data, (child) => result.retire(child.id), { concurrency: 1, discard: true })
         yield* environments.clear(sessionID)
-        yield* bus.publish(SessionEvent.Deleted, { sessionID })
+        if (yield* store.get(sessionID)) yield* bus.publish(SessionEvent.Deleted, { sessionID })
         yield* bus.remove(sessionID)
       }),
       list: Effect.fn("Session.list")(function* (input) {

@@ -13,6 +13,7 @@ import { SessionMessage } from "./message.js"
 import { Session } from "@opencode/schema/session"
 import { SessionMessageTable, SessionTable } from "./sql.js"
 import { fromRow } from "./info.js"
+import { SessionLifecycle } from "./lifecycle.js"
 
 const ListInputBase = {
   workspaceID: Workspace.ID.pipe(Schema.optional),
@@ -208,10 +209,17 @@ const layer = Layer.effect(
         // Claim bookkeeping never counts as user activity: time_updated is
         // pinned so session ordering only moves on real changes.
         yield* db
-          .update(SessionTable)
-          .set({ time_suspended: Date.now(), time_updated: sql`${SessionTable.time_updated}` })
-          .where(and(eq(SessionTable.id, sessionID), isNull(SessionTable.time_suspended)))
-          .run()
+          .transaction(() =>
+            Effect.gen(function* () {
+              yield* SessionLifecycle.activate(db, sessionID)
+              yield* db
+                .update(SessionTable)
+                .set({ time_suspended: Date.now(), time_updated: sql`${SessionTable.time_updated}` })
+                .where(and(eq(SessionTable.id, sessionID), isNull(SessionTable.time_suspended)))
+                .run()
+                .pipe(Effect.orDie)
+            }),
+          )
           .pipe(Effect.orDie)
       }),
       release: Effect.fn("SessionStore.release")(function* (sessionID) {

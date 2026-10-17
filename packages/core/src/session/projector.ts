@@ -24,6 +24,8 @@ import { Project } from "@opencode/schema/project"
 import { AbsolutePath, RelativePath } from "../schema.js"
 import type { SessionSchema } from "./schema.js"
 import { ProjectTable } from "../project/sql.js"
+import { SessionLifecycle } from "./lifecycle.js"
+import { NotFoundError } from "./error.js"
 
 type DatabaseService = Database.Interface["db"]
 type MessageEvent = Exclude<
@@ -107,6 +109,8 @@ const projectFork = Effect.fn("SessionProjector.projectFork")(function* (
   db: DatabaseService,
   event: typeof SessionEvent.Forked.Type,
 ) {
+  yield* SessionLifecycle.activate(db, event.data.parentID).pipe(Effect.orDie)
+  yield* SessionLifecycle.activate(db, event.data.sessionID).pipe(Effect.orDie)
   const parent = yield* db
     .select()
     .from(SessionTable)
@@ -437,6 +441,17 @@ const layer = Layer.effectDiscard(
     const db = (yield* Database.Service).db
     yield* bus.project(SessionEvent.Created, (event) =>
       Effect.gen(function* () {
+        if (event.data.parentID) {
+          yield* SessionLifecycle.activate(db, event.data.parentID).pipe(Effect.orDie)
+          const parent = yield* db
+            .select({ id: SessionTable.id })
+            .from(SessionTable)
+            .where(eq(SessionTable.id, event.data.parentID))
+            .get()
+            .pipe(Effect.orDie)
+          if (!parent) return yield* Effect.die(new NotFoundError({ sessionID: event.data.parentID }))
+        }
+        yield* SessionLifecycle.activate(db, event.data.sessionID).pipe(Effect.orDie)
         const stored = yield* db
           .insert(SessionTable)
           .values({
@@ -541,7 +556,11 @@ const layer = Layer.effectDiscard(
       }),
     )
     yield* bus.project(SessionEvent.Deleted, (event) =>
-      db.delete(SessionTable).where(eq(SessionTable.id, event.data.sessionID)).run().pipe(Effect.orDie),
+      Effect.gen(function* () {
+        // Replayed deletion keeps the same permanent identity semantics.
+        yield* SessionLifecycle.retire(db, event.data.sessionID)
+        yield* db.delete(SessionTable).where(eq(SessionTable.id, event.data.sessionID)).run().pipe(Effect.orDie)
+      }),
     )
     yield* bus.project(SessionEvent.AgentSelected, (event) =>
       Effect.gen(function* () {
@@ -642,6 +661,7 @@ const layer = Layer.effectDiscard(
     )
     yield* bus.project(SessionEvent.InboxEnqueued, (event) =>
       Effect.gen(function* () {
+        yield* SessionLifecycle.activate(db, event.data.sessionID).pipe(Effect.orDie)
         yield* SessionInbox.projectAdmitted(db, {
           enqueuedSeq: event.durable.seq,
           id: event.data.inboxID,

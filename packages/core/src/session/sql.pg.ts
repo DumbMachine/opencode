@@ -18,6 +18,11 @@ import type { Schema } from "effect"
 
 type SessionMessageData = Omit<(typeof SessionMessage.Info)["Encoded"], "type" | "id">
 
+export const SessionLifecycleTable = pgTable("session_lifecycle", {
+  id: text().$type<SessionSchema.ID>().primaryKey(),
+  retired_at: bigint({ mode: "number" }),
+})
+
 export const SessionTable = pgTable(
   "session_v2",
   {

@@ -144,11 +144,12 @@ const layer = Layer.effect(
             },
           )
           .pipe(
-            Effect.catchDefect((defect) =>
-              defect instanceof SessionProjector.SessionAlreadyProjected
+            Effect.catchDefect((defect): Effect.Effect<never, ImportConflictError | Session.NotFoundError> => {
+              if (defect instanceof Session.NotFoundError) return Effect.fail(defect)
+              return defect instanceof SessionProjector.SessionAlreadyProjected
                 ? Effect.fail(new ImportConflictError({ sessionID }))
-                : Effect.die(defect),
-            ),
+                : Effect.die(defect)
+            }),
           )
         return yield* sessions.get(sessionID).pipe(Effect.orDie)
       }),

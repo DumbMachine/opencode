@@ -1,8 +1,8 @@
 {
   "version": "7",
   "dialect": "sqlite",
-  "id": "e98619ef-c334-45e3-8c48-9932ed1ef290",
-  "prevIds": ["be60f352-8da1-40e1-8d70-dc41121cfbc5"],
+  "id": "5aacc289-d87d-46bd-bace-e0e2a4f262f4",
+  "prevIds": ["e98619ef-c334-45e3-8c48-9932ed1ef290"],
   "ddl": [
     {
       "name": "account_state",
@@ -58,6 +58,10 @@
     },
     {
       "name": "session_inbox",
+      "entityType": "tables"
+    },
+    {
+      "name": "session_lifecycle",
       "entityType": "tables"
     },
     {
@@ -938,6 +942,26 @@
       "generated": null,
       "name": "id",
       "entityType": "columns",
+      "table": "session_lifecycle"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "retired_at",
+      "entityType": "columns",
+      "table": "session_lifecycle"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "id",
+      "entityType": "columns",
       "table": "session_message"
     },
     {
@@ -1744,6 +1768,13 @@
       "nameExplicit": false,
       "name": "session_inbox_pk",
       "table": "session_inbox",
+      "entityType": "pks"
+    },
+    {
+      "columns": ["id"],
+      "nameExplicit": false,
+      "name": "session_lifecycle_pk",
+      "table": "session_lifecycle",
       "entityType": "pks"
     },
     {

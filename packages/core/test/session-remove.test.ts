@@ -56,6 +56,51 @@ const it = testEffect(
   ),
 )
 
+describe("Session.retire", () => {
+  it.live("permanently retires unknown identities without initializing a location", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const locations = yield* LocationServiceMap.Service
+      for (const sessionID of [Session.ID.create(), Session.ID.create()]) {
+        yield* sessions.retire(sessionID)
+        yield* sessions.retire(sessionID)
+        expect(Array.from(yield* RcMap.keys(locations.rcMap))).toEqual([])
+        expect(
+          yield* Effect.result(
+            sessions.create({
+              id: sessionID,
+              location: Location.Ref.make({ directory: AbsolutePath.make("/never-initialized") }),
+            }),
+          ),
+        ).toMatchObject({
+          _tag: "Failure",
+          failure: { _tag: "Session.NotFoundError", sessionID },
+        })
+      }
+    }),
+  )
+
+  it.live("removes the same original and children while preserving an independent session", () =>
+    Effect.gen(function* () {
+      const temporary = yield* tmpdirScoped()
+      const location = Location.Ref.make({ directory: AbsolutePath.make(temporary.path) })
+      const sessions = yield* Session.Service
+      const original = yield* sessions.create({ location })
+      const child = yield* sessions.create({ parentID: original.id })
+      const independent = yield* sessions.create({ location })
+      yield* sessions.retire(original.id)
+      yield* sessions.retire(original.id)
+      for (const sessionID of [original.id, child.id]) {
+        expect(yield* Effect.result(sessions.create({ id: sessionID, location }))).toMatchObject({
+          _tag: "Failure",
+          failure: { _tag: "Session.NotFoundError", sessionID },
+        })
+      }
+      expect((yield* sessions.get(independent.id)).id).toBe(independent.id)
+    }),
+  )
+})
+
 describe("Session.remove", () => {
   it.effect("removes a session and its children", () =>
     Effect.gen(function* () {

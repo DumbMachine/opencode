@@ -4,6 +4,8 @@ import type { DatabaseMigration } from "./migration.js"
 const schema: Omit<DatabaseMigration.Migration, "id"> = {
   up(tx) {
     return Effect.gen(function* () {
+      yield* tx.run(`CREATE TABLE IF NOT EXISTS "session_lifecycle" ("id" text PRIMARY KEY, "retired_at" bigint);`)
+
       yield* tx.run(`
         CREATE OR REPLACE FUNCTION json_extract(doc text, path text) RETURNS text IMMUTABLE LANGUAGE sql AS $$
           SELECT (doc::jsonb #>> string_to_array(trim(leading '$.' from path), '.'))
@@ -234,7 +236,9 @@ const schema: Omit<DatabaseMigration.Migration, "id"> = {
         );
       `)
       yield* tx.run(`CREATE UNIQUE INDEX IF NOT EXISTS "event_aggregate_seq_idx" ON "event" ("aggregate_id", "seq");`)
-      yield* tx.run(`CREATE INDEX IF NOT EXISTS "event_aggregate_type_seq_idx" ON "event" ("aggregate_id", "type", "seq");`)
+      yield* tx.run(
+        `CREATE INDEX IF NOT EXISTS "event_aggregate_type_seq_idx" ON "event" ("aggregate_id", "type", "seq");`,
+      )
       yield* tx.run(
         `CREATE UNIQUE INDEX IF NOT EXISTS "permission_project_action_resource_idx" ON "permission" ("project_id", "action", "resource");`,
       )
@@ -253,7 +257,9 @@ const schema: Omit<DatabaseMigration.Migration, "id"> = {
       yield* tx.run(
         `CREATE INDEX IF NOT EXISTS "session_message_session_time_created_id_idx" ON "session_message" ("session_id", "time_created", "id");`,
       )
-      yield* tx.run(`CREATE INDEX IF NOT EXISTS "session_message_time_created_idx" ON "session_message" ("time_created");`)
+      yield* tx.run(
+        `CREATE INDEX IF NOT EXISTS "session_message_time_created_idx" ON "session_message" ("time_created");`,
+      )
       yield* tx.run(
         `CREATE INDEX IF NOT EXISTS "session_pending_session_delivery_seq_idx" ON "session_pending" ("session_id", "delivery", "admitted_seq");`,
       )

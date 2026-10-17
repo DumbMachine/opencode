@@ -2,9 +2,10 @@ import { describe, expect } from "bun:test"
 import { $ } from "bun"
 import fs from "fs/promises"
 import path from "path"
-import { DateTime, Effect, Layer, Stream } from "effect"
+import { Cause, DateTime, Effect, Exit, Layer, Schema, Stream } from "effect"
 import { TestClock } from "effect/testing"
 import { Money } from "@opencode/schema/money"
+import { Event } from "@opencode/schema/event"
 import { Shell } from "@opencode/schema/shell"
 import { Skill } from "@opencode/schema/skill"
 import { Agent } from "@opencode/core/agent"
@@ -27,6 +28,7 @@ import { SessionMessage } from "@opencode/core/session/message"
 import { SessionProjector } from "@opencode/core/session/projector"
 import { SessionExecution } from "@opencode/core/session/execution"
 import { SessionInbox } from "@opencode/core/session/inbox"
+import { SessionLifecycle } from "@opencode/core/session/lifecycle"
 import { InstructionEntry } from "@opencode/core/session/instruction-entry"
 import { SessionEvent } from "@opencode/core/session/event"
 import { SessionTable } from "@opencode/core/session/sql"
@@ -50,6 +52,7 @@ const it = testEffect(
       SessionStore.node,
       Session.node,
       SessionTransfer.node,
+      SessionInbox.node,
       InstructionEntry.node,
     ]),
     [
@@ -809,9 +812,10 @@ describe("Session.create", () => {
       const session = yield* Session.Service
       const parent = yield* session.create({ location })
 
-      expect(
-        yield* session.fork({ sessionID: parent.id }).pipe(Effect.flip),
-      ).toMatchObject({ _tag: "Session.ForkEmptyError", sessionID: parent.id })
+      expect(yield* session.fork({ sessionID: parent.id }).pipe(Effect.flip)).toMatchObject({
+        _tag: "Session.ForkEmptyError",
+        sessionID: parent.id,
+      })
     }),
   )
 
@@ -940,7 +944,7 @@ describe("Session.create", () => {
 
       expect(
         yield* db.select().from(EventTable).where(eq(EventTable.aggregate_id, created.id)).all().pipe(Effect.orDie),
-      ).toMatchObject([{ type: Bus.versionedType(SessionEvent.Created.type, 1) }])
+      ).toMatchObject([{ type: Bus.versionedType(SessionEvent.Created.type, SessionEvent.Created.durable.version) }])
     }),
   )
 
@@ -1059,7 +1063,7 @@ describe("Session.create", () => {
             .all()
             .pipe(Effect.orDie)).map((event) => [event.seq, event.type]),
         ).toEqual([
-          [0, Bus.versionedType(SessionEvent.Created.type, 1)],
+          [0, Bus.versionedType(SessionEvent.Created.type, SessionEvent.Created.durable.version)],
           [1, Bus.versionedType(SessionEvent.InboxEnqueued.type, 1)],
           [2, Bus.versionedType(SessionEvent.InboxDelivered.type, 1)],
         ])
@@ -1511,6 +1515,101 @@ describe("SessionTransfer", () => {
 
       expect(imported.time).toMatchObject({ idle: DateTime.makeUnsafe(200), viewed: DateTime.makeUnsafe(200) })
       expect(imported.outcome).toBe("succeeded")
+    }),
+  )
+})
+
+describe("Session retirement materialization fences", () => {
+  it.live("rejects replay, import and late child materialization of retired originals", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const transfer = yield* SessionTransfer.Service
+      const bus = yield* Bus.Service
+      const store = yield* SessionStore.Service
+      const first = yield* sessions.create({ location })
+      const independent = yield* sessions.create({ location })
+      const events = yield* Stream.runCollect(logEvents(sessions, first.id))
+      const created = events.find((event) => event.type === SessionEvent.Created.type)
+      if (!created) return yield* Effect.die(new Error("missing canonical Created event"))
+      yield* bus.replay({
+        id: Event.ID.create(),
+        created: created.created + 1,
+        type: Bus.versionedType(SessionEvent.Deleted.type, SessionEvent.Deleted.durable.version),
+        aggregateID: first.id,
+        seq: created.durable.seq + 1,
+        data: { sessionID: first.id },
+      })
+      expect(yield* store.get(first.id)).toBeUndefined()
+      yield* bus.remove(first.id)
+      const replay = yield* bus
+        .replay({
+          id: created.id,
+          created: created.created,
+          type: Bus.versionedType(SessionEvent.Created.type, SessionEvent.Created.durable.version),
+          aggregateID: first.id,
+          seq: 0,
+          data: Schema.encodeSync(SessionEvent.Created.data)(created.data),
+        })
+        .pipe(Effect.exit)
+      expect(Exit.isFailure(replay) && Cause.squash(replay.cause)).toMatchObject({
+        _tag: "Session.NotFoundError",
+        sessionID: first.id,
+      })
+      expect(yield* Effect.result(transfer.import({ data: { info: first, messages: [] }, location }))).toMatchObject({
+        _tag: "Failure",
+        failure: { _tag: "Session.NotFoundError", sessionID: first.id },
+      })
+      const child = Session.ID.create()
+      const late = yield* bus
+        .publish(SessionEvent.Created, {
+          ...created.data,
+          sessionID: child,
+          parentID: first.id,
+        })
+        .pipe(Effect.exit)
+      expect(Exit.isFailure(late) && Cause.squash(late.cause)).toMatchObject({
+        _tag: "Session.NotFoundError",
+        sessionID: first.id,
+      })
+      expect(yield* store.get(first.id)).toBeUndefined()
+      expect(yield* store.get(child)).toBeUndefined()
+      expect((yield* sessions.get(independent.id)).id).toBe(independent.id)
+    }),
+  )
+
+  it.live("rejects adoption, final admission and execution after retirement commits before cleanup", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const inbox = yield* SessionInbox.Service
+      const store = yield* SessionStore.Service
+      const bus = yield* Bus.Service
+      const db = (yield* Database.Service).db
+      const original = yield* sessions.create({ location })
+      // Models a process stopping after its durable marker, before deletion.
+      yield* SessionLifecycle.retire(db, original.id)
+      expect(yield* Effect.result(sessions.create({ id: original.id, location }))).toMatchObject({
+        _tag: "Failure",
+        failure: { _tag: "Session.NotFoundError", sessionID: original.id },
+      })
+      const item = { type: "user", payload: { text: "Delayed input" }, delivery: "queue" } as const
+      expect(
+        yield* Effect.result(inbox.admit({ id: SessionMessage.ID.create(), sessionID: original.id, item })),
+      ).toMatchObject({ _tag: "Failure", failure: { _tag: "Session.NotFoundError", sessionID: original.id } })
+      const admitted = yield* bus
+        .publish(SessionEvent.InboxEnqueued, { sessionID: original.id, inboxID: SessionMessage.ID.create(), item })
+        .pipe(Effect.exit)
+      expect(Exit.isFailure(admitted) && Cause.squash(admitted.cause)).toMatchObject({
+        _tag: "Session.NotFoundError",
+        sessionID: original.id,
+      })
+      const claim = yield* store.claim(original.id).pipe(Effect.exit)
+      expect(Exit.isFailure(claim) && Cause.squash(claim.cause)).toMatchObject({
+        _tag: "Session.NotFoundError",
+        sessionID: original.id,
+      })
+      expect(yield* inbox.list(original.id)).toEqual([])
+      yield* sessions.retire(original.id)
+      expect(yield* store.get(original.id)).toBeUndefined()
     }),
   )
 })

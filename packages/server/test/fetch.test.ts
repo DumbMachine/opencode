@@ -109,6 +109,7 @@ it.live("serves the HttpApi and enforces Basic auth like the Node server", () =>
       Effect.flatMap(Schema.decodeUnknownEffect(ServerInfo)),
     )
     expect(response.headers.get("x-opencode-input-config")).toBe("1")
+    expect(response.headers.get("x-opencode-session-retirement")).toBe("1")
     expect(response.headers.get("x-opencode-model-budget")).toBe(
       process.env.OPENCODE_MODEL_BUDGET_ENDPOINT && process.env.OPENCODE_MODEL_BUDGET_TOKEN ? "4" : null,
     )
@@ -483,5 +484,32 @@ it.live("stays serviceable when the first request aborts", () =>
 
     const second = yield* Effect.promise(() => handler(new Request("http://opencode.local/api/info")))
     expect(second.status).toBe(200)
+  }),
+)
+
+it.live("retires unknown session IDs through the authenticated API and rejects delayed creation", () =>
+  Effect.gen(function* () {
+    const handler = yield* ServerFetch.make({ ...options, password: "secret" })
+    const headers = { authorization: `Basic ${btoa("opencode:secret")}`, "content-type": "application/json" }
+    for (const id of ["ses_http_retirement_one", "ses_http_retirement_two"]) {
+      const path = `http://opencode.local/api/session/${id}/retire`
+      const denied = yield* Effect.promise(() => handler(new Request(path, { method: "POST" })))
+      expect(denied.status).toBe(401)
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const retired = yield* Effect.promise(() => handler(new Request(path, { method: "POST", headers })))
+        expect(retired.status).toBe(204)
+      }
+      const created = yield* Effect.promise(() =>
+        handler(
+          new Request("http://opencode.local/api/session", {
+            method: "POST",
+            headers,
+            body: JSON.stringify({ id, location: { directory: "/never-initialized" } }),
+          }),
+        ),
+      )
+      expect(created.status).toBe(404)
+      expect(yield* Effect.promise(() => created.json())).toMatchObject({ _tag: "SessionNotFoundError", sessionID: id })
+    }
   }),
 )
