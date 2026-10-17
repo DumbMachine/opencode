@@ -19,11 +19,13 @@ export interface Coordinator<Key, E, Reason = never> {
    * finalizers and settled hook on its own time. Returns whether an active execution was
    * interrupted. `awaitSettlement` waits for this execution's cleanup and settled hook,
    * without following fresh work admitted during cleanup. `awaitIdle` follows successors too.
+   * `when` is checked synchronously with stopping and clearing the doorbell. A false guard
+   * leaves ownership, wakeups and interruption reason untouched and does not wait for settlement.
    */
   readonly interrupt: (
     key: Key,
     reason?: Reason,
-    options?: { readonly awaitSettlement?: boolean },
+    options?: { readonly awaitSettlement?: boolean; readonly when?: () => boolean },
   ) => Effect.Effect<boolean>
   /** Resolves once no execution is active for the key. Returns immediately when already idle and never starts work. */
   readonly awaitIdle: (key: Key) => Effect.Effect<void>
@@ -144,11 +146,14 @@ export const make = <Key, E, Reason = never>(options: {
         start(key, false, scope)
       })
 
-    const interrupt = (key: Key, reason?: Reason): Effect.Effect<boolean> =>
+    const interrupt = (key: Key, reason?: Reason, when?: () => boolean): Effect.Effect<boolean> =>
       Effect.sync(() => {
         const execution = executions.get(key)
-        if (execution === undefined || execution.stopping) return false
+        if (execution === undefined || execution.stopping || (when !== undefined && !when())) return false
         if (execution.owner === undefined) {
+          // A conditional control targets active work, not later admissions
+          // waiting behind its terminal settlement.
+          if (when !== undefined) return false
           // Settlement window: the owner exited but the settled hook has not finished. The
           // terminal outcome is already decided, so no reason attaches — but the interrupt
           // still claims the recorded wakes so settle does not start a dead-intent successor.
@@ -183,9 +188,9 @@ export const make = <Key, E, Reason = never>(options: {
       interrupt: (key, reason, options) =>
         Effect.suspend(() => {
           const execution = executions.get(key)
-          return interrupt(key, reason).pipe(
-            Effect.tap(() =>
-              options?.awaitSettlement && execution
+          return interrupt(key, reason, options?.when).pipe(
+            Effect.tap((interrupted) =>
+              options?.awaitSettlement && execution && (interrupted || options.when === undefined)
                 ? Deferred.await(execution.done).pipe(Effect.ignoreCause)
                 : Effect.void,
             ),

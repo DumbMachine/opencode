@@ -314,6 +314,54 @@ describe("SessionRunCoordinator", () => {
     }),
   )
 
+  it.effect("leaves active work and its wake untouched when an interrupt predicate rejects", () =>
+    Effect.gen(function* () {
+      const started = yield* Deferred.make<void>()
+      const release = yield* Deferred.make<void>()
+      let runs = 0
+      const reasons: Array<string | undefined> = []
+      const coordinator = yield* SessionRunCoordinator.make<string, never, string>({
+        drain: () =>
+          Effect.sync(() => ++runs).pipe(
+            Effect.andThen(Deferred.succeed(started, undefined)),
+            Effect.andThen(Deferred.await(release)),
+          ),
+        settled: (_key, _exit, reason) => Effect.sync(() => void reasons.push(reason)),
+      })
+      yield* coordinator.wake("session")
+      yield* Deferred.await(started)
+      yield* coordinator.wake("session")
+      expect(
+        yield* coordinator.interrupt("session", "user", { when: () => false, awaitSettlement: true }),
+      ).toBeFalse()
+      expect(yield* coordinator.isActive("session")).toBeTrue()
+      yield* Deferred.succeed(release, undefined)
+      yield* coordinator.awaitIdle("session")
+      expect(runs).toBe(2)
+      expect(reasons).toEqual([undefined])
+    }),
+  )
+
+  it.effect("checks the interrupt predicate at execution time rather than construction", () =>
+    Effect.gen(function* () {
+      const started = yield* Deferred.make<void>()
+      const coordinator = yield* SessionRunCoordinator.make<string, never>({
+        drain: () => Deferred.succeed(started, undefined).pipe(Effect.andThen(Effect.never)),
+      })
+      yield* coordinator.wake("session")
+      yield* Deferred.await(started)
+      let current = "first-input"
+      const stale = coordinator.interrupt("session", undefined, { when: () => current === "first-input" })
+      current = "next-input"
+      expect(yield* stale).toBeFalse()
+      expect(yield* coordinator.isActive("session")).toBeTrue()
+      expect(
+        yield* coordinator.interrupt("session", undefined, { when: () => current === "next-input" }),
+      ).toBeTrue()
+      yield* coordinator.awaitIdle("session")
+    }),
+  )
+
   it.effect("runs a wake registered during interruption cleanup", () =>
     Effect.gen(function* () {
       const firstStarted = yield* Deferred.make<void>()
@@ -633,6 +681,27 @@ describe("SessionRunCoordinator", () => {
       expect(settled).toEqual(["user"])
       expect(yield* coordinator.active).toEqual(new Set())
       expect(yield* coordinator.isActive("session")).toBe(false)
+    }),
+  )
+
+  it.effect("conditional interruption does not claim a wake during terminal settlement", () =>
+    Effect.gen(function* () {
+      const settling = yield* Deferred.make<void>()
+      const release = yield* Deferred.make<void>()
+      let drains = 0
+      const coordinator = yield* SessionRunCoordinator.make({
+        drain: () => Effect.sync(() => void drains++),
+        settled: () => Deferred.succeed(settling, undefined).pipe(Effect.andThen(Deferred.await(release))),
+      })
+      yield* coordinator.wake("session")
+      yield* Deferred.await(settling)
+      yield* coordinator.wake("session")
+      expect(
+        yield* coordinator.interrupt("session", undefined, { when: () => true, awaitSettlement: true }),
+      ).toBeFalse()
+      yield* Deferred.succeed(release, undefined)
+      yield* coordinator.awaitIdle("session")
+      expect(drains).toBe(2)
     }),
   )
 
