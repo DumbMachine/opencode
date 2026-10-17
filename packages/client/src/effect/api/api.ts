@@ -275,6 +275,7 @@ export type SessionPromptInput = {
   readonly files?: ReadonlyArray<PromptInput.FileAttachment> | undefined
   readonly agents?: ReadonlyArray<AgentAttachment> | undefined
   readonly skills?: ReadonlyArray<PromptInput.SkillAttachment> | undefined
+  readonly mcpRevision?: Mcp.RequestRevision | undefined
   readonly mcp?: Mcp.RequestServers | undefined
   readonly execution?:
     | { readonly model: Model.Ref; readonly agent: Agent.ID; readonly instructions?: string | undefined }
@@ -293,6 +294,7 @@ export type SessionCommandInput = {
   readonly files?: ReadonlyArray<PromptInput.FileAttachment> | undefined
   readonly agents?: ReadonlyArray<AgentAttachment> | undefined
   readonly skills?: ReadonlyArray<PromptInput.SkillAttachment> | undefined
+  readonly mcpRevision?: Mcp.RequestRevision | undefined
   readonly mcp?: Mcp.RequestServers | undefined
   readonly delivery?: SessionInbox.Delivery | undefined
 }
@@ -381,6 +383,17 @@ export type SessionInboxListOutput = ReadonlyArray<SessionInbox.Info>
 export type SessionInboxListOperation<E = never> = (
   input: SessionInboxListInput,
 ) => Effect.Effect<SessionInboxListOutput, E>
+
+export type SessionInboxRenewCapabilityInput = {
+  readonly sessionID: Session.ID
+  readonly inboxID: SessionMessage.ID
+  readonly mcp: Mcp.RequestServers
+  readonly revision?: Mcp.RequestRevision | undefined
+}
+export type SessionInboxRenewCapabilityOutput = void
+export type SessionInboxRenewCapabilityOperation<E = never> = (
+  input: SessionInboxRenewCapabilityInput,
+) => Effect.Effect<SessionInboxRenewCapabilityOutput, E>
 
 export type SessionInboxCancelInput = { readonly sessionID: Session.ID; readonly inboxID: SessionMessage.ID }
 export type SessionInboxCancelOutput = void
@@ -1460,6 +1473,7 @@ export interface SessionApi<E = never> {
   readonly diff: SessionDiffOperation<E>
   readonly inbox: {
     readonly list: SessionInboxListOperation<E>
+    readonly renewCapability: SessionInboxRenewCapabilityOperation<E>
     readonly cancel: SessionInboxCancelOperation<E>
     readonly update: SessionInboxUpdateOperation<E>
   }

@@ -1,5 +1,4 @@
 import { Session } from "@opencode/core/session"
-import { SessionExecutionCapability } from "@opencode/core/session/execution-capability"
 import { SessionStats } from "@opencode/core/session/stats"
 import { SessionTitle } from "@opencode/core/session/title"
 import { SessionTransfer } from "@opencode/core/session/transfer"
@@ -321,10 +320,11 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
               agents: ctx.payload.agents,
               skills: ctx.payload.skills,
               execution: ctx.payload.execution,
-              capabilities: ctx.payload.mcp ? ["mcp"] : undefined,
+              mcp: ctx.payload.mcp,
+              mcpRevision: ctx.payload.mcpRevision,
               metadata: ctx.payload.metadata,
               delivery: ctx.payload.delivery,
-              resume: ctx.payload.mcp ? false : ctx.payload.resume,
+              resume: ctx.payload.resume,
             })
             .pipe(
               Effect.catchTag("Session.NotFoundError", missingSession),
@@ -343,13 +343,6 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
                 Effect.fail(new InvalidRequestError({ message: `Skill not found: ${error.skill}`, field: "skills" })),
               ),
             )
-          if (ctx.payload.mcp) {
-            yield* SessionExecutionCapability.set(ctx.params.sessionID, {
-              inputID: admitted.id,
-              mcp: ctx.payload.mcp,
-            })
-            if (ctx.payload.resume !== false) yield* session.wake(ctx.params.sessionID)
-          }
           return { data: admitted }
         }),
       )
@@ -553,6 +546,19 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
               .inbox(ctx.params.sessionID)
               .pipe(Effect.catchTag("Session.NotFoundError", missingSession)),
           }
+        }),
+      )
+      .handle(
+        "session.inbox.renewCapability",
+        Effect.fn(function* (ctx) {
+          return yield* pendingMutation(
+            session.renewInboxCapability({
+              sessionID: ctx.params.sessionID,
+              inboxID: ctx.params.inboxID,
+              ...ctx.payload,
+            }),
+            "Pending input cannot renew its capability",
+          )
         }),
       )
       .handle(

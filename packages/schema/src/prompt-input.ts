@@ -32,6 +32,10 @@ export const Prompt = Schema.Struct({
   files: Schema.Array(FileAttachment).pipe(optional),
   agents: Schema.Array(AgentAttachment).pipe(optional),
   skills: Schema.Array(SkillAttachment).pipe(optional),
+  mcpRevision: Mcp.RequestRevision.pipe(optional).annotate({
+    description:
+      "Monotonic host credential revision for this input. Older revisions cannot replace an installed grant.",
+  }),
   mcp: Mcp.RequestServers.pipe(optional).annotate({
     description:
       "Remote MCP servers available only for this prompt execution. They replace configured MCP servers and cannot use persisted OAuth.",

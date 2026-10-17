@@ -69,6 +69,8 @@ import type {
   SessionDiffOutput,
   SessionInboxListInput,
   SessionInboxListOutput,
+  SessionInboxRenewCapabilityInput,
+  SessionInboxRenewCapabilityOutput,
   SessionInboxCancelInput,
   SessionInboxCancelOutput,
   SessionInboxUpdateInput,
@@ -732,6 +734,7 @@ export function make(options: ClientOptions) {
               files: input["files"],
               agents: input["agents"],
               skills: input["skills"],
+              mcpRevision: input["mcpRevision"],
               mcp: input["mcp"],
               execution: input["execution"],
               metadata: input["metadata"],
@@ -755,6 +758,7 @@ export function make(options: ClientOptions) {
               files: input["files"],
               agents: input["agents"],
               skills: input["skills"],
+              mcpRevision: input["mcpRevision"],
               mcp: input["mcp"],
               delivery: input["delivery"],
             },
@@ -901,6 +905,18 @@ export function make(options: ClientOptions) {
             },
             requestOptions,
           ).then((value) => value.data),
+        renewCapability: (input: SessionInboxRenewCapabilityInput, requestOptions?: RequestOptions) =>
+          request<SessionInboxRenewCapabilityOutput>(
+            {
+              method: "PUT",
+              path: `/api/session/${encodeURIComponent(input.sessionID)}/inbox/${encodeURIComponent(input.inboxID)}/capability`,
+              body: { mcp: input["mcp"], revision: input["revision"] },
+              successStatus: 204,
+              declaredStatuses: [400, 401, 404, 409],
+              empty: true,
+            },
+            requestOptions,
+          ),
         cancel: (input: SessionInboxCancelInput, requestOptions?: RequestOptions) =>
           request<SessionInboxCancelOutput>(
             {

@@ -1,5 +1,6 @@
 import { SessionMessage } from "@opencode/schema/session-message"
 import { SessionInbox } from "@opencode/schema/session-inbox"
+import { Mcp } from "@opencode/schema/mcp"
 import { PromptInput } from "@opencode/schema/prompt-input"
 import { Session } from "@opencode/schema/session"
 import { SessionStats } from "@opencode/schema/session-stats"
@@ -623,6 +624,21 @@ export const makeSessionGroup = <I extends HttpApiMiddleware.AnyId, S, FormI ext
           summary: "List session inbox",
           description:
             "List durable enqueued session work not yet delivered, ordered by enqueue sequence. Includes user, synthetic, compaction, and move items.",
+        }),
+      ),
+    )
+    .add(
+      HttpApiEndpoint.put("session.inbox.renewCapability", "/api/session/:sessionID/inbox/:inboxID/capability", {
+        params: { sessionID: Session.ID, inboxID: SessionMessage.ID },
+        payload: Schema.Struct({ mcp: Mcp.RequestServers, revision: Mcp.RequestRevision.pipe(Schema.optional) }),
+        success: HttpApiSchema.NoContent,
+        error: [ConflictError, SessionNotFoundError],
+      }).annotateMerge(
+        OpenApi.annotations({
+          identifier: "session.inbox.renewCapability",
+          summary: "Renew pending input capability",
+          description:
+            "Replace process-local MCP credentials only for an existing pending user input admitted with MCP capabilities. Never admits or wakes work. Rejects missing, cancelled, delivered or retired inputs and stale credential revisions.",
         }),
       ),
     )

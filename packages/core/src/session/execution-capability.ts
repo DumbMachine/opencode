@@ -1,6 +1,7 @@
 export * as SessionExecutionCapability from "./execution-capability.js"
 
 import { Effect } from "effect"
+import { isDeepStrictEqual } from "node:util"
 import { Mcp } from "@opencode/schema/mcp"
 import { SessionMessage } from "./message.js"
 import { SessionSchema } from "./schema.js"
@@ -8,6 +9,7 @@ import { SessionSchema } from "./schema.js"
 export interface Grant {
   readonly inputID: SessionMessage.ID
   readonly mcp: Mcp.RequestServers
+  readonly revision?: number
 }
 
 // Credentials stay process-local and are bound to the admitted input that
@@ -43,7 +45,13 @@ export const set = (sessionID: SessionSchema.ID, grant: Grant) =>
   Effect.sync(() => {
     let inputs = grants.get(sessionID)
     if (!inputs) grants.set(sessionID, (inputs = new Map()))
+    const previous = inputs.get(grant.inputID)
+    if (previous?.revision !== undefined) {
+      if (grant.revision === undefined || grant.revision < previous.revision) return false
+      if (grant.revision === previous.revision) return isDeepStrictEqual(grant.mcp, previous.mcp)
+    }
     inputs.set(grant.inputID, grant)
+    return true
   })
 
 // Keep pending grants and, after interruption, the last input grant for explicit

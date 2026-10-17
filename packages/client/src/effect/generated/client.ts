@@ -75,6 +75,8 @@ import type {
   SessionDiffOutput,
   SessionInboxListInput,
   SessionInboxListOutput,
+  SessionInboxRenewCapabilityInput,
+  SessionInboxRenewCapabilityOutput,
   SessionInboxCancelInput,
   SessionInboxCancelOutput,
   SessionInboxUpdateInput,
@@ -501,6 +503,7 @@ const EndpointSessionPrompt = (raw: RawClient["server.session"]) => (input: Sess
         files: input["files"],
         agents: input["agents"],
         skills: input["skills"],
+        mcpRevision: input["mcpRevision"],
         mcp: input["mcp"],
         execution: input["execution"],
         metadata: input["metadata"],
@@ -523,6 +526,7 @@ const EndpointSessionCommand = (raw: RawClient["server.session"]) => (input: Ses
         files: input["files"],
         agents: input["agents"],
         skills: input["skills"],
+        mcpRevision: input["mcpRevision"],
         mcp: input["mcp"],
         delivery: input["delivery"],
       },
@@ -626,6 +630,15 @@ const EndpointSessionInboxList = (raw: RawClient["server.session"]) => (input: S
       Effect.map((value) => value.data),
     ),
   )
+
+const EndpointSessionInboxRenewCapability =
+  (raw: RawClient["server.session"]) => (input: SessionInboxRenewCapabilityInput) =>
+    preserveEffect<SessionInboxRenewCapabilityOutput>()(
+      raw["session.inbox.renewCapability"]({
+        params: { sessionID: input["sessionID"], inboxID: input["inboxID"] },
+        payload: { mcp: input["mcp"], revision: input["revision"] },
+      }).pipe(Effect.mapError(mapClientError)),
+    )
 
 const EndpointSessionInboxCancel = (raw: RawClient["server.session"]) => (input: SessionInboxCancelInput) =>
   preserveEffect<SessionInboxCancelOutput>()(
@@ -810,6 +823,7 @@ const adaptGroupSession = (raw: RawClient["server.session"]) => ({
   diff: EndpointSessionDiff(raw),
   inbox: {
     list: EndpointSessionInboxList(raw),
+    renewCapability: EndpointSessionInboxRenewCapability(raw),
     cancel: EndpointSessionInboxCancel(raw),
     update: EndpointSessionInboxUpdate(raw),
   },

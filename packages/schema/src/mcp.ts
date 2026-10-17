@@ -82,6 +82,14 @@ export class RequestRemoteConfig extends Schema.Class<RequestRemoteConfig>("Mcp.
   timeout: TimeoutConfig.pipe(optional),
 }) {}
 
+export type RequestRevision = typeof RequestRevision.Type
+export const RequestRevision = PositiveInt.check(
+  Schema.isBetween({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
+).annotate({
+  identifier: "Mcp.RequestRevision",
+  description: "An exact positive JavaScript integer identifying a monotonic host credential revision.",
+})
+
 export const RequestServers = Schema.Record(Schema.String, RequestRemoteConfig).annotate({
   identifier: "Mcp.RequestServers",
 })

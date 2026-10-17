@@ -110,6 +110,7 @@ it.live("serves the HttpApi and enforces Basic auth like the Node server", () =>
     )
     expect(response.headers.get("x-opencode-input-config")).toBe("1")
     expect(response.headers.get("x-opencode-session-retirement")).toBe("1")
+    expect(response.headers.get("x-opencode-inbox-capability-renewal")).toBe("1")
     expect(response.headers.get("x-opencode-model-budget")).toBe(
       process.env.OPENCODE_MODEL_BUDGET_ENDPOINT && process.env.OPENCODE_MODEL_BUDGET_TOKEN ? "4" : null,
     )
@@ -510,6 +511,76 @@ it.live("retires unknown session IDs through the authenticated API and rejects d
       )
       expect(created.status).toBe(404)
       expect(yield* Effect.promise(() => created.json())).toMatchObject({ _tag: "SessionNotFoundError", sessionID: id })
+    }
+  }),
+)
+
+it.live("renews only pending MCP inputs through the authenticated API without readmission", () =>
+  Effect.gen(function* () {
+    const handler = yield* ServerFetch.make({ ...options, password: "secret" })
+    const headers = { authorization: `Basic ${btoa("opencode:secret")}`, "content-type": "application/json" }
+    const request = (url: string, method: string, body?: unknown) =>
+      Effect.promise(() =>
+        handler(
+          new Request(`http://opencode.local${url}`, {
+            method,
+            headers,
+            body: body === undefined ? undefined : JSON.stringify(body),
+          }),
+        ),
+      )
+    for (const id of ["ses_http_renewal_one", "ses_http_renewal_two"]) {
+      expect((yield* request("/api/session", "POST", { id })).status).toBe(200)
+      const base = `/api/session/${id}`
+      const input = `msg_${id}`
+      const path = `${base}/inbox/${input}/capability`
+      expect(
+        (yield* request(`${base}/prompt`, "POST", {
+          id: input,
+          text: "original",
+          mcp: {},
+          resume: false,
+          delivery: "queue",
+        })).status,
+      ).toBe(200)
+      expect(
+        (yield* Effect.promise(() =>
+          handler(
+            new Request(`http://opencode.local${path}`, {
+              method: "PUT",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ mcp: {} }),
+            }),
+          ),
+        )).status,
+      ).toBe(401)
+      expect((yield* request(path, "PUT", { mcp: {}, revision: Number.MAX_SAFE_INTEGER + 1 })).status).toBe(400)
+      expect((yield* request(path, "PUT", { mcp: {}, revision: 2 })).status).toBe(204)
+      expect((yield* request(path, "PUT", { mcp: {}, revision: 1 })).status).toBe(409)
+      expect(
+        (yield* request(`${base}/prompt`, "POST", {
+          id: input,
+          text: "ignored retry",
+          mcp: {},
+          mcpRevision: 1,
+          resume: false,
+        })).status,
+      ).toBe(409)
+      expect(
+        (yield* request(`${base}/prompt`, "POST", {
+          id: input,
+          text: "ignored retry",
+          mcp: {},
+          mcpRevision: 3,
+          resume: false,
+        })).status,
+      ).toBe(200)
+      expect((yield* request(`${base}/inbox/${input}`, "DELETE")).status).toBe(204)
+      expect((yield* request(path, "PUT", { mcp: {}, revision: 4 })).status).toBe(409)
+      const inbox = yield* request(`${base}/inbox`, "GET")
+      expect(yield* Effect.promise(() => inbox.json())).toEqual({ data: [] })
+      expect((yield* request(`${base}/retire`, "POST")).status).toBe(204)
+      expect((yield* request(path, "PUT", { mcp: {}, revision: 4 })).status).toBe(404)
     }
   }),
 )

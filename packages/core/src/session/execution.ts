@@ -133,10 +133,16 @@ export const layer = Layer.effect(
           sessionID,
           Effect.gen(function* () {
             const outcome = terminal(exit, reason)
-            yield* SessionExecutionCapability.retain(
+            yield* SessionInbox.serialized(
               sessionID,
-              new Set((yield* SessionInbox.list(db, sessionID)).map((item) => item.id)),
-              outcome.type === "interrupted",
+              Effect.gen(function* () {
+                const pending = yield* SessionInbox.list(db, sessionID)
+                yield* SessionExecutionCapability.retain(
+                  sessionID,
+                  new Set(pending.map((item) => item.id)),
+                  outcome.type === "interrupted",
+                )
+              }),
             )
             if (outcome.type === "succeeded") {
               yield* bus.publish(SessionEvent.Execution.Succeeded, { sessionID }, releaseOnCommit(sessionID))

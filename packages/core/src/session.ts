@@ -7,6 +7,7 @@ import { ListAnchor } from "@opencode/schema/session"
 import { and, desc, eq } from "drizzle-orm"
 import { Project } from "./project.js"
 import { Model } from "@opencode/schema/model"
+import type { Mcp } from "@opencode/schema/mcp"
 import { Location } from "./location.js"
 import { SessionMessage } from "./session/message.js"
 import { PromptInput } from "@opencode/schema/prompt-input"
@@ -155,6 +156,9 @@ export interface Interface {
    * unhandled compaction barriers.
    */
   readonly inbox: (sessionID: SessionSchema.ID) => Effect.Effect<SessionInbox.Info[], NotFoundError>
+  readonly renewInboxCapability: (
+    input: InboxItemRef & { readonly mcp: Mcp.RequestServers; readonly revision?: number },
+  ) => Effect.Effect<void, NotFoundError | InboxConflictError>
   readonly cancelInbox: (input: InboxItemRef) => Effect.Effect<void, NotFoundError | InboxConflictError>
   readonly steerInbox: (input: InboxItemRef) => Effect.Effect<void, NotFoundError | InboxConflictError>
   readonly queueInbox: (input: InboxItemRef) => Effect.Effect<void, NotFoundError | InboxConflictError>
@@ -415,6 +419,7 @@ const layer = Layer.effect(
         })
       }),
       inbox: (sessionID) => sessions.forSession(sessionID).inbox(),
+      renewInboxCapability: (input) => sessions.forSession(input.sessionID).renewInboxCapability(input.inboxID, input),
       cancelInbox: (input) => sessions.forSession(input.sessionID).cancelInbox(input.inboxID),
       steerInbox: (input) => sessions.forSession(input.sessionID).steerInbox(input.inboxID),
       queueInbox: (input) => sessions.forSession(input.sessionID).queueInbox(input.inboxID),

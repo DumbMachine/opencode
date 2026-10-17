@@ -3,6 +3,7 @@ export * as Session from "./session.js"
 import { DateTime, Effect, Fiber, Scope } from "effect"
 import type { Agent } from "@opencode/schema/agent"
 import type { Model } from "@opencode/schema/model"
+import type { Mcp } from "@opencode/schema/mcp"
 import type { Permission } from "@opencode/schema/permission"
 import { Event } from "@opencode/schema/event"
 import { FSUtil } from "@opencode/util/fs-util"
@@ -129,11 +130,18 @@ export const make = Effect.fn("Session.make")(function* () {
     yield* get(sessionID)
     return yield* admission.list(sessionID)
   })
+  const renewInboxCapability = Effect.fn("Session.renewInboxCapability")(function* (
+    sessionID: SessionSchema.ID,
+    inboxID: SessionMessage.ID,
+    input: { readonly mcp: Mcp.RequestServers; readonly revision?: number },
+  ) {
+    yield* get(sessionID)
+    yield* admission
+      .renewCapability({ sessionID, id: inboxID, ...input })
+      .pipe(Effect.catchTag("SessionInbox.LifecycleConflict", () => new InboxConflictError({ sessionID, inboxID })))
+  })
   const cancelInbox = Effect.fn("Session.cancelInbox")(
-    (sessionID: SessionSchema.ID, inboxID: SessionMessage.ID) =>
-      mutatePending(sessionID, inboxID, admission.cancel).pipe(
-        Effect.andThen(SessionExecutionCapability.drop(sessionID, inboxID)),
-      ),
+    (sessionID: SessionSchema.ID, inboxID: SessionMessage.ID) => mutatePending(sessionID, inboxID, admission.cancel),
     Effect.uninterruptible,
   )
   const steerInbox = Effect.fn("Session.steerInbox")(function* (
@@ -152,27 +160,51 @@ export const make = Effect.fn("Session.make")(function* () {
       Effect.gen(function* () {
         const session = yield* get(sessionID)
         const messageID = input.id ?? SessionMessage.ID.create()
+        const request = {
+          id: messageID,
+          sessionID,
+          type: "user" as const,
+          delivery: input.delivery ?? ("steer" as const),
+        }
         const admitted = yield* Effect.gen(function* () {
-          const existing = yield* admission.reconcile({
-            id: messageID,
-            sessionID: session.id,
-            type: "user",
-            delivery: input.delivery ?? "steer",
-          })
-          if (existing) return existing
-          const item = yield* restore(
-            SessionPrompt.prepare({ session, messageID, input }).pipe(
-              Effect.provideService(Instance.Service, instances),
-              Effect.provideService(FSUtil.Service, fs),
-            ),
+          const existing = yield* admission.reconcile(request)
+          const item = existing
+            ? undefined
+            : yield* restore(
+                SessionPrompt.prepare({
+                  session,
+                  messageID,
+                  input:
+                    input.mcp === undefined
+                      ? input
+                      : { ...input, capabilities: [...new Set([...(input.capabilities ?? []), "mcp"])] },
+                }).pipe(Effect.provideService(Instance.Service, instances), Effect.provideService(FSUtil.Service, fs)),
+              )
+          // Preparation may wait on hooks or attachments. Only final admission
+          // and credential installation share the cancellation/promotion lock.
+          return yield* SessionInbox.serialized(
+            sessionID,
+            Effect.gen(function* () {
+              const current = yield* admission.reconcile(request)
+              if (!current && !item) return yield* new SessionInbox.LifecycleConflict({ id: messageID })
+              if (!current) {
+                const latest = yield* get(sessionID)
+                if (latest.revert) yield* SessionRevert.commit(bus, latest)
+              }
+              const admitted = current ?? (yield* admission.admit({ id: messageID, sessionID, item: item! }))
+              if (input.mcp !== undefined) {
+                if (!admitted.payload.capabilities?.includes("mcp"))
+                  return yield* new SessionInbox.LifecycleConflict({ id: messageID })
+                const installed = yield* SessionExecutionCapability.set(sessionID, {
+                  inputID: admitted.id,
+                  mcp: input.mcp,
+                  revision: input.mcpRevision,
+                })
+                if (!installed) return yield* new SessionInbox.LifecycleConflict({ id: messageID })
+              }
+              return admitted
+            }),
           )
-          // Commit a staged revert only after preparation succeeds, before admitting new work.
-          if (session.revert) yield* SessionRevert.commit(bus, session)
-          return yield* admission.admit({
-            id: messageID,
-            sessionID: session.id,
-            item,
-          })
         }).pipe(
           Effect.catchTag("SessionInbox.LifecycleConflict", () => new PromptConflictError({ sessionID, messageID })),
         )
@@ -358,6 +390,7 @@ export const make = Effect.fn("Session.make")(function* () {
     switchAgent,
     switchModel,
     inbox,
+    renewInboxCapability,
     prompt,
     synthetic,
     shell,
@@ -382,6 +415,7 @@ export const make = Effect.fn("Session.make")(function* () {
     const switchAgent = operations.switchAgent.bind(undefined, sessionID)
     const switchModel = operations.switchModel.bind(undefined, sessionID)
     const inbox = operations.inbox.bind(undefined, sessionID)
+    const renewInboxCapability = operations.renewInboxCapability.bind(undefined, sessionID)
     const prompt = operations.prompt.bind(undefined, sessionID)
     const synthetic = operations.synthetic.bind(undefined, sessionID)
     const shell = operations.shell.bind(undefined, sessionID)
@@ -409,6 +443,7 @@ export const make = Effect.fn("Session.make")(function* () {
       switchAgent,
       switchModel,
       inbox,
+      renewInboxCapability,
       prompt,
       synthetic,
       shell,

@@ -24,6 +24,7 @@ import { AbsolutePath, RelativePath } from "../src/schema.js"
 import { InboxConflictError, NotFoundError, PromptConflictError } from "../src/session/error.js"
 import { SessionEvent } from "../src/session/event.js"
 import { SessionExecution } from "../src/session/execution.js"
+import { SessionExecutionCapability } from "../src/session/execution-capability.js"
 import { SessionInbox } from "../src/session/inbox.js"
 import { SessionMessage } from "../src/session/message.js"
 import { SessionPrompt } from "../src/session/prompt.js"
@@ -69,6 +70,7 @@ const skillInfo = Skill.Info.make({
 
 const setup = Effect.fnUntraced(function* (options?: {
   execution?: SessionExecution.Interface
+  enqueued?: Effect.Effect<void>
   shell?: Layer.Layer<Shell.Service>
   skills?: (ref: Location.Ref) => Layer.Layer<Skill.Service>
   snapshot?: (ref: Location.Ref) => Layer.Layer<Snapshot.Service>
@@ -149,6 +151,24 @@ const setup = Effect.fnUntraced(function* (options?: {
     // This fixture supplies only the instance services exercised by Session.
     provide: (session) => Effect.provide(servicesFor(session.location) as Layer.Layer<Instance.Services>),
   })
+  const admission = options?.enqueued
+    ? yield* SessionInbox.make().pipe(
+        Effect.provideService(
+          Bus.Service,
+          Bus.Service.of({
+            ...bus,
+            publish: (definition, data, input) =>
+              bus
+                .publish(definition, data, input)
+                .pipe(
+                  Effect.tap((event) =>
+                    event.type === SessionEvent.InboxEnqueued.type ? options.enqueued! : Effect.void,
+                  ),
+                ),
+          }),
+        ),
+      )
+    : yield* SessionInbox.Service
   const sessions = yield* Session.make().pipe(
     Effect.satisfiesServicesType<
       | Bus.Service
@@ -161,12 +181,204 @@ const setup = Effect.fnUntraced(function* (options?: {
       | Scope.Scope
     >(),
     Effect.provideService(Instance.Service, instances),
+    Effect.provideService(SessionInbox.Service, admission),
     Effect.provideService(SessionExecution.Service, options?.execution ?? execution),
   )
   return { sessions, instances, hooks, locations, activationWaits, resumes, wakes, db: database.db, bus, store }
 })
 
 describe("Session-owned handles", () => {
+  it.live("commits the current staged revert once for concurrent prepared inputs", () =>
+    Effect.gen(function* () {
+      const fixture = yield* setup({
+        snapshot: () => Layer.mock(Snapshot.Service, { capture: () => Effect.undefined }),
+      })
+      const handle = fixture.sessions.forSession(sessionID)
+      const boundary = yield* handle.synthetic({ text: "Boundary", resume: false })
+      yield* SessionInbox.promote(fixture.db, fixture.bus, sessionID, "steer")
+      yield* handle.revert.stage({ messageID: boundary.id, files: false })
+      const ready = yield* Deferred.make<void>()
+      const release = yield* Deferred.make<void>()
+      let prepared = 0
+      const hook = yield* fixture.hooks.register("session", "prompt", () =>
+        Effect.gen(function* () {
+          prepared++
+          if (prepared === 2) yield* Deferred.succeed(ready, undefined)
+          yield* Deferred.await(release)
+        }),
+      )
+      const first = yield* handle
+        .prompt({
+          id: SessionMessage.ID.make("msg_revert_first"),
+          text: "First",
+          mcp: {},
+          mcpRevision: 1,
+          resume: false,
+        })
+        .pipe(Effect.exit, Effect.forkChild)
+      const second = yield* handle
+        .prompt({
+          id: SessionMessage.ID.make("msg_revert_second"),
+          text: "Second",
+          mcp: {},
+          mcpRevision: 1,
+          resume: false,
+        })
+        .pipe(Effect.exit, Effect.forkChild)
+      yield* Deferred.await(ready)
+      yield* Deferred.succeed(release, undefined)
+      expect(Exit.isSuccess(yield* Fiber.join(first))).toBe(true)
+      expect(Exit.isSuccess(yield* Fiber.join(second))).toBe(true)
+      expect((yield* handle.inbox()).map((item) => item.id).sort()).toEqual([
+        SessionMessage.ID.make("msg_revert_first"),
+        SessionMessage.ID.make("msg_revert_second"),
+      ])
+      expect((yield* handle.get()).revert).toBeUndefined()
+      yield* hook.dispose
+    }),
+  )
+
+  it.live("installs MCP credentials before a concurrent drain can promote the new input", () =>
+    Effect.gen(function* () {
+      const committed = yield* Deferred.make<void>()
+      const release = yield* Deferred.make<void>()
+      const fixture = yield* setup({
+        enqueued: Deferred.succeed(committed, undefined).pipe(Effect.andThen(Deferred.await(release))),
+      })
+      const id = SessionMessage.ID.make("msg_atomic_capability_install")
+      const mcp = {
+        host: {
+          type: "remote" as const,
+          url: "https://fixture.invalid",
+          headers: { authorization: "Bearer synthetic" },
+        },
+      }
+      const admitting = yield* fixture.sessions
+        .forSession(sessionID)
+        .prompt({ id, text: "Original", mcp, mcpRevision: 1, resume: false })
+        .pipe(Effect.forkChild)
+      yield* Deferred.await(committed)
+      const promoting = yield* SessionInbox.promote(fixture.db, fixture.bus, sessionID, "input", () =>
+        Effect.gen(function* () {
+          expect((yield* SessionExecutionCapability.get(sessionID, id))?.mcp).toEqual(mcp)
+          return true
+        }),
+      ).pipe(Effect.exit, Effect.forkChild)
+      // The durable row is visible while the publisher is paused. An active
+      // drain must wait for its credential installation, never consume it early.
+      yield* Effect.sleep("100 millis")
+      yield* Deferred.succeed(release, undefined)
+      yield* Fiber.join(admitting)
+      expect(Exit.isSuccess(yield* Fiber.join(promoting))).toBe(true)
+      expect((yield* fixture.sessions.forSession(sessionID).message(id))?.type).toBe("user")
+      expect(fixture.wakes).toEqual([])
+      yield* SessionExecutionCapability.drop(sessionID, id)
+    }),
+  )
+
+  it.live("renews only existing MCP inputs without changing admission or waking execution", () =>
+    Effect.gen(function* () {
+      const fixture = yield* setup()
+      const handle = fixture.sessions.forSession(sessionID)
+      for (const suffix of ["one", "two"]) {
+        const id = SessionMessage.ID.make(`msg_renew_${suffix}`)
+        const original = yield* handle.prompt({
+          id,
+          text: "original request",
+          metadata: { immutable: suffix },
+          capabilities: ["mcp"],
+          resume: false,
+          delivery: "queue",
+        })
+        const mcp = {
+          host: {
+            type: "remote" as const,
+            url: "https://host.example.test",
+            headers: { authorization: "Bearer first" },
+          },
+        }
+        yield* handle.renewInboxCapability(id, { mcp, revision: 2 })
+        yield* handle.renewInboxCapability(id, {
+          mcp: {
+            host: { headers: { authorization: "Bearer first" }, url: "https://host.example.test", type: "remote" },
+          },
+          revision: 2,
+        })
+        expect(yield* handle.inbox()).toContainEqual(original)
+        expect((yield* SessionExecutionCapability.get(sessionID, id))?.mcp).toEqual(mcp)
+        for (const input of [{ mcp, revision: 1 }, { mcp }, { mcp: {}, revision: 2 }]) {
+          expect(yield* handle.renewInboxCapability(id, input).pipe(Effect.flip)).toBeInstanceOf(InboxConflictError)
+        }
+        expect((yield* SessionExecutionCapability.get(sessionID, id))?.mcp).toEqual(mcp)
+        yield* handle.renewInboxCapability(id, { mcp: {}, revision: 3 })
+        expect((yield* SessionExecutionCapability.get(sessionID, id))?.mcp).toEqual({})
+        expect(
+          yield* fixture.sessions.forSession(otherID).renewInboxCapability(id, { mcp, revision: 4 }).pipe(Effect.flip),
+        ).toBeInstanceOf(InboxConflictError)
+        yield* handle.cancelInbox(id)
+        expect(yield* handle.renewInboxCapability(id, { mcp, revision: 4 }).pipe(Effect.flip)).toBeInstanceOf(
+          InboxConflictError,
+        )
+        expect(yield* handle.inbox()).toEqual([])
+        expect(yield* handle.message(id)).toBeUndefined()
+        expect(yield* SessionExecutionCapability.get(sessionID, id)).toBeUndefined()
+      }
+      const plain = yield* handle.prompt({ text: "no capability marker", resume: false })
+      expect(yield* handle.renewInboxCapability(plain.id, { mcp: {} }).pipe(Effect.flip)).toBeInstanceOf(
+        InboxConflictError,
+      )
+      expect(yield* SessionExecutionCapability.get(sessionID, plain.id)).toBeUndefined()
+      expect(
+        yield* fixture.sessions
+          .forSession(SessionSchema.ID.make("ses_missing_renewal"))
+          .renewInboxCapability(plain.id, { mcp: {} })
+          .pipe(Effect.flip),
+      ).toBeInstanceOf(NotFoundError)
+      expect(fixture.wakes).toEqual([])
+      // Only the first admissions and cancellations were recorded; renewal
+      // credentials and revisions must not appear in the durable event log.
+      const events = yield* fixture.db
+        .select({ type: EventTable.type })
+        .from(EventTable)
+        .where(eq(EventTable.aggregate_id, sessionID))
+        .all()
+        .pipe(Effect.orDie)
+      expect(events).toHaveLength(6)
+    }),
+  )
+
+  it.live("rechecks pending existence after waiting on the cancellation and delivery boundary", () =>
+    Effect.gen(function* () {
+      const fixture = yield* setup()
+      const handle = fixture.sessions.forSession(sessionID)
+      for (const terminal of ["cancelled", "delivered"] as const) {
+        const id = SessionMessage.ID.make(`msg_renew_${terminal}`)
+        yield* handle.prompt({ id, text: "original", capabilities: ["mcp"], resume: false })
+        const acquired = yield* Deferred.make<void>()
+        const release = yield* Deferred.make<void>()
+        const holder = yield* SessionInbox.serialized(
+          sessionID,
+          Deferred.succeed(acquired, undefined).pipe(Effect.andThen(Deferred.await(release))),
+        ).pipe(Effect.forkChild)
+        yield* Deferred.await(acquired)
+        const renewing = yield* handle
+          .renewInboxCapability(id, { mcp: {}, revision: 1 })
+          .pipe(Effect.exit, Effect.forkChild)
+        // Replay can invalidate a pending row while a local operation waits.
+        yield* fixture.bus.publish(
+          terminal === "cancelled" ? SessionEvent.InboxCancelled : SessionEvent.InboxDelivered,
+          { sessionID, inboxID: id },
+        )
+        yield* Deferred.succeed(release, undefined)
+        yield* Fiber.join(holder)
+        expect(Exit.isFailure(yield* Fiber.join(renewing))).toBe(true)
+        expect(yield* handle.inbox()).toEqual([])
+        expect(yield* SessionExecutionCapability.get(sessionID, id)).toBeUndefined()
+      }
+      expect(fixture.wakes).toEqual([])
+    }),
+  )
+
   it.live("owns state changes and message reads without caller services or Location acquisition", () =>
     Effect.gen(function* () {
       const fixture = yield* setup()

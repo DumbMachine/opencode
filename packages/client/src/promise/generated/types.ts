@@ -4074,6 +4074,7 @@ export type SessionPromptInput = {
       readonly id: string
       readonly mention?: { readonly start: number; readonly end: number; readonly text: string }
     }>
+    readonly mcpRevision?: number
     readonly mcp?: {
       readonly [x: string]: {
         readonly type: "remote"
@@ -4111,6 +4112,7 @@ export type SessionPromptInput = {
       readonly id: string
       readonly mention?: { readonly start: number; readonly end: number; readonly text: string }
     }>
+    readonly mcpRevision?: number
     readonly mcp?: {
       readonly [x: string]: {
         readonly type: "remote"
@@ -4148,6 +4150,7 @@ export type SessionPromptInput = {
       readonly id: string
       readonly mention?: { readonly start: number; readonly end: number; readonly text: string }
     }>
+    readonly mcpRevision?: number
     readonly mcp?: {
       readonly [x: string]: {
         readonly type: "remote"
@@ -4185,6 +4188,7 @@ export type SessionPromptInput = {
       readonly id: string
       readonly mention?: { readonly start: number; readonly end: number; readonly text: string }
     }>
+    readonly mcpRevision?: number
     readonly mcp?: {
       readonly [x: string]: {
         readonly type: "remote"
@@ -4222,6 +4226,7 @@ export type SessionPromptInput = {
       readonly id: string
       readonly mention?: { readonly start: number; readonly end: number; readonly text: string }
     }>
+    readonly mcpRevision?: number
     readonly mcp?: {
       readonly [x: string]: {
         readonly type: "remote"
@@ -4242,6 +4247,44 @@ export type SessionPromptInput = {
     readonly delivery?: ("steer" | "queue") | null
     readonly resume?: boolean | null
   }["skills"]
+  readonly mcpRevision?: {
+    readonly id?: string | null
+    readonly text: string
+    readonly files?: ReadonlyArray<{
+      readonly uri: string
+      readonly name?: string
+      readonly description?: string
+      readonly mention?: { readonly start: number; readonly end: number; readonly text: string }
+    }>
+    readonly agents?: ReadonlyArray<{
+      readonly name: string
+      readonly mention?: { readonly start: number; readonly end: number; readonly text: string }
+    }>
+    readonly skills?: ReadonlyArray<{
+      readonly id: string
+      readonly mention?: { readonly start: number; readonly end: number; readonly text: string }
+    }>
+    readonly mcpRevision?: number
+    readonly mcp?: {
+      readonly [x: string]: {
+        readonly type: "remote"
+        readonly url: string
+        readonly headers?: { readonly [x: string]: string }
+        readonly oauth?: false
+        readonly codemode?: boolean
+        readonly approval_bridge?: ReadonlyArray<string>
+        readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
+      }
+    }
+    readonly execution?: {
+      readonly model: { readonly id: string; readonly providerID: string; readonly variant?: string }
+      readonly agent: string
+      readonly instructions?: string
+    }
+    readonly metadata?: { readonly [x: string]: JsonValue }
+    readonly delivery?: ("steer" | "queue") | null
+    readonly resume?: boolean | null
+  }["mcpRevision"]
   readonly mcp?: {
     readonly id?: string | null
     readonly text: string
@@ -4259,6 +4302,7 @@ export type SessionPromptInput = {
       readonly id: string
       readonly mention?: { readonly start: number; readonly end: number; readonly text: string }
     }>
+    readonly mcpRevision?: number
     readonly mcp?: {
       readonly [x: string]: {
         readonly type: "remote"
@@ -4296,6 +4340,7 @@ export type SessionPromptInput = {
       readonly id: string
       readonly mention?: { readonly start: number; readonly end: number; readonly text: string }
     }>
+    readonly mcpRevision?: number
     readonly mcp?: {
       readonly [x: string]: {
         readonly type: "remote"
@@ -4333,6 +4378,7 @@ export type SessionPromptInput = {
       readonly id: string
       readonly mention?: { readonly start: number; readonly end: number; readonly text: string }
     }>
+    readonly mcpRevision?: number
     readonly mcp?: {
       readonly [x: string]: {
         readonly type: "remote"
@@ -4370,6 +4416,7 @@ export type SessionPromptInput = {
       readonly id: string
       readonly mention?: { readonly start: number; readonly end: number; readonly text: string }
     }>
+    readonly mcpRevision?: number
     readonly mcp?: {
       readonly [x: string]: {
         readonly type: "remote"
@@ -4407,6 +4454,7 @@ export type SessionPromptInput = {
       readonly id: string
       readonly mention?: { readonly start: number; readonly end: number; readonly text: string }
     }>
+    readonly mcpRevision?: number
     readonly mcp?: {
       readonly [x: string]: {
         readonly type: "remote"
@@ -4450,6 +4498,7 @@ export type SessionCommandInput = {
       readonly id: string
       readonly mention?: { readonly start: number; readonly end: number; readonly text: string }
     }>
+    readonly mcpRevision?: number
     readonly mcp?: {
       readonly [x: string]: {
         readonly type: "remote"
@@ -4480,6 +4529,7 @@ export type SessionCommandInput = {
       readonly id: string
       readonly mention?: { readonly start: number; readonly end: number; readonly text: string }
     }>
+    readonly mcpRevision?: number
     readonly mcp?: {
       readonly [x: string]: {
         readonly type: "remote"
@@ -4510,6 +4560,7 @@ export type SessionCommandInput = {
       readonly id: string
       readonly mention?: { readonly start: number; readonly end: number; readonly text: string }
     }>
+    readonly mcpRevision?: number
     readonly mcp?: {
       readonly [x: string]: {
         readonly type: "remote"
@@ -4540,6 +4591,7 @@ export type SessionCommandInput = {
       readonly id: string
       readonly mention?: { readonly start: number; readonly end: number; readonly text: string }
     }>
+    readonly mcpRevision?: number
     readonly mcp?: {
       readonly [x: string]: {
         readonly type: "remote"
@@ -4570,6 +4622,7 @@ export type SessionCommandInput = {
       readonly id: string
       readonly mention?: { readonly start: number; readonly end: number; readonly text: string }
     }>
+    readonly mcpRevision?: number
     readonly mcp?: {
       readonly [x: string]: {
         readonly type: "remote"
@@ -4583,6 +4636,37 @@ export type SessionCommandInput = {
     }
     readonly delivery?: ("steer" | "queue") | null
   }["skills"]
+  readonly mcpRevision?: {
+    readonly name: string
+    readonly text: string
+    readonly files?: ReadonlyArray<{
+      readonly uri: string
+      readonly name?: string
+      readonly description?: string
+      readonly mention?: { readonly start: number; readonly end: number; readonly text: string }
+    }>
+    readonly agents?: ReadonlyArray<{
+      readonly name: string
+      readonly mention?: { readonly start: number; readonly end: number; readonly text: string }
+    }>
+    readonly skills?: ReadonlyArray<{
+      readonly id: string
+      readonly mention?: { readonly start: number; readonly end: number; readonly text: string }
+    }>
+    readonly mcpRevision?: number
+    readonly mcp?: {
+      readonly [x: string]: {
+        readonly type: "remote"
+        readonly url: string
+        readonly headers?: { readonly [x: string]: string }
+        readonly oauth?: false
+        readonly codemode?: boolean
+        readonly approval_bridge?: ReadonlyArray<string>
+        readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
+      }
+    }
+    readonly delivery?: ("steer" | "queue") | null
+  }["mcpRevision"]
   readonly mcp?: {
     readonly name: string
     readonly text: string
@@ -4600,6 +4684,7 @@ export type SessionCommandInput = {
       readonly id: string
       readonly mention?: { readonly start: number; readonly end: number; readonly text: string }
     }>
+    readonly mcpRevision?: number
     readonly mcp?: {
       readonly [x: string]: {
         readonly type: "remote"
@@ -4630,6 +4715,7 @@ export type SessionCommandInput = {
       readonly id: string
       readonly mention?: { readonly start: number; readonly end: number; readonly text: string }
     }>
+    readonly mcpRevision?: number
     readonly mcp?: {
       readonly [x: string]: {
         readonly type: "remote"
@@ -4776,6 +4862,41 @@ export type SessionDiffOutput = { data: Array<FileDiffInfo> }["data"]
 export type SessionInboxListInput = { readonly sessionID: { readonly sessionID: string }["sessionID"] }
 
 export type SessionInboxListOutput = { data: Array<SessionInboxInfo> }["data"]
+
+export type SessionInboxRenewCapabilityInput = {
+  readonly sessionID: { readonly sessionID: string; readonly inboxID: string }["sessionID"]
+  readonly inboxID: { readonly sessionID: string; readonly inboxID: string }["inboxID"]
+  readonly mcp: {
+    readonly mcp: {
+      readonly [x: string]: {
+        readonly type: "remote"
+        readonly url: string
+        readonly headers?: { readonly [x: string]: string }
+        readonly oauth?: false
+        readonly codemode?: boolean
+        readonly approval_bridge?: ReadonlyArray<string>
+        readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
+      }
+    }
+    readonly revision?: number | null
+  }["mcp"]
+  readonly revision?: {
+    readonly mcp: {
+      readonly [x: string]: {
+        readonly type: "remote"
+        readonly url: string
+        readonly headers?: { readonly [x: string]: string }
+        readonly oauth?: false
+        readonly codemode?: boolean
+        readonly approval_bridge?: ReadonlyArray<string>
+        readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
+      }
+    }
+    readonly revision?: number | null
+  }["revision"]
+}
+
+export type SessionInboxRenewCapabilityOutput = void
 
 export type SessionInboxCancelInput = {
   readonly sessionID: { readonly sessionID: string; readonly inboxID: string }["sessionID"]

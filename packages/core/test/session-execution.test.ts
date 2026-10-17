@@ -34,6 +34,50 @@ const it = testEffect(
 )
 
 describe("SessionExecution lifecycle", () => {
+  it.live("settlement waits for the inbox boundary before retaining pending credentials", () =>
+    Effect.gen(function* () {
+      const database = yield* Database.Service
+      const bus = yield* Bus.Service
+      const sessionID = Session.ID.make("ses_atomic_settlement_capability")
+      const inputID = SessionMessage.ID.make("msg_atomic_settlement_capability")
+      yield* seedSessions(database, [sessionID])
+      const running = yield* Deferred.make<void>()
+      const settle = yield* Deferred.make<void>()
+      const locked = yield* Deferred.make<void>()
+      const release = yield* Deferred.make<void>()
+      const scope = yield* Scope.make()
+      yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void))
+      const context = yield* buildExecution(scope, () =>
+        Deferred.succeed(running, undefined).pipe(Effect.andThen(Deferred.await(settle))),
+      )
+      const execution = Context.get(context, SessionExecution.Service)
+      yield* execution.wake(sessionID)
+      yield* Deferred.await(running)
+      const installing = yield* SessionInbox.serialized(
+        sessionID,
+        Effect.gen(function* () {
+          yield* SessionExecutionCapability.set(sessionID, { inputID, mcp: {}, revision: 1 })
+          yield* Deferred.succeed(locked, undefined)
+          yield* Deferred.await(release)
+          yield* bus.publish(SessionEvent.InboxEnqueued, {
+            sessionID,
+            inboxID: inputID,
+            item: { type: "user", payload: { text: "Pending", capabilities: ["mcp"] }, delivery: "queue" },
+          })
+        }),
+      ).pipe(Effect.forkChild)
+      yield* Deferred.await(locked)
+      yield* Deferred.succeed(settle, undefined)
+      yield* Effect.sleep("100 millis")
+      yield* Deferred.succeed(release, undefined)
+      yield* Fiber.join(installing)
+      yield* execution.awaitIdle(sessionID)
+      expect((yield* SessionExecutionCapability.get(sessionID, inputID))?.revision).toBe(1)
+      expect((yield* SessionInbox.list(database.db, sessionID)).map((item) => item.id)).toEqual([inputID])
+      yield* SessionExecutionCapability.drop(sessionID, inputID)
+    }),
+  )
+
   test("classifies success and typed failure terminals", () => {
     expect(SessionExecution.terminal(Exit.succeed(undefined))).toEqual({ type: "succeeded" })
     expect(

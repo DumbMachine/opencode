@@ -16,6 +16,7 @@ import {
   User,
   UserPayload,
 } from "@opencode/schema/session-inbox"
+import type { Mcp } from "@opencode/schema/mcp"
 import { Database } from "../database/database.js"
 import { Bus } from "../bus.js"
 import { KeyedMutex } from "../effect/keyed-mutex.js"
@@ -232,13 +233,45 @@ export const make = Effect.fn("SessionInbox.make")(function* () {
     )
   })
 
+  // A credential refresh cannot admit work. Cancellation and promotion use
+  // this same local serialization boundary; credentials never enter the log.
+  const renewCapability = Effect.fn("SessionInbox.renewCapability")(
+    (
+      input: PendingRef & {
+        readonly mcp: Mcp.RequestServers
+        readonly revision?: number
+      },
+    ) =>
+      serialized(
+        input.sessionID,
+        Effect.gen(function* () {
+          yield* SessionLifecycle.check(db, input.sessionID)
+          const pending = yield* find(db, input.id)
+          if (
+            pending?.sessionID !== input.sessionID ||
+            pending.type !== "user" ||
+            !pending.payload.capabilities?.includes("mcp")
+          )
+            return yield* new LifecycleConflict({ id: input.id })
+          const installed = yield* SessionExecutionCapability.set(input.sessionID, {
+            inputID: input.id,
+            mcp: input.mcp,
+            revision: input.revision,
+          })
+          if (!installed) return yield* new LifecycleConflict({ id: input.id })
+        }),
+      ).pipe(Effect.uninterruptible),
+  )
+
   const cancel = Effect.fn("SessionInbox.cancel")((input: PendingRef) =>
     publishMutation(
       input,
-      bus.publish(SessionEvent.InboxCancelled, {
-        sessionID: input.sessionID,
-        inboxID: input.id,
-      }),
+      bus
+        .publish(SessionEvent.InboxCancelled, {
+          sessionID: input.sessionID,
+          inboxID: input.id,
+        })
+        .pipe(Effect.tap(() => SessionExecutionCapability.drop(input.sessionID, input.id))),
     ),
   )
 
@@ -269,6 +302,7 @@ export const make = Effect.fn("SessionInbox.make")(function* () {
     reconcile,
     admit,
     admitCompaction,
+    renewCapability,
     cancel,
     steer,
     queue,
