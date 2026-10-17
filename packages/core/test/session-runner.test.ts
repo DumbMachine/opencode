@@ -5112,6 +5112,8 @@ describe("SessionRunnerLLM", () => {
     expect(Exit.isFailure(yield* Fiber.await(run))).toBeTrue()
     yield* stream.release
     expect(SessionExecutionCapability.selectedInput(sessionID)).toBeUndefined()
+    expect(yield* SessionExecutionCapability.get(sessionID, first.id)).toEqual({ inputID: first.id, mcp: {} })
+    yield* SessionExecutionCapability.clearSelection(sessionID)
     const second = yield* s.session.prompt({ sessionID, text: "Later input", delivery: "queue", resume: false })
     const preparing = yield* Deferred.make<void>()
     const release = yield* Deferred.make<void>()
@@ -5147,6 +5149,32 @@ describe("SessionRunnerLLM", () => {
     expect((yield* s.messages).some((message) => message.id === second.id)).toBeTrue()
     expect(yield* s.inbox).toEqual([])
   })
+
+  for (const admission of ["before execution", "during execution"] as const) {
+    scenario(`stopping one input continues an unwoken prompt admitted ${admission}`, function* (s) {
+      const execution = yield* nativeInputControl
+      const first = yield* s.admit("Interrupted actor input")
+      const queued = () =>
+        s.session.prompt({ sessionID, text: "Pending other actor", delivery: "queue", resume: false })
+      const before = admission === "before execution" ? yield* queued() : undefined
+      const stream = yield* s.llm.gate
+      const run = yield* execution.resume(sessionID).pipe(Effect.forkChild)
+      yield* stream.started
+      const second = before ?? (yield* queued())
+      yield* s.llm.push(TestLLM.stop())
+      // No wake for the second input exists. Stopping A must still let B run.
+      expect(yield* execution.interrupt(sessionID, { inputID: first.id, awaitSettlement: true })).toBeTrue()
+      expect(Exit.isFailure(yield* Fiber.await(run))).toBeTrue()
+      yield* stream.release
+      yield* execution.awaitIdle(sessionID)
+      expect(s.requests.map(userTexts)).toEqual([
+        ["Interrupted actor input"],
+        ["Interrupted actor input", "Pending other actor"],
+      ])
+      expect((yield* s.messages).some((message) => message.id === second.id)).toBeTrue()
+      expect(yield* s.inbox).toEqual([])
+    })
+  }
 
   scenario("durably fails blocked local tools when a step is interrupted", function* (s) {
     yield* s.admit("Interrupt blocked tool")

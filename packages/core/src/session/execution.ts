@@ -183,7 +183,14 @@ export const layer = Layer.effect(
               inputID === undefined ? undefined : () => SessionExecutionCapability.selectedInput(sessionID) === inputID,
           })
           // A refused conditional control must not wake somebody else's work.
-          if (!interrupted && inputID !== undefined) return false
+          if (inputID !== undefined) {
+            if (!interrupted) return false
+            // The interrupted drain may have consumed the doorbell for several
+            // queued inputs. Only the selected input was cancelled; let the
+            // native inbox continue every remaining admitted item.
+            if (yield* SessionInbox.nextPromotable(db, sessionID, "input")) yield* coordinator.wake(sessionID, "input")
+            return true
+          }
           if (!options?.resume) return interrupted
           // Resume steering input and between-turn control work from the interrupted
           // intent. Queued next-turn prompts stay parked: a steer-scoped drain never

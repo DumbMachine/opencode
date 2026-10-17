@@ -14,12 +14,12 @@ export interface Coordinator<Key, E, Reason = never> {
   /** Rings the doorbell: an idle key starts an execution; an active one drains again before settling. */
   readonly wake: (key: Key, scope?: Promotable) => Effect.Effect<void>
   /**
-   * Stops the active execution and clears its doorbell. No-op when idle. Resolves once the
+   * Stops the active execution. Session-wide interruption claims recorded wakes; conditional interruption preserves them. No-op when idle. Resolves once the
    * interruption is accepted, not when cleanup settles: the execution fiber finishes its
    * finalizers and settled hook on its own time. Returns whether an active execution was
    * interrupted. `awaitSettlement` waits for this execution's cleanup and settled hook,
    * without following fresh work admitted during cleanup. `awaitIdle` follows successors too.
-   * `when` is checked synchronously with stopping and clearing the doorbell. A false guard
+   * `when` is checked synchronously with stopping the execution. A false guard
    * leaves ownership, wakeups and interruption reason untouched and does not wait for settlement.
    * A conditional call after owner exit also leaves later wakes untouched, even when its guard is true.
    */
