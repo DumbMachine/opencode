@@ -27,6 +27,7 @@ import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { llmClient } from "../../effect/app-node-platform.js"
 import { ExecutionCapabilityUnavailableError, StepFailedError } from "../error.js"
 import { Mcp } from "../../mcp/index.js"
+import { SessionInputRequirements } from "../input-requirements.js"
 import { SessionExecutionCapability } from "../execution-capability.js"
 import { SessionRunnerRetry } from "./retry.js"
 import { SessionStep } from "./step.js"
@@ -262,6 +263,7 @@ const layer = Layer.effect(
         sessionID,
         preview.input ? [preview.input] : [],
         yield* SessionExecutionCapability.get(sessionID, preview.input?.type === "user" ? preview.input.id : undefined),
+        preview.messages,
       )
       if (!grant) return preview
       if (grant.mcp === undefined) return { ...preview, disclosure: structuredClone(grant.disclosure) }
@@ -273,6 +275,7 @@ const layer = Layer.effect(
       yield* InstructionState.prepare(db, bus, next.instructions, sessionID)
       const loaded = yield* context.load(next)
       if (loaded.input?.id !== grant.inputID) return yield* Effect.interrupt
+      yield* executionGrant(sessionID, [loaded.input], grant, loaded.messages)
       return { ...loaded, disclosure: structuredClone(grant.disclosure) }
     })
 
@@ -475,15 +478,25 @@ export const executionGrant = Effect.fn("SessionRunner.executionGrant")(function
     readonly capabilities?: readonly string[]
   }>,
   grant: SessionExecutionCapability.Grant | undefined,
+  history: ReadonlyArray<{
+    readonly id: SessionMessage.ID
+    readonly type: string
+    readonly capabilities?: readonly string[]
+  }> = [],
 ) {
+  const unsupported = [...history, ...messages].find(
+    (message) => message.type === "user" && !SessionInputRequirements.supported(message.capabilities),
+  )
+  if (unsupported) return yield* new ExecutionCapabilityUnavailableError({ sessionID, inputID: unsupported.id })
   const latest = [...messages].toReversed().find((message) => message.type === "user")
   const required = latest?.capabilities ?? []
-  if (!required.some((value) => value === "mcp" || value === "disclosure")) return undefined
+  if (required.length === 0) return undefined
   if (
     !grant ||
     latest?.id !== grant.inputID ||
     (required.includes("mcp") && grant.mcp === undefined) ||
-    (required.includes("disclosure") && grant.disclosure === undefined)
+    (required.includes("disclosure") && grant.disclosure === undefined) ||
+    !SessionInputRequirements.serviceSupported(grant.disclosure)
   )
     return yield* new ExecutionCapabilityUnavailableError({ sessionID, inputID: latest!.id })
   return grant

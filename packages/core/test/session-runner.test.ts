@@ -7232,3 +7232,24 @@ describe("SessionRunnerLLM", () => {
     expect(defect.message).toBe("Tool input delta before start: call-1")
   })
 })
+
+for (const capabilities of [["publication-v1"], ["unknown"], ["mcp", "mcp"]])
+  scenario(`rejects retained ${capabilities.join(",")} history shadowed by a newer ordinary input`, function* (s) {
+    for (const original of [sessionID, otherSessionID]) {
+      yield* insertSession(original)
+      const marked = SessionMessage.ID.create()
+      yield* s.bus.publish(SessionEvent.InboxEnqueued, {
+        sessionID: original,
+        inboxID: marked,
+        item: { type: "user", payload: { text: "Unsupported retained dependency", capabilities }, delivery: "steer" },
+      })
+      yield* s.bus.publish(SessionEvent.InboxDelivered, { sessionID: original, inboxID: marked })
+      yield* s.session.prompt({ sessionID: original, text: "New ordinary input", resume: false })
+      yield* s.session.resume(original).pipe(Effect.exit)
+      expect(s.requests).toHaveLength(0)
+      expect(s.executions).toEqual([])
+      const messages = yield* s.session.messages({ sessionID: original })
+      expect(messages.some((message) => message.type === "user" && message.id === marked)).toBe(true)
+      expect(messages.filter((message) => message.type === "assistant")).toHaveLength(0)
+    }
+  })

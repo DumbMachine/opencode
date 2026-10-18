@@ -1244,13 +1244,21 @@ describe("Repaired input resumption", () => {
       yield* setup
       const session = yield* Session.Service
       const { db } = yield* Database.Service
-      const input = yield* session.prompt({ sessionID, text: "Retired original", mcp: {}, mcpRevision: 1, resume: false })
+      const input = yield* session.prompt({
+        sessionID,
+        text: "Retired original",
+        mcp: {},
+        mcpRevision: 1,
+        resume: false,
+      })
       const claim = "retiring-repair"
       yield* session.beginInboxCapabilityRenewal({ sessionID, inboxID: input.id, claim })
       yield* session.renewInboxCapability({ sessionID, inboxID: input.id, claim, mcp: {}, revision: 2 })
       yield* SessionLifecycle.retire(db, sessionID)
       wakeCalls.length = 0
-      const error = yield* session.resumeInboxCapability({ sessionID, inboxID: input.id, claim, revision: 2 }).pipe(Effect.flip)
+      const error = yield* session
+        .resumeInboxCapability({ sessionID, inboxID: input.id, claim, revision: 2 })
+        .pipe(Effect.flip)
       expect(error._tag).toBe("Session.NotFoundError")
       expect(wakeCalls).toEqual([])
       expect(yield* admitted(input.id)).toBeDefined()
@@ -1263,19 +1271,25 @@ describe("Repaired input resumption", () => {
       const { db } = yield* Database.Service
       const bus = yield* Bus.Service
       for (const mode of ["mcp", "disclosure"]) {
-        const config = mode === "disclosure"
-          ? {
-              version: 1 as const,
-              endpoint: "https://host.example.test/context",
-              token: "synthetic-private-token",
-              issuer: "host",
-              audience: "native",
-              keys: [{ id: "key", algorithm: "Ed25519" as const, publicKey: "a".repeat(43) }],
-            }
-          : undefined
+        const config =
+          mode === "disclosure"
+            ? {
+                version: 1 as const,
+                endpoint: "https://host.example.test/context",
+                token: "synthetic-private-token",
+                issuer: "host",
+                audience: "native",
+                keys: [{ id: "key", algorithm: "Ed25519" as const, publicKey: "a".repeat(43) }],
+              }
+            : undefined
         const input = yield* session.prompt({
-          sessionID, text: "Keep the exact original", delivery: "queue", mcp: {},
-          disclosure: config, mcpRevision: 1, resume: false,
+          sessionID,
+          text: "Keep the exact original",
+          delivery: "queue",
+          mcp: {},
+          disclosure: config,
+          mcpRevision: 1,
+          resume: false,
         })
         const original = yield* admitted(input.id)
         wakeCalls.length = 0
@@ -1285,7 +1299,14 @@ describe("Repaired input resumption", () => {
         const claim = "repair-" + mode
         yield* session.beginInboxCapabilityRenewal({ sessionID, inboxID: input.id, claim })
         expect((yield* Effect.exit(resume(claim, 1)))._tag).toBe("Failure")
-        yield* session.renewInboxCapability({ sessionID, inboxID: input.id, claim, mcp: {}, disclosure: config, revision: 2 })
+        yield* session.renewInboxCapability({
+          sessionID,
+          inboxID: input.id,
+          claim,
+          mcp: {},
+          disclosure: config,
+          revision: 2,
+        })
         expect(wakeCalls).toEqual([])
         expect((yield* Effect.exit(resume("stale", 2)))._tag).toBe("Failure")
         expect((yield* Effect.exit(resume(claim, 1)))._tag).toBe("Failure")
@@ -1381,6 +1402,113 @@ describe("Disclosure input admission", () => {
       ).toBe("Session.PromptConflictError")
       expect((yield* admitted(original.id))?.payload).toMatchObject({ text: "Ordinary original" })
       expect(yield* SessionExecutionCapability.get(sessionID, original.id)).toBeUndefined()
+    }),
+  )
+})
+
+describe("Publication requirement compatibility", () => {
+  const disclosure = {
+    version: 1 as const,
+    endpoint: "https://host.example.test/preflight",
+    token: "private",
+    issuer: "host",
+    audience: "context",
+    keys: [{ id: "key", algorithm: "Ed25519" as const, publicKey: "a".repeat(43) }],
+  }
+  it.effect("rejects unsupported service and marker requests before changing an original grant or waking", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* Session.Service
+      const database = yield* Database.Service
+      const original = yield* session.prompt({
+        sessionID,
+        text: "Original",
+        mcp: {},
+        disclosure,
+        mcpRevision: 1,
+        resume: false,
+      })
+      const before = yield* SessionExecutionCapability.get(sessionID, original.id)
+      wakeCalls.length = 0
+      for (const input of [
+        { disclosure: { ...disclosure, publicationVersion: 1 as const }, mcp: {}, mcpRevision: 2 },
+        { capabilities: ["publication-v1"] },
+        { capabilities: ["mcp", "disclosure", "publication-v1"] },
+        { capabilities: ["unknown"] },
+        { capabilities: ["mcp", "mcp"] },
+      ]) {
+        expect((yield* session.prompt({ sessionID, text: "Unsupported", ...input }).pipe(Effect.exit))._tag).toBe(
+          "Failure",
+        )
+        expect(
+          (yield* session.prompt({ sessionID, id: original.id, text: "Replacement", ...input }).pipe(Effect.exit))._tag,
+        ).toBe("Failure")
+      }
+      expect(yield* SessionExecutionCapability.get(sessionID, original.id)).toEqual(before)
+      expect(yield* session.inbox(sessionID)).toHaveLength(1)
+      expect(wakeCalls).toEqual([])
+      // Omitted credentials are still a receipt-only retry, never replacement.
+      expect((yield* session.prompt({ sessionID, id: original.id, text: "Ignored", resume: false })).payload).toEqual(
+        original.payload,
+      )
+      expect(yield* SessionExecutionCapability.get(sessionID, original.id)).toEqual(before)
+      const inbox = yield* SessionInbox.make()
+      expect(
+        (yield* inbox
+          .admit({
+            id: SessionMessage.ID.create(),
+            sessionID,
+            item: {
+              type: "user",
+              payload: { text: "Unsupported internal input", capabilities: ["publication-v1"] },
+              delivery: "steer",
+            },
+          })
+          .pipe(Effect.exit))._tag,
+      ).toBe("Failure")
+      expect(yield* session.inbox(sessionID)).toHaveLength(1)
+      const claim = "supported-original-claim"
+      yield* session.beginInboxCapabilityRenewal({ sessionID, inboxID: original.id, claim })
+      yield* session.renewInboxCapability({ sessionID, inboxID: original.id, claim, mcp: {}, disclosure, revision: 2 })
+      const repaired = yield* SessionExecutionCapability.get(sessionID, original.id)
+      expect(
+        (yield* session
+          .renewInboxCapability({
+            sessionID,
+            inboxID: original.id,
+            claim,
+            mcp: {},
+            disclosure: { ...disclosure, publicationVersion: 1 },
+            revision: 2,
+          })
+          .pipe(Effect.exit))._tag,
+      ).toBe("Failure")
+      expect(yield* SessionExecutionCapability.get(sessionID, original.id)).toEqual(repaired)
+      // An unsupported retained row can be read, but cannot claim, resume or execute.
+      yield* database.db
+        .update(SessionInboxTable)
+        .set({ payload: { ...original.payload, capabilities: ["mcp", "disclosure", "publication-v1"] } })
+        .where(eq(SessionInboxTable.id, original.id))
+        .run()
+        .pipe(Effect.orDie)
+      expect(yield* session.inbox(sessionID)).toHaveLength(1)
+      expect(
+        (yield* session
+          .beginInboxCapabilityRenewal({ sessionID, inboxID: original.id, claim: "unsupported" })
+          .pipe(Effect.exit))._tag,
+      ).toBe("Failure")
+      expect(yield* SessionExecutionCapability.get(sessionID, original.id)).toEqual(repaired)
+      expect(
+        (yield* session
+          .resumeInboxCapability({ sessionID, inboxID: original.id, claim, revision: 2 })
+          .pipe(Effect.exit))._tag,
+      ).toBe("Failure")
+      expect((yield* session.prompt({ sessionID, id: original.id, text: "Ignored" }).pipe(Effect.exit))._tag).toBe(
+        "Failure",
+      )
+      expect(yield* SessionInbox.promotionInput(database.db, sessionID, "input")).toBe("blocked")
+      expect(wakeCalls).toEqual([])
+      yield* SessionExecutionCapability.clear(sessionID)
     }),
   )
 })

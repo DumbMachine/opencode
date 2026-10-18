@@ -26,6 +26,7 @@ import { State } from "../state.js"
 import { Token } from "../util/token.js"
 import type { SessionContext } from "./context.js"
 import { SessionEvent } from "./event.js"
+import { SessionInputRequirements } from "./input-requirements.js"
 import { SessionHistory } from "./history.js"
 import type { SessionMessage } from "./message.js"
 import { SessionModelRequest } from "./model-request.js"
@@ -204,8 +205,10 @@ export const layer = Layer.effect(
       if (trigger.reason === "auto" && !due(context, ceiling)) return { status: "skipped" }
       if (
         context.disclosure !== undefined ||
-        (context.input?.type === "user" && context.input.capabilities?.includes("disclosure")) ||
-        context.messages.some((message) => message.type === "user" && message.capabilities?.includes("disclosure")) ||
+        (context.input?.type === "user" && SessionInputRequirements.auxiliaryBlocked(context.input.capabilities)) ||
+        context.messages.some(
+          (message) => message.type === "user" && SessionInputRequirements.auxiliaryBlocked(message.capabilities),
+        ) ||
         (yield* SessionHistory.requiresDisclosure(db, context.session.id))
       )
         return {

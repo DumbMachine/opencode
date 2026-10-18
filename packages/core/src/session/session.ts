@@ -26,6 +26,7 @@ import { SessionEvent } from "./event.js"
 import { SessionExecutionCapability } from "./execution-capability.js"
 import { SessionExecution } from "./execution.js"
 import { SessionInbox } from "./inbox.js"
+import { SessionInputRequirements } from "./input-requirements.js"
 import { SessionLifecycle } from "./lifecycle.js"
 import { SessionMessage } from "./message.js"
 import { SessionPrompt } from "./prompt.js"
@@ -204,7 +205,11 @@ export const make = Effect.fn("Session.make")(function* () {
     Effect.uninterruptibleMask((restore) =>
       Effect.gen(function* () {
         const session = yield* get(sessionID)
-        if (input.disclosure !== undefined && input.mcpRevision === undefined)
+        if (
+          !SessionInputRequirements.supported(input.capabilities) ||
+          !SessionInputRequirements.serviceSupported(input.disclosure) ||
+          (input.disclosure !== undefined && input.mcpRevision === undefined)
+        )
           return yield* new PromptConflictError({ sessionID, messageID: input.id ?? SessionMessage.ID.create() })
         const messageID = input.id ?? SessionMessage.ID.create()
         const request = {
@@ -239,6 +244,8 @@ export const make = Effect.fn("Session.make")(function* () {
             sessionID,
             Effect.gen(function* () {
               const current = yield* admission.reconcile(request)
+              if (current?.type === "user" && !SessionInputRequirements.supported(current.payload.capabilities))
+                return yield* new SessionInbox.LifecycleConflict({ id: messageID })
               if (!current && !item) return yield* new SessionInbox.LifecycleConflict({ id: messageID })
               if (!current) {
                 const latest = yield* get(sessionID)
@@ -247,10 +254,7 @@ export const make = Effect.fn("Session.make")(function* () {
               const admitted = current ?? (yield* admission.admit({ id: messageID, sessionID, item: item! }))
               if (input.mcp !== undefined || input.disclosure !== undefined) {
                 const required = admitted.payload.capabilities ?? []
-                if (
-                  (input.mcp !== undefined) !== required.includes("mcp") ||
-                  (input.disclosure !== undefined) !== required.includes("disclosure")
-                )
+                if (!SessionInputRequirements.matches(required, input))
                   return yield* new SessionInbox.LifecycleConflict({ id: messageID })
                 const installed = yield* SessionExecutionCapability.set(sessionID, {
                   inputID: admitted.id,

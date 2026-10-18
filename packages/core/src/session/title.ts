@@ -11,6 +11,7 @@ import { isExactRootFallback } from "@opencode/util/session-title-fallback"
 import { llmClient } from "../effect/app-node-platform.js"
 import { SessionContext } from "./context.js"
 import { SessionEvent } from "./event.js"
+import { SessionInputRequirements } from "./input-requirements.js"
 import { SessionHistory } from "./history.js"
 import type { SessionRunnerModel } from "./runner/model.js"
 import type { SessionMessage } from "./message.js"
@@ -112,8 +113,10 @@ export const layer = Layer.effect(
         ? yield* store.context(session.id).pipe(Effect.orElseSucceed(() => undefined))
         : undefined
       if (
-        firstUser.capabilities?.includes("disclosure") ||
-        messages?.some((message) => message.type === "user" && message.capabilities?.includes("disclosure")) ||
+        SessionInputRequirements.auxiliaryBlocked(firstUser.capabilities) ||
+        messages?.some(
+          (message) => message.type === "user" && SessionInputRequirements.auxiliaryBlocked(message.capabilities),
+        ) ||
         (yield* SessionHistory.requiresDisclosure(db, sessionID))
       )
         return yield* Effect.die(new Error("Execution context authorization is unavailable for title generation"))

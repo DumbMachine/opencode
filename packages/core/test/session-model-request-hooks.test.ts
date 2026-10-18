@@ -290,3 +290,40 @@ describe("SessionModelRequest disclosure boundary", () => {
       }).pipe(Effect.provideService(SessionModelTransport.Service, transport)),
   )
 })
+
+it.effect("rejects unsupported publication requirements before context hooks or host requests", () =>
+  Effect.gen(function* () {
+    let hooked = 0,
+      contacted = 0
+    const host = disclosureHost({
+      observe: () => {
+        contacted++
+      },
+    })
+    try {
+      const hooks = yield* PluginHooks.Service
+      yield* hooks.register("session", "context", () =>
+        Effect.sync(() => {
+          hooked++
+        }),
+      )
+      const requests = yield* SessionModelRequest.Service.pipe(Effect.provide(SessionModelRequest.layer))
+      const result = yield* requests
+        .primary({
+          session,
+          inputID: SessionMessage.ID.create(),
+          agent: Agent.ID.make("build"),
+          model,
+          disclosure: { ...host.config, publicationVersion: 1 },
+          system: [],
+          messages: [],
+        })
+        .pipe(Effect.exit)
+      expect(result._tag).toBe("Failure")
+      expect(hooked).toBe(0)
+      expect(contacted).toBe(0)
+    } finally {
+      host.server.stop(true)
+    }
+  }).pipe(Effect.provideService(SessionModelTransport.Service, transport)),
+)

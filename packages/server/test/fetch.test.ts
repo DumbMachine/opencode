@@ -112,6 +112,7 @@ it.live("serves the HttpApi and enforces Basic auth like the Node server", () =>
     expect(response.headers.get("x-opencode-session-retirement")).toBe("1")
     expect(response.headers.get("x-opencode-inbox-capability-renewal")).toBe("2")
     expect(response.headers.get("x-opencode-context-preflight")).toBe("1")
+    expect(response.headers.get("x-opencode-context-publication")).toBeNull()
     expect(response.headers.get("x-opencode-input-capability-resume")).toBe("1")
     expect(response.headers.get("x-opencode-model-budget")).toBe(
       process.env.OPENCODE_MODEL_BUDGET_ENDPOINT && process.env.OPENCODE_MODEL_BUDGET_TOKEN ? "4" : null,
@@ -631,12 +632,24 @@ it.live("installs and renews only original disclosure components without exposin
       const base = `/api/session/${id}`
       const input = `msg_${id}`
       const prompt = { id: input, text: "Original request", mcp: {}, disclosure: config, mcpRevision: 1, resume: false }
+      expect(
+        (yield* request(base + "/prompt", "POST", {
+          ...prompt,
+          id: `msg_future_${id}`,
+          text: "Unsupported publication",
+          disclosure: { ...config, publicationVersion: 1 },
+        })).status,
+      ).toBe(409)
       const admitted = yield* request(base + "/prompt", "POST", prompt)
       expect(admitted.status).toBe(200)
       const admittedBody = yield* Effect.promise(() => admitted.text())
       expect(admittedBody).toContain('"disclosure"')
       expect(admittedBody).not.toContain(config.token)
       expect(admittedBody).not.toContain(config.endpoint)
+      expect(
+        (yield* request(base + "/prompt", "POST", { ...prompt, disclosure: { ...config, publicationVersion: 1 } }))
+          .status,
+      ).toBe(409)
       const inbox = yield* request(base + "/inbox", "GET")
       expect(yield* Effect.promise(() => inbox.text())).not.toContain(config.token)
       expect(
@@ -648,6 +661,10 @@ it.live("installs and renews only original disclosure components without exposin
       expect((yield* request(path + "/claim", "POST", { claim })).status).toBe(200)
       expect((yield* request(path, "PUT", { mcp: {}, revision: 2, claim })).status).toBe(409)
       expect((yield* request(path, "PUT", { mcp: {}, disclosure: config, revision: 2, claim })).status).toBe(204)
+      expect(
+        (yield* request(path, "PUT", { mcp: {}, disclosure: { ...config, publicationVersion: 1 }, revision: 2, claim }))
+          .status,
+      ).toBe(409)
       expect((yield* request(path, "PUT", { mcp: {}, disclosure: config, revision: 2, claim })).status).toBe(204)
       expect(
         (yield* request(base + "/command", "POST", {

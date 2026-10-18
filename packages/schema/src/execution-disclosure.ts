@@ -22,6 +22,8 @@ export const Service = Schema.Struct({
   version: Schema.Literal(1),
   endpoint: bounded(2048),
   token: bounded(16384),
+  // Recognized requirement; admission/execution support is negotiated separately.
+  publicationVersion: Schema.Literal(1).pipe(optional),
   issuer: bounded(512),
   audience: bounded(512),
   keys: Schema.Array(VerificationKey).check(Schema.isMinLength(1), Schema.isMaxLength(8)),

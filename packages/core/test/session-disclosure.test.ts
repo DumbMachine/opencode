@@ -128,3 +128,20 @@ describe("Session disclosure preflight", () => {
     }
   })
 })
+
+test("does not request preflight for a recognized but unsupported publication service", async () => {
+  let calls = 0
+  const host = disclosureHost({
+    observe: () => {
+      calls++
+    },
+  })
+  try {
+    await expect(
+      Effect.runPromise(SessionDisclosure.prepare({ ...host.config, publicationVersion: 1 }, request())),
+    ).rejects.toThrow("Execution context authorization is unavailable")
+    expect(calls).toBe(0)
+  } finally {
+    host.server.stop(true)
+  }
+})

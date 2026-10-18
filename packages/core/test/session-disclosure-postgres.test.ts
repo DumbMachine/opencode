@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test"
 import { Context, Effect, Layer } from "effect"
-import { eq } from "drizzle-orm"
+import { eq, sql } from "drizzle-orm"
 import { Database } from "@opencode/core/database/database"
 import { Global } from "@opencode/util/global"
 import { AbsolutePath } from "@opencode/core/schema"
@@ -31,7 +31,7 @@ test.skipIf(!url)(
             .onConflictDoNothing()
             .run()
             .pipe(Effect.orDie)
-          for (let index = 0; index < 2; index++) {
+          for (const capabilities of [["disclosure"], ["publication-v1"], ["unknown"], ["mcp", "mcp"]]) {
             const id = SessionSchema.ID.create()
             yield* db
               .insert(SessionTable)
@@ -62,13 +62,40 @@ test.skipIf(!url)(
                   session_id: id,
                   type: "user",
                   seq: 2,
-                  data: { text: "Protected original", capabilities: ["disclosure"], time: { created: 1 } },
+                  data: { text: "Protected original", capabilities, time: { created: 1 } },
                 })
                 .run()
                 .pipe(Effect.orDie)
               const selected = yield* SessionHistory.preview(db, id, Instructions.combine([]), "local")
               expect(selected.requiresDisclosure).toBe(true)
               expect(selected.messages.some((message) => message.id === marked)).toBe(true)
+              for (const [requirement, blocked, nodeType] of [
+                [undefined, false, null],
+                [[], false, "array"],
+                [["mcp"], false, "array"],
+                ['["mcp"]', true, "text"],
+                [null, true, "null"],
+                [{}, true, "object"],
+                [true, true, "true"],
+                [false, true, "false"],
+                [42, true, "integer"],
+                [1.5, true, "real"],
+                [["mcp", 1], true, "array"],
+              ] as const) {
+                const data = JSON.stringify({
+                  text: "Retained malformed requirement",
+                  ...(requirement === undefined ? {} : { capabilities: requirement }),
+                  time: { created: 1 },
+                })
+                yield* db.run(sql`UPDATE session_message SET data=${data} WHERE id=${marked}`).pipe(Effect.orDie)
+                expect(yield* SessionHistory.requiresDisclosure(db, id)).toBe(blocked)
+                const row = yield* db
+                  .get<{
+                    kind: string | null
+                  }>(sql`SELECT json_type(data,'$.capabilities') AS kind FROM session_message WHERE id=${marked}`)
+                  .pipe(Effect.orDie)
+                expect(row?.kind).toBe(nodeType)
+              }
               yield* db.delete(SessionMessageTable).where(eq(SessionMessageTable.id, marked)).run().pipe(Effect.orDie)
               expect(yield* SessionHistory.requiresDisclosure(db, id)).toBe(false)
               expect(selected.requiresDisclosure).toBe(true)

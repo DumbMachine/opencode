@@ -25,6 +25,7 @@ import { SessionEvent } from "./event.js"
 import { SessionMessage } from "./message.js"
 import { SessionExecutionCapability } from "./execution-capability.js"
 import { SessionSchema } from "./schema.js"
+import { SessionInputRequirements } from "./input-requirements.js"
 import { SessionLifecycle } from "./lifecycle.js"
 import { NotFoundError } from "./error.js"
 import { SessionInboxTable, SessionMessageTable } from "./sql.js"
@@ -70,6 +71,9 @@ export const serialized = <A, E, R>(sessionID: SessionSchema.ID, effect: Effect.
 export class LifecycleConflict extends Schema.TaggedError<LifecycleConflict>()("SessionInbox.LifecycleConflict", {
   id: SessionMessage.ID,
 }) {}
+
+const supportedItem = (item: Item | Info) =>
+  item.type !== "user" || SessionInputRequirements.supported(item.payload.capabilities)
 
 function matches<Type extends Item["type"]>(
   stored: Info,
@@ -178,7 +182,11 @@ export const make = Effect.fn("SessionInbox.make")(function* () {
     readonly item: Item & { readonly type: Type }
   }) {
     const existing = yield* reconcile({ ...request, type: request.item.type, delivery: request.item.delivery })
-    if (existing !== undefined) return existing
+    if (existing !== undefined) {
+      if (!supportedItem(existing)) return yield* new LifecycleConflict({ id: request.id })
+      return existing
+    }
+    if (!supportedItem(request.item)) return yield* new LifecycleConflict({ id: request.id })
     const admitted = yield* bus
       .publish(SessionEvent.InboxEnqueued, {
         inboxID: request.id,
@@ -203,7 +211,7 @@ export const make = Effect.fn("SessionInbox.make")(function* () {
             : Effect.die(defect)
         }),
       )
-    if (!matches(admitted, { ...request, type: request.item.type }))
+    if (!matches(admitted, { ...request, type: request.item.type }) || !supportedItem(admitted))
       return yield* new LifecycleConflict({ id: request.id })
     return admitted
   })
@@ -244,7 +252,8 @@ export const make = Effect.fn("SessionInbox.make")(function* () {
           if (
             pending?.sessionID !== input.sessionID ||
             pending.type !== "user" ||
-            !pending.payload.capabilities?.some((value) => value === "mcp" || value === "disclosure")
+            !pending.payload.capabilities?.length ||
+            !SessionInputRequirements.supported(pending.payload.capabilities)
           )
             return yield* new LifecycleConflict({ id: input.id })
           const renewal = yield* SessionExecutionCapability.beginRenewal(input.sessionID, input.id, input.claim)
@@ -269,6 +278,8 @@ export const make = Effect.fn("SessionInbox.make")(function* () {
         input.sessionID,
         Effect.gen(function* () {
           yield* SessionLifecycle.check(db, input.sessionID)
+          if (!SessionInputRequirements.serviceSupported(input.disclosure))
+            return yield* new LifecycleConflict({ id: input.id })
           const grant = { inputID: input.id, mcp: input.mcp, disclosure: input.disclosure, revision: input.revision }
           if (input.claim && (yield* SessionExecutionCapability.committedRenewal(input.sessionID, grant, input.claim)))
             return
@@ -276,15 +287,12 @@ export const make = Effect.fn("SessionInbox.make")(function* () {
           if (
             pending?.sessionID !== input.sessionID ||
             pending.type !== "user" ||
-            !pending.payload.capabilities?.some((value) => value === "mcp" || value === "disclosure")
+            !pending.payload.capabilities?.length ||
+            !SessionInputRequirements.supported(pending.payload.capabilities)
           )
             return yield* new LifecycleConflict({ id: input.id })
           const required = pending.payload.capabilities ?? []
-          if (
-            (input.mcp !== undefined) !== required.includes("mcp") ||
-            (input.disclosure !== undefined) !== required.includes("disclosure")
-          )
-            return yield* new LifecycleConflict({ id: input.id })
+          if (!SessionInputRequirements.matches(required, input)) return yield* new LifecycleConflict({ id: input.id })
           // Claim readiness before the host changes its issuer row. An
           // unversioned request cannot bypass an interrupted claimed handoff.
           if (!input.claim) return yield* new LifecycleConflict({ id: input.id })
@@ -679,7 +687,7 @@ const readyRows = (sessionID: SessionSchema.ID, rows: ReadonlyArray<typeof Sessi
       const input = fromRow(row)
       if (
         input.type === "user" &&
-        input.payload.capabilities?.some((value) => value === "mcp" || value === "disclosure") &&
+        (input.payload.capabilities?.length ?? 0) > 0 &&
         !(yield* SessionExecutionCapability.ready(sessionID, input.id, input.payload.capabilities))
       )
         return false

@@ -14341,6 +14341,10 @@
             "minLength": 1,
             "maxLength": 16384
           },
+          "publicationVersion": {
+            "type": "number",
+            "enum": [1]
+          },
           "issuer": {
             "type": "string",
             "minLength": 1,

@@ -39,6 +39,7 @@ import { SessionSystemPrompt } from "./system-prompt.js"
 import { toLLMMessages } from "./runner/to-llm-message.js"
 import type { SessionMessage } from "./message.js"
 import type { ExecutionDisclosure } from "@opencode/schema/execution-disclosure"
+import { SessionInputRequirements } from "./input-requirements.js"
 import { SessionDisclosure } from "./disclosure.js"
 
 const IMAGE_BYTES_TRIGGER = 25 * 1024 * 1024 // 25 MiB
@@ -216,6 +217,8 @@ export const layer = Layer.effect(
     const prepare = Effect.fn("SessionModelRequest.prepare")(function* <
       S extends SessionRequest & { tools?: Definitions },
     >(kind: SessionRequestKind, input: Input, shape: (draft: SessionRequest, tools: Definitions) => Effect.Effect<S>) {
+      if (!SessionInputRequirements.serviceSupported(input.disclosure))
+        return yield* Effect.die(new Error("Execution publication authorization is unavailable"))
       const inputID = input.inputID
       const session = input.session
       const model = input.model

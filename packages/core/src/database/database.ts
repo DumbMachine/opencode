@@ -295,6 +295,15 @@ const postgresService = (url: string) =>
         CREATE OR REPLACE FUNCTION json_extract(doc text, path text) RETURNS text IMMUTABLE LANGUAGE sql AS $$
           SELECT (doc::jsonb #>> string_to_array(trim(leading '$.' from path), '.'))
         $$;
+        CREATE OR REPLACE FUNCTION json_type(doc text, path text) RETURNS text IMMUTABLE LANGUAGE sql AS $$
+          SELECT CASE json_typeof(value)
+            WHEN 'string' THEN 'text'
+            WHEN 'number' THEN CASE WHEN value::text ~ '^-?[0-9]+$' THEN 'integer' ELSE 'real' END
+            WHEN 'boolean' THEN value::text
+            ELSE json_typeof(value)
+          END
+          FROM (SELECT doc::json #> string_to_array(trim(leading '$.' from path), '.') AS value) node
+        $$;
       `).withoutTransform
       const semaphore = yield* Effect.succeed(lockFor(url))
       yield* semaphore.withPermit(DatabaseMigration.apply(db, "postgres"))

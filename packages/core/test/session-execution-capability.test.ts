@@ -253,3 +253,48 @@ it.effect("captures the exact selected installation without changing input selec
     }
   }),
 )
+
+describe("Unsupported publication requirements", () => {
+  it.effect("never treats unknown or future publication markers as an executable grant", () =>
+    Effect.gen(function* () {
+      for (let index = 0; index < 2; index++) {
+        const session = Session.ID.create(),
+          input = SessionMessage.ID.create()
+        const grant = { inputID: input, mcp: {}, revision: 1 }
+        expect(yield* SessionExecutionCapability.set(session, grant)).toBe(true)
+        for (const capabilities of [
+          ["publication-v1"],
+          ["mcp", "disclosure", "publication-v1"],
+          ["unrecognized"],
+          ["mcp", "mcp"],
+        ]) {
+          expect(yield* SessionExecutionCapability.ready(session, input, capabilities)).toBe(false)
+          expect(
+            (yield* SessionRunnerLLM.executionGrant(session, [{ id: input, type: "user", capabilities }], grant).pipe(
+              Effect.flip,
+            ))._tag,
+          ).toBe("Session.ExecutionCapabilityUnavailableError")
+        }
+        const disclosure = {
+          version: 1 as const,
+          publicationVersion: 1 as const,
+          endpoint: "http://127.0.0.1/preflight",
+          token: "private",
+          issuer: "host",
+          audience: "context",
+          keys: [{ id: "key", algorithm: "Ed25519" as const, publicKey: "a".repeat(43) }],
+        }
+        expect(yield* SessionExecutionCapability.set(session, { ...grant, disclosure, revision: 2 })).toBe(false)
+        expect(yield* SessionExecutionCapability.get(session, input)).toEqual(grant)
+        expect(
+          (yield* SessionRunnerLLM.executionGrant(
+            session,
+            [{ id: input, type: "user", capabilities: ["mcp", "disclosure"] }],
+            { ...grant, disclosure },
+          ).pipe(Effect.flip))._tag,
+        ).toBe("Session.ExecutionCapabilityUnavailableError")
+        yield* SessionExecutionCapability.clear(session)
+      }
+    }),
+  )
+})

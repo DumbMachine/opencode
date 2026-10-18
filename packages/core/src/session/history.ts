@@ -1,5 +1,5 @@
 import { and, asc, desc, eq, gte, or, sql } from "drizzle-orm"
-import { Effect, Schema } from "effect"
+import { Effect, Option, Schema } from "effect"
 import { Database } from "../database/database.js"
 import { MessageDecodeError } from "./error.js"
 import { SessionMessage } from "./message.js"
@@ -7,6 +7,7 @@ import { SessionSchema } from "./schema.js"
 import { Instructions } from "../instructions/index.js"
 import { InstructionState } from "./instruction-state.js"
 import { SessionProviderContext } from "./provider-context.js"
+import { SessionInputRequirements } from "./input-requirements.js"
 import { SessionMessageTable } from "./sql.js"
 
 type DatabaseService = Database.Interface["db"]
@@ -186,7 +187,8 @@ export const preview = Effect.fn("SessionHistory.preview")(function* (
           messages: settled.map((entry) => entry.message),
           requiresDisclosure:
             settled.some(
-              (entry) => entry.message.type === "user" && entry.message.capabilities?.includes("disclosure"),
+              (entry) =>
+                entry.message.type === "user" && SessionInputRequirements.auxiliaryBlocked(entry.message.capabilities),
             ) || (yield* requiresDisclosure(db, sessionID)),
           instructionUpdate: assembled.update,
         }
@@ -214,23 +216,25 @@ export const firstUserMessage = Effect.fn("SessionHistory.firstUserMessage")(fun
 
 export * as SessionHistory from "./history.js"
 
-/** Auxiliary requests cannot borrow another input's disclosure service. */
+/** Auxiliary requests cannot borrow another input's service or ignore unsupported history. */
 export const requiresDisclosure = Effect.fn("SessionHistory.requiresDisclosure")(function* (
   db: DatabaseService,
   sessionID: SessionSchema.ID,
 ) {
-  const row = yield* db
-    .select({ id: SessionMessageTable.id })
+  const rows = yield* db
+    .select({
+      requirements: sql<string | null>`json_extract(${SessionMessageTable.data}, '$.capabilities')`,
+      nodeType: sql<string | null>`json_type(${SessionMessageTable.data}, '$.capabilities')`,
+    })
     .from(SessionMessageTable)
-    .where(
-      and(
-        eq(SessionMessageTable.session_id, sessionID),
-        eq(SessionMessageTable.type, "user"),
-        sql`json_extract(${SessionMessageTable.data}, '$.capabilities') LIKE '%"disclosure"%'`,
-      ),
-    )
-    .limit(1)
-    .get()
+    .where(and(eq(SessionMessageTable.session_id, sessionID), eq(SessionMessageTable.type, "user")))
+    .all()
     .pipe(Effect.orDie)
-  return row !== undefined
+  const decode = Schema.decodeUnknownOption(Schema.fromJsonString(Schema.Array(Schema.String)))
+  return rows.some((row) => {
+    if (row.nodeType === null) return false
+    if (row.nodeType !== "array") return true
+    const required = decode(row.requirements)
+    return Option.isNone(required) || SessionInputRequirements.auxiliaryBlocked(required.value)
+  })
 })

@@ -4,6 +4,7 @@ import { Clock, Effect } from "effect"
 import { Hash } from "@opencode/util/hash"
 import { Mcp } from "@opencode/schema/mcp"
 import type { ExecutionDisclosure } from "@opencode/schema/execution-disclosure"
+import { SessionInputRequirements } from "./input-requirements.js"
 import { SessionMessage } from "./message.js"
 import { SessionSchema } from "./schema.js"
 
@@ -138,6 +139,8 @@ export const ready = (sessionID: SessionSchema.ID, inputID: SessionMessage.ID, r
     const renewal = renewals.get(renewalKey(sessionID, inputID))
     const grant = grants.get(sessionID)?.get(inputID)
     return (
+      SessionInputRequirements.supported(required) &&
+      SessionInputRequirements.serviceSupported(grant?.disclosure) &&
       (!renewal || renewal.committed !== undefined) &&
       grant !== undefined &&
       (!required.includes("mcp") || grant.mcp !== undefined) &&
@@ -207,6 +210,7 @@ export const set = (sessionID: SessionSchema.ID, grant: Grant) =>
   })
 
 function install(sessionID: SessionSchema.ID, grant: Grant) {
+  if (!SessionInputRequirements.serviceSupported(grant.disclosure)) return false
   if (grant.disclosure !== undefined && grant.revision === undefined) return false
   let inputs = grants.get(sessionID)
   if (!inputs) grants.set(sessionID, (inputs = new Map()))

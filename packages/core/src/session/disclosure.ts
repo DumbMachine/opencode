@@ -5,6 +5,7 @@ import { Effect, Schema } from "effect"
 import { LLMRequest, Media } from "@opencode/ai"
 import { ExecutionDisclosure } from "@opencode/schema/execution-disclosure"
 import { Hash } from "@opencode/util/hash"
+import { SessionInputRequirements } from "./input-requirements.js"
 import { SessionPublication } from "./publication.js"
 
 // Canonical ordering is for content identity, never a provenance assertion.
@@ -33,6 +34,7 @@ export const prepare = (
   Effect.tryPromise({
     try: async (signal) => {
       const config = Schema.decodeUnknownSync(ExecutionDisclosure.Service)(structuredClone(service))
+      if (!SessionInputRequirements.serviceSupported(config)) throw new Error()
       const endpoint = new URL(config.endpoint)
       if (
         endpoint.username ||
