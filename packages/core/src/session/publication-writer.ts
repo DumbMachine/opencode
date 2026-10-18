@@ -18,6 +18,10 @@ import { SessionPublicationAdmission } from "./publication-admission.js"
 
 const definitions = new Map<string, Event.Definition>(
   [
+    SessionEvent.Step.Started,
+    SessionEvent.Step.Streamed,
+    SessionEvent.Step.Ended,
+    SessionEvent.Step.Failed,
     SessionEvent.Text.Started,
     SessionEvent.Text.Delta,
     SessionEvent.Text.Ended,

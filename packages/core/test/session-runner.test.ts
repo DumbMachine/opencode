@@ -1113,8 +1113,8 @@ describe("SessionRunnerLLM", () => {
         yield* s.session.resume(originalID)
         expect(contexts).toHaveLength(1)
         expect(contexts[0]!.inputID).toBe(original.id)
-        expect(publications).toHaveLength(6)
-        expect(new Set(publications.map((unit) => unit.unitID)).size).toBe(6)
+        expect(publications).toHaveLength(9)
+        expect(new Set(publications.map((unit) => unit.unitID)).size).toBe(9)
         const rows = yield* s.db
           .select()
           .from(EventTable)
@@ -1124,8 +1124,8 @@ describe("SessionRunnerLLM", () => {
         const witnesses = rows.filter(
           (row) => row.type === Bus.versionedType(SessionEvent.PublicationCommitted.type, 1),
         )
-        expect(witnesses).toHaveLength(6)
-        expect(witnesses.map((row) => row.data.sequence)).toEqual([0, 1, 2, 3, 4, 5])
+        expect(witnesses).toHaveLength(9)
+        expect(witnesses.map((row) => row.data.sequence)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8])
         expect(witnesses.map((row) => row.data.unitID)).toEqual(publications.map((unit) => unit.unitID))
         for (const witness of witnesses) expect(witness.data.inputID).toBe(original.id)
         const context = yield* s.session.context(originalID)
@@ -1137,6 +1137,67 @@ describe("SessionRunnerLLM", () => {
       }
     }
   })
+  scenario(
+    "authorizes actual step failure before its projection and rejects a mismatched failure permit",
+    function* (s) {
+      for (const [index, deny] of [false, true].entries()) {
+        const originalID = deny ? otherSessionID : sessionID
+        yield* insertSession(originalID)
+        const publications: ExecutionDisclosure.PublicationRequest[] = []
+        const host = publicationHost({
+          observe: async (request) => {
+            const existing = await Effect.runPromise(
+              s.db.select().from(EventTable).where(eq(EventTable.aggregate_id, originalID)).all().pipe(Effect.orDie),
+            )
+            expect(existing.some((row) => row.id === request.unitID || row.data.unitID === request.unitID)).toBe(false)
+            publications.push(request)
+          },
+          mutate: (proof) =>
+            deny && publications.length === 3
+              ? { ...proof, inputID: SessionMessage.ID.make("msg_foreign_step_failure") }
+              : proof,
+        })
+        try {
+          yield* s.session.prompt({
+            sessionID: originalID,
+            text: `Failing original ${index}`,
+            disclosure: { ...host.config, compositionVersion: 1 },
+            mcpRevision: 7,
+            resume: false,
+          })
+          yield* s.llm.push([
+            LLMEvent.stepStart({ index: 0 }),
+            LLMEvent.providerError({ message: "Private provider failure detail" }),
+          ])
+          expect(Exit.isFailure(yield* s.session.resume(originalID).pipe(Effect.exit))).toBe(true)
+          expect(publications).toHaveLength(3)
+          const rows = yield* s.db
+            .select()
+            .from(EventTable)
+            .where(eq(EventTable.aggregate_id, originalID))
+            .all()
+            .pipe(Effect.orDie)
+          const witnesses = rows.filter(
+            (row) => row.type === Bus.versionedType(SessionEvent.PublicationCommitted.type, 1),
+          )
+          expect(witnesses).toHaveLength(deny ? 2 : 3)
+          const failures = rows.filter((row) => row.type === Bus.versionedType(SessionEvent.Step.Failed.type, 1))
+          expect(failures).toHaveLength(deny ? 0 : 1)
+          if (!deny)
+            expect(failures[0]!.data.error).toEqual({
+              type: "provider.unknown",
+              message: "Private provider failure detail",
+            })
+          else
+            expect(JSON.stringify(yield* s.session.context(originalID))).not.toContain(
+              "Private provider failure detail",
+            )
+        } finally {
+          host.server.stop(true)
+        }
+      }
+    },
+  )
   scenario("blocks actual streamed content when its publication permit belongs to another input", function* (s) {
     let calls = 0
     const host = publicationHost({

@@ -237,7 +237,7 @@ export const make = Effect.gen(function* () {
             : undefined
           if (record.failure) yield* publisher.publishStepFailure({ ...usage, snapshot, files })
           if (record.finish && usage && !record.failure)
-            yield* bus.publish(SessionEvent.Step.Ended, {
+            yield* publisher.endStep({
               sessionID: input.sessionID,
               assistantMessageID: yield* publisher.startAssistant(),
               finish: record.finish.finish,

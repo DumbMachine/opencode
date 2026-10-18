@@ -16,6 +16,7 @@ import { toSessionError } from "./to-session-error.js"
 import { UserInterruptedError } from "./error.js"
 import { SessionExecutionCapability } from "./execution-capability.js"
 import { SessionInbox } from "./inbox.js"
+import { SessionPublicationAdmission } from "./publication-admission.js"
 
 export interface State {
   readonly active: boolean
@@ -161,11 +162,12 @@ export const layer = Layer.effect(
               )
               return
             }
+            const session = yield* store.get(sessionID)
             yield* bus.publish(
               SessionEvent.Execution.Failed,
               {
                 sessionID,
-                error: outcome.error,
+                error: session?.contextPolicy ? SessionPublicationAdmission.rejectedExecution : outcome.error,
               },
               releaseOnCommit(sessionID),
             )

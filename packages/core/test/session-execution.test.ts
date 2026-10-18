@@ -22,8 +22,9 @@ import { SessionEvent } from "@opencode/core/session/event"
 import { SessionInbox } from "@opencode/core/session/inbox"
 import { SessionMessage } from "@opencode/core/session/message"
 import { SessionRunner } from "@opencode/core/session/runner/index"
-import { SessionInboxTable, SessionTable } from "@opencode/core/session/sql"
+import { SessionInboxTable, SessionLifecycleTable, SessionTable } from "@opencode/core/session/sql"
 import { SessionStore } from "@opencode/core/session/store"
+import { SessionPublicationAdmission } from "@opencode/core/session/publication-admission"
 import { Cause, Context, Deferred, Effect, Exit, Fiber, Layer, LayerMap, Option, Scope } from "effect"
 import { eq, sql } from "drizzle-orm"
 import { testEffect } from "./lib/effect"
@@ -34,7 +35,98 @@ const it = testEffect(
   ),
 )
 
+const policyIt = testEffect(
+  AppNodeBuilder.build(
+    LayerNode.group([Database.node, Bus.node, SessionStore.node, SessionInbox.node, Job.node, KV.node, Session.node]),
+    [Bus.node.replace(Bus.configured({ persist: true }))],
+  ),
+)
+
 describe("SessionExecution lifecycle", () => {
+  policyIt.effect("releases denied protected executions using only bounded source-free terminal data", () =>
+    Effect.gen(function* () {
+      const database = yield* Database.Service
+      const bus = yield* Bus.Service
+      const failures: SessionEvent.Execution.Failed[] = []
+      yield* bus.project(SessionEvent.Execution.Failed, (event) => Effect.sync(() => void failures.push(event)))
+      for (let index = 0; index < 2; index++) {
+        const sessionID = Session.ID.create()
+        yield* seedSessions(database, [sessionID])
+        yield* database.db
+          .update(SessionTable)
+          .set({ context_policy: { version: 1 } })
+          .where(eq(SessionTable.id, sessionID))
+          .run()
+          .pipe(Effect.orDie)
+        yield* database.db
+          .insert(SessionLifecycleTable)
+          .values({ id: sessionID, context_policy: { version: 1 } })
+          .run()
+          .pipe(Effect.orDie)
+        for (const error of [
+          { type: "provider.transport", message: "Sensitive provider detail" },
+          { ...SessionPublicationAdmission.rejectedExecution, status: 401 },
+          { ...SessionPublicationAdmission.rejectedExecution, private: "Sensitive raw error" },
+          { ...SessionPublicationAdmission.rejectedExecution, message: "Sensitive altered detail" },
+        ])
+          expect(
+            Exit.isFailure(yield* bus.publish(SessionEvent.Execution.Failed, { sessionID, error }).pipe(Effect.exit)),
+          ).toBe(true)
+        expect(
+          Exit.isFailure(
+            yield* bus
+              .publish(
+                SessionEvent.Execution.Failed,
+                {
+                  sessionID,
+                  error: SessionPublicationAdmission.rejectedExecution,
+                },
+                { metadata: { private: "Sensitive envelope" } },
+              )
+              .pipe(Effect.exit),
+          ),
+        ).toBe(true)
+        const inheritedError = new (class {
+          readonly privateDetail = "Sensitive inherited error"
+          readonly extra = "Sensitive extra"
+          get type() {
+            return SessionPublicationAdmission.rejectedExecution.type
+          }
+          get message() {
+            return SessionPublicationAdmission.rejectedExecution.message
+          }
+        })()
+        expect(
+          Exit.isFailure(
+            yield* bus.publish(SessionEvent.Execution.Failed, { sessionID, error: inheritedError }).pipe(Effect.exit),
+          ),
+        ).toBe(true)
+        const inheritedData = new (class {
+          readonly sessionID = sessionID
+          readonly privateDetail = "Sensitive inherited event"
+          get error() {
+            return SessionPublicationAdmission.rejectedExecution
+          }
+        })()
+        expect(Exit.isFailure(yield* bus.publish(SessionEvent.Execution.Failed, inheritedData).pipe(Effect.exit))).toBe(
+          true,
+        )
+        const raw = { sessionID, error: SessionPublicationAdmission.rejectedExecution, private: "Sensitive raw event" }
+        expect(Exit.isFailure(yield* bus.publish(SessionEvent.Execution.Failed, raw).pipe(Effect.exit))).toBe(true)
+        const scope = yield* Scope.make()
+        yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void))
+        const context = yield* buildExecution(scope, () => Effect.die(new Error("Sensitive provider detail")))
+        const execution = Context.get(context, SessionExecution.Service)
+        expect(Exit.isFailure(yield* execution.resume(sessionID).pipe(Effect.exit))).toBe(true)
+        yield* execution.awaitIdle(sessionID)
+        expect((yield* claims(database))[sessionID]).toBe(false)
+      }
+      expect(failures).toHaveLength(2)
+      for (const failure of failures) expect(failure.data.error).toEqual(SessionPublicationAdmission.rejectedExecution)
+      expect(JSON.stringify(failures)).not.toContain("Sensitive")
+    }),
+  )
+
   it.effect("provides captured ownership at runner invocation and into its child fibers", () =>
     Effect.gen(function* () {
       const database = yield* Database.Service

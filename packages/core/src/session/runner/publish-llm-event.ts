@@ -109,7 +109,7 @@ export const createLLMEventPublisher = (bus: Pick<Bus.Interface, "publish">, inp
   const startAssistant = Effect.fnUntraced(function* () {
     if (stepStarted) return assistantMessageID
     stepStarted = true
-    yield* bus.publish(SessionEvent.Step.Started, {
+    yield* publishContent(SessionEvent.Step.Started, {
       sessionID: input.sessionID,
       agent: input.agent,
       model: input.model,
@@ -122,7 +122,7 @@ export const createLLMEventPublisher = (bus: Pick<Bus.Interface, "publish">, inp
   const currentAssistantMessageID = () =>
     stepStarted ? Effect.succeed(assistantMessageID) : Effect.die(new Error("Tool event before assistant step start"))
   const streamed = Effect.fnUntraced(function* () {
-    yield* bus.publish(SessionEvent.Step.Streamed, {
+    yield* publishContent(SessionEvent.Step.Streamed, {
       sessionID: input.sessionID,
       assistantMessageID: yield* startAssistant(),
     })
@@ -392,7 +392,7 @@ export const createLLMEventPublisher = (bus: Pick<Bus.Interface, "publish">, inp
   }) {
     if (stepFailure === undefined) return
     const assistantMessageID = yield* startAssistant()
-    yield* bus.publish(SessionEvent.Step.Failed, {
+    yield* publishContent(SessionEvent.Step.Failed, {
       sessionID: input.sessionID,
       assistantMessageID,
       error: stepFailure,
@@ -612,6 +612,7 @@ export const createLLMEventPublisher = (bus: Pick<Bus.Interface, "publish">, inp
     failAssistant,
     failTool,
     publishStepFailure,
+    endStep: (data: Event.Data<typeof SessionEvent.Step.Ended>) => publishContent(SessionEvent.Step.Ended, data),
     failUnsettledTools,
     hasProviderError: () => providerFailed,
     hasStarted: () => stepStarted,
