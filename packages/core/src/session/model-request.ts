@@ -235,6 +235,7 @@ export const layer = Layer.effect(
     const hooks = yield* PluginHooks.Service
     const transport = yield* SessionModelTransport.Service
     const app = yield* App.Metadata
+    const client = Option.getOrUndefined(yield* Effect.serviceOption(LLMClient.Service))
     const prepare = Effect.fn("SessionModelRequest.prepare")(function* <
       S extends SessionRequest & { tools?: Definitions },
     >(
@@ -386,7 +387,6 @@ export const layer = Layer.effect(
           query: base.http?.query,
         }),
       })
-      const client = Option.getOrUndefined(yield* Effect.serviceOption(LLMClient.Service))
       const bounded = client?.prepareRequest ? yield* client.prepareRequest(routed).pipe(Effect.orDie) : routed
       const request =
         service === undefined

@@ -29,7 +29,7 @@ import { AbsolutePath } from "@opencode/core/schema"
 import { SessionModelRequest } from "@opencode/core/session/model-request"
 import { SessionModelTransport } from "@opencode/core/session/model-transport"
 import { SessionRunnerModel } from "@opencode/core/session/runner/model"
-import { DateTime, Effect, Fiber, Layer, Schema, Stream } from "effect"
+import { DateTime, Effect, Fiber, Layer, Option, Schema, Stream } from "effect"
 import { HttpClientRequest, HttpClientResponse } from "effect/unstable/http"
 import { testEffect } from "./lib/effect"
 import { PluginTestLayer } from "./plugin/fixture"
@@ -832,7 +832,10 @@ it.effect("signs the exact budget-shaped request that reaches the real provider 
         limit: { context: 200_000, output: 32_000 },
       },
     )
-    const requests = yield* SessionModelRequest.Service.pipe(Effect.provide(SessionModelRequest.layer))
+    const requests = yield* SessionModelRequest.Service.pipe(
+      Effect.provide(SessionModelRequest.layer),
+      Effect.provideService(LLMClient.Service, budget),
+    )
     for (const maxTokens of [undefined, 5000, 32]) {
       const inputID = SessionMessage.ID.make("msg_budget_composition_" + String(maxTokens))
       const payload = yield* NativeProducer.prepareInput({
@@ -866,20 +869,20 @@ it.effect("signs the exact budget-shaped request that reaches the real provider 
                 event.options.maxTokens = maxTokens
               }),
             )
-      const prepared = yield* requests
-        .primary({
-          ...captured,
-          session,
-          inputID,
-          agent: Agent.ID.make("build"),
-          model: resolved,
-          disclosure: service,
-          disclosureMessages: [message],
-          disclosureComponents: [{ kind: "message", id: inputID, revision: Hash.sha256(JSON.stringify(message)) }],
-          system: [],
-          messages: [Message.effort({ effort: "high" }), ...toLLMMessages([message], resolved.ref, "test")],
-        })
-        .pipe(Effect.provideService(LLMClient.Service, budget))
+      // Graph dependencies exist during construction, outside this caller context.
+      expect(Option.isNone(yield* Effect.serviceOption(LLMClient.Service))).toBe(true)
+      const prepared = yield* requests.primary({
+        ...captured,
+        session,
+        inputID,
+        agent: Agent.ID.make("build"),
+        model: resolved,
+        disclosure: service,
+        disclosureMessages: [message],
+        disclosureComponents: [{ kind: "message", id: inputID, revision: Hash.sha256(JSON.stringify(message)) }],
+        system: [],
+        messages: [Message.effort({ effort: "high" }), ...toLLMMessages([message], resolved.ref, "test")],
+      })
       if (registration) yield* registration.dispose
       expect(prepared.request.generation?.maxTokens).toBe(maxTokens === 32 ? 32 : 128)
       expect(prepared.request.generation?.temperature).toBe(0.4)
