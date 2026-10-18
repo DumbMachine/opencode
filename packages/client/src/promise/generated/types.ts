@@ -615,6 +615,33 @@ export type SessionViewed = {
   data: { sessionID: string; idle: number }
 }
 
+export type SessionPublicationCommitted = {
+  id: string
+  created: number
+  metadata?: { [x: string]: any }
+  type: "session.publication.committed"
+  durable: { aggregateID: string; seq: number; version: 1 }
+  location?: LocationRef
+  data: {
+    sessionID: string
+    inputID: string
+    attempt: string
+    contextReference: string
+    contextDigest: string
+    componentsDigest: string
+    capabilityID: string
+    capabilityGeneration: number
+    unitID: string
+    unitDigest: string
+    receiptReference: string
+    authorizationVersion: string
+    manifestBinding: string
+    audienceBinding: string
+    sequence: number
+    batch: { operation: "durable-event"; length: 2 } | { operation: "ephemeral-event"; length: 1 }
+  }
+}
+
 export type SessionDeleted = {
   id: string
   created: number
@@ -2360,6 +2387,7 @@ export type SessionEventDurable =
   | SessionMetadataUpdated
   | SessionPermissions
   | SessionViewed
+  | SessionPublicationCommitted
   | SessionDeleted
   | SessionForked
   | SessionInboxDelivered
@@ -2423,6 +2451,7 @@ export type V2Event =
   | SessionMetadataUpdated
   | SessionPermissions
   | SessionViewed
+  | SessionPublicationCommitted
   | SessionUsageUpdated
   | SessionDeleted
   | SessionForked

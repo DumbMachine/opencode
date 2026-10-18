@@ -106,6 +106,39 @@ describe("public event manifest", () => {
     expect(EventManifest.Latest.has("integration.connection.updated")).toBe(false)
   })
 
+  test("keeps publication witnesses in public replay and rejects inconsistent batch shapes", () => {
+    expect(EventManifest.Server.get("session.publication.committed")).toBe(SessionEvent.PublicationCommitted)
+    expect(EventManifest.Durable.get("session.publication.committed.1")).toBe(SessionEvent.PublicationCommitted)
+    const data = {
+      sessionID: Session.ID.create(),
+      inputID: SessionMessage.ID.create(),
+      attempt: "original-attempt",
+      contextReference: "a".repeat(64),
+      contextDigest: "b".repeat(64),
+      componentsDigest: "c".repeat(64),
+      capabilityID: "cap-original",
+      capabilityGeneration: 7,
+      unitID: "evt_original",
+      unitDigest: "d".repeat(64),
+      receiptReference: "e".repeat(64),
+      authorizationVersion: "original-version",
+      manifestBinding: "f".repeat(64),
+      audienceBinding: "1".repeat(64),
+      sequence: 0,
+    }
+    for (const batch of [
+      { operation: "durable-event", length: 2 },
+      { operation: "ephemeral-event", length: 1 },
+    ] as const)
+      expect(Schema.decodeUnknownSync(SessionEvent.PublicationCommitted.data)({ ...data, batch }).batch).toEqual(batch)
+    for (const batch of [
+      { operation: "durable-event", length: 1 },
+      { operation: "ephemeral-event", length: 2 },
+      { operation: "unsupported", length: 1 },
+    ])
+      expect(() => Schema.decodeUnknownSync(SessionEvent.PublicationCommitted.data)({ ...data, batch })).toThrow()
+  })
+
   test("derives durable definitions from explicit definition durability", () => {
     expect(Array.from(EventManifest.Durable.keys()).toSorted()).toEqual(
       [
@@ -117,6 +150,7 @@ describe("public event manifest", () => {
         "session.renamed.1",
         "session.metadata.updated.1",
         "session.permissions.1",
+        "session.publication.committed.1",
         "session.viewed.1",
         "session.message.content.updated.1",
         "session.usage.recorded.1",

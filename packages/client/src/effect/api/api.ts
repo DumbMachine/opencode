@@ -620,6 +620,39 @@ export type SessionLogOutput =
           readonly id: Event.ID
           readonly created: number
           readonly metadata?: { readonly [x: string]: unknown } | undefined
+          readonly type: "session.publication.committed"
+          readonly durable: { readonly aggregateID: string; readonly seq: Event.Seq; readonly version: Event.Version }
+          readonly location?:
+            | {
+                readonly directory: AbsolutePath
+                readonly workspaceID?: (string & Brand.Brand<"Workspace.ID">) | undefined
+              }
+            | undefined
+          readonly data: {
+            readonly sessionID: Session.ID
+            readonly inputID: SessionMessage.ID
+            readonly attempt: string
+            readonly contextReference: string
+            readonly contextDigest: string
+            readonly componentsDigest: string
+            readonly capabilityID: string
+            readonly capabilityGeneration: number
+            readonly unitID: string
+            readonly unitDigest: string
+            readonly receiptReference: string
+            readonly authorizationVersion: string
+            readonly manifestBinding: string
+            readonly audienceBinding: string
+            readonly sequence: number
+            readonly batch:
+              | { readonly operation: "durable-event"; readonly length: 2 }
+              | { readonly operation: "ephemeral-event"; readonly length: 1 }
+          }
+        }
+      | {
+          readonly id: Event.ID
+          readonly created: number
+          readonly metadata?: { readonly [x: string]: unknown } | undefined
           readonly type: "session.deleted"
           readonly durable: { readonly aggregateID: string; readonly seq: Event.Seq; readonly version: Event.Version }
           readonly location?:

@@ -2,8 +2,8 @@ export * as ExecutionDisclosure from "./execution-disclosure.js"
 
 import { Schema } from "effect"
 import { optional } from "./schema.js"
-import { Session } from "./session.js"
-import { SessionMessage } from "./session-message.js"
+import { SessionID } from "./session-id.js"
+import { SessionMessageID } from "./session-message-id.js"
 
 const bounded = (maximum: number) => Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(maximum))
 const Digest = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/))
@@ -48,8 +48,8 @@ export const Component = Schema.Struct({
 export interface ContextRequest extends Schema.Schema.Type<typeof ContextRequest> {}
 export const ContextRequest = Schema.Struct({
   version: Schema.Literal(1),
-  sessionID: Session.ID,
-  inputID: SessionMessage.ID,
+  sessionID: SessionID,
+  inputID: SessionMessageID,
   kind: Schema.Literals(["primary", "compaction", "title", "generate"]),
   attempt: bounded(128),
   contextDigest: Digest,
@@ -75,8 +75,8 @@ export const ContextProof = Schema.Struct({
   version: Schema.Literal(1),
   issuer: bounded(512),
   audience: bounded(512),
-  sessionID: Session.ID,
-  inputID: SessionMessage.ID,
+  sessionID: SessionID,
+  inputID: SessionMessageID,
   kind: Schema.Literals(["primary", "compaction", "title", "generate"]),
   attempt: bounded(128),
   contextDigest: Digest,
@@ -101,8 +101,8 @@ export const SignedProof = Schema.Struct({
 export interface PublicationRequest extends Schema.Schema.Type<typeof PublicationRequest> {}
 export const PublicationRequest = Schema.Struct({
   version: Schema.Literal(1),
-  sessionID: Session.ID,
-  inputID: SessionMessage.ID,
+  sessionID: SessionID,
+  inputID: SessionMessageID,
   contextReference: Digest,
   contextDigest: Digest,
   componentsDigest: Digest,

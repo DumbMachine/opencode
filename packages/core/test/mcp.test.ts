@@ -313,6 +313,7 @@ function resourceMcpLayer(
             ]),
         Layer.succeed(Location.Service, Location.Service.of(location({ directory }))),
         Layer.mock(Bus.Service, {
+          persistent: false,
           subscribe: overrides?.subscribe ?? (() => Stream.never),
           publish: (definition, data) => {
             const event = {
@@ -492,7 +493,7 @@ const permissions = Layer.mock(Permission.Service, {
       yield* decision
     }),
 })
-const events = Layer.mock(Bus.Service, { subscribe: () => Stream.never })
+const events = Layer.mock(Bus.Service, { persistent: false, subscribe: () => Stream.never })
 const it = testEffect(
   AppNodeBuilder.build(LayerNode.group([Tool.node, McpTool.node]), [
     Mcp.node.replace(mcp),

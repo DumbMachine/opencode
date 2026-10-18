@@ -64,6 +64,16 @@ export class InvalidDurableEventError extends Schema.TaggedError<InvalidDurableE
   },
 ) {}
 
+// Publication observers share the emitted object. Detachment alone would let
+// an earlier observer change authorized bytes before the next one sees them.
+const freezeEnvelope = <A>(value: A): A => {
+  if (value !== null && typeof value === "object") {
+    for (const item of Object.values(value)) freezeEnvelope(item)
+    Object.freeze(value)
+  }
+  return value
+}
+
 const envelope = (aggregateID: string, seq: number, version: number) => ({
   aggregateID,
   seq: Event.Seq.make(seq),
@@ -145,6 +155,14 @@ const isDefinition = (input: Event.Definition | readonly Event.Definition[]): in
   !Array.isArray(input)
 
 export interface Interface {
+  /** Actual event retention in this running Bus, independent of startup intent. */
+  readonly persistent: boolean
+  /** Emit a detached ephemeral envelope exactly as supplied, without routing defaults or fresh IDs/timestamps. */
+  readonly publishPreparedEphemeral: <D extends Event.EphemeralDefinition>(
+    definition: D,
+    event: Event.Payload<D>,
+    admit: () => boolean,
+  ) => Effect.Effect<Event.Payload<D>>
   readonly publish: <D extends Event.Definition>(
     definition: D,
     data: Event.Data<D>,
@@ -522,6 +540,38 @@ export function configured(options?: Options) {
           })
         }
 
+        function publishPreparedEphemeral<D extends Event.EphemeralDefinition>(
+          definition: D,
+          input: Event.Payload<D>,
+          admit: () => boolean,
+        ) {
+          return Effect.gen(function* () {
+            // The supplied complete envelope intentionally has no ambient
+            // Location fallback. Normalize unknown metadata as JSON wire data.
+            if (definition.durability !== "ephemeral")
+              return yield* Effect.die(new Error("Prepared publication requires an ephemeral event"))
+            const schema = Schema.Struct({
+              id: Event.ID,
+              created: Schema.Finite,
+              type: Schema.Literal(definition.type),
+              metadata: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
+              location: Schema.optional(Location.Ref),
+              data: definition.data,
+            })
+            const event = freezeEnvelope(
+              Schema.decodeUnknownSync(schema)(
+                JSON.parse(JSON.stringify(Schema.encodeUnknownSync(schema)(input))),
+              ) as Event.Payload<D>,
+            )
+            if (!admit()) return yield* Effect.die(new Error("Event publication is unavailable"))
+            // A supplied location is the entire captured route; absence is
+            // explicitly global. Do not reload a Session's owner after preflight.
+            if (event.location) routes.set(event as Event.Payload, [event.location])
+            yield* notify(event as Event.Payload, false)
+            return event
+          })
+        }
+
         function publish<D extends Event.Definition>(definition: D, data: Event.Data<D>, options?: PublishOptions) {
           return Effect.gen(function* () {
             const serviceLocation = Option.getOrUndefined(yield* Effect.serviceOption(Location.Service))
@@ -580,7 +630,7 @@ export function configured(options?: Options) {
                         ? undefined
                         : {
                             ...options,
-                            ...(options.metadata ? { metadata: structuredClone(options.metadata) } : {}),
+                            ...(options.metadata ? { metadata: JSON.parse(JSON.stringify(options.metadata)) } : {}),
                             ...(options.location ? { location: structuredClone(options.location) } : {}),
                           },
                     ] as const,
@@ -687,10 +737,13 @@ export function configured(options?: Options) {
                             .pipe(Effect.orDie)
                           const firstSeq = (row?.seq ?? -1) + 1
                           const finalSeq = firstSeq + payloads.length - 1
-                          const queued = payloads.map((item, index) => ({
-                            ...item.event,
-                            durable: envelope(aggregateID, firstSeq + index, item.definition.durable.version),
-                          }))
+                          const queued = payloads.map((item, index) => {
+                            const event = {
+                              ...item.event,
+                              durable: envelope(aggregateID, firstSeq + index, item.definition.durable.version),
+                            }
+                            return once ? freezeEnvelope(event) : event
+                          })
                           const route = yield* prepareRoutes(queued)
                           const rows = new Array<typeof EventTable.$inferInsert>()
                           const ids = new Set<Event.ID>()
@@ -1003,6 +1056,8 @@ export function configured(options?: Options) {
           })
 
         return Service.of({
+          persistent: persist,
+          publishPreparedEphemeral,
           publish,
           publishAll,
           publishAllOnce,

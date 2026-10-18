@@ -26,6 +26,7 @@ import { SessionInbox } from "./session-inbox.js"
 import { Project } from "./project.js"
 import { SessionFork } from "./session-fork.js"
 import { Permission } from "./permission.js"
+import { ExecutionDisclosure } from "./execution-disclosure.js"
 
 export { FileAttachment }
 
@@ -652,6 +653,35 @@ export namespace RevertEvent {
   })
 }
 
+// Metadata-only witness. The host receipt authorizes exact bytes; this event
+// records one local consumption without becoming message/model content.
+export const PublicationCommitted = Event.durable({
+  type: "session.publication.committed",
+  ...options,
+  schema: {
+    ...Base,
+    inputID: ExecutionDisclosure.PublicationProof.fields.inputID,
+    attempt: ExecutionDisclosure.PublicationProof.fields.attempt,
+    contextReference: ExecutionDisclosure.PublicationProof.fields.contextReference,
+    contextDigest: ExecutionDisclosure.PublicationProof.fields.contextDigest,
+    componentsDigest: ExecutionDisclosure.PublicationProof.fields.componentsDigest,
+    capabilityID: ExecutionDisclosure.PublicationProof.fields.capabilityID,
+    capabilityGeneration: ExecutionDisclosure.PublicationProof.fields.capabilityGeneration,
+    unitID: ExecutionDisclosure.PublicationProof.fields.unitID,
+    unitDigest: ExecutionDisclosure.PublicationProof.fields.unitDigest,
+    receiptReference: ExecutionDisclosure.PublicationProof.fields.receiptReference,
+    authorizationVersion: ExecutionDisclosure.PublicationProof.fields.authorizationVersion,
+    manifestBinding: ExecutionDisclosure.PublicationProof.fields.manifestBinding,
+    audienceBinding: ExecutionDisclosure.PublicationProof.fields.audienceBinding,
+    sequence: NonNegativeInt.check(Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER)),
+    batch: Schema.Union([
+      Schema.Struct({ operation: Schema.Literal("durable-event"), length: Schema.Literal(2) }),
+      Schema.Struct({ operation: Schema.Literal("ephemeral-event"), length: Schema.Literal(1) }),
+    ]),
+  },
+})
+export type PublicationCommitted = typeof PublicationCommitted.Type
+
 export const Definitions = Event.inventory(
   Created,
   AgentSelected,
@@ -661,6 +691,7 @@ export const Definitions = Event.inventory(
   MetadataUpdated,
   Permissions,
   Viewed,
+  PublicationCommitted,
   UsageUpdated,
   Deleted,
   Forked,

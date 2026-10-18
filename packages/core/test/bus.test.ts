@@ -457,6 +457,138 @@ describe("Bus", () => {
     }),
   )
 
+  it.effect("emits prepared ephemeral identity and JSON metadata without ambient routing defaults", () =>
+    Effect.gen(function* () {
+      const bus = yield* Bus.Service
+      expect(bus.persistent).toBe(true)
+      const event = {
+        id: Event.ID.create(),
+        created: 1234,
+        type: SessionEvent.Text.Delta.type,
+        data: {
+          sessionID: Session.ID.create(),
+          assistantMessageID: SessionMessage.ID.create(),
+          ordinal: 2,
+          delta: "Original",
+        },
+        metadata: { optional: undefined, nested: { key: "value", missing: undefined } },
+      }
+      const received = yield* bus
+        .subscribe(SessionEvent.Text.Delta)
+        .pipe(Stream.take(1), Stream.runCollect, Effect.forkScoped)
+      yield* Effect.yieldNow
+      const emitted = yield* bus.publishPreparedEphemeral(SessionEvent.Text.Delta, event, () => true)
+      expect(emitted.id).toBe(event.id)
+      expect(emitted.created).toBe(1234)
+      expect(emitted.location).toBeUndefined()
+      expect(emitted.metadata).toEqual({ nested: { key: "value" } })
+      expect(yield* Fiber.join(received)).toEqual([emitted])
+    }),
+  )
+
+  it.effect("owns the full prepared envelope before a notification waits", () =>
+    Effect.gen(function* () {
+      const bus = yield* Bus.Service
+      const entered = yield* Deferred.make<void>(),
+        release = yield* Deferred.make<void>()
+      const event = {
+        id: Event.ID.create(),
+        created: 2222,
+        type: Message.type,
+        data: { text: "Original" },
+        metadata: { nested: { value: "original" } },
+        location: { directory: AbsolutePath.make("frozen"), workspaceID: Workspace.ID.make("wrk_frozen") },
+      }
+      yield* bus.listen(() => Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release))))
+      const pending = yield* bus.publishPreparedEphemeral(Message, event, () => true).pipe(Effect.forkScoped)
+      yield* Deferred.await(entered)
+      event.created = 9999
+      event.data.text = "Substituted"
+      event.metadata.nested.value = "substituted"
+      event.location.directory = AbsolutePath.make("substituted")
+      yield* Deferred.succeed(release, undefined)
+      const emitted = yield* Fiber.join(pending)
+      expect(emitted.created).toBe(2222)
+      expect(emitted.data.text).toBe("Original")
+      expect(emitted.metadata).toEqual({ nested: { value: "original" } })
+      expect(emitted.location?.directory).toBe(AbsolutePath.make("frozen"))
+    }),
+  )
+
+  it.effect("keeps authorized envelopes immutable between observers", () =>
+    Effect.gen(function* () {
+      const bus = yield* Bus.Service
+      const seen: string[] = [],
+        changed: boolean[] = [],
+        metadata: unknown[] = []
+      const mutate = (target: object, values: Record<string, unknown>) =>
+        Effect.sync(() => Object.assign(target, values)).pipe(Effect.exit, Effect.map(Exit.isSuccess))
+      yield* bus.listen((event) =>
+        Effect.gen(function* () {
+          changed.push(yield* mutate(event, { created: 9999 }))
+          changed.push(yield* mutate(event.data as object, { text: "substituted" }))
+          if (event.metadata) {
+            changed.push(yield* mutate(event.metadata.nested as object, { value: "substituted" }))
+            metadata.push(event.metadata)
+          }
+        }),
+      )
+      yield* bus.listen((event) =>
+        Effect.sync(() => {
+          seen.push((event.data as { text: string }).text)
+        }),
+      )
+      const originalMetadata = {
+        nested: { value: "original" },
+        date: new Date("2026-10-18T00:00:00Z"),
+        bytes: new Uint8Array([1, 2]),
+      }
+      const event = {
+        id: Event.ID.create(),
+        created: 4444,
+        type: Message.type,
+        data: { text: "ephemeral" },
+        metadata: originalMetadata,
+      }
+      expect((yield* bus.publishPreparedEphemeral(Message, event, () => true)).created).toBe(4444)
+      yield* bus.publishAllOnce([
+        [
+          SyncMessage,
+          { id: Event.ID.create(), text: "durable" },
+          { id: Event.ID.create(), created: 4445, metadata: originalMetadata },
+        ],
+      ])
+      expect(seen).toEqual(["ephemeral", "durable"])
+      expect(changed).toEqual([false, false, false, false, false, false])
+      expect(metadata).toEqual(
+        Array.from({ length: 2 }, () => ({
+          nested: { value: "original" },
+          date: "2026-10-18T00:00:00.000Z",
+          bytes: { "0": 1, "1": 2 },
+        })),
+      )
+    }),
+  )
+
+  it.effect("checks prepared ephemeral admission before any observer or sequence write", () =>
+    Effect.gen(function* () {
+      const bus = yield* Bus.Service
+      const { db } = yield* Database.Service
+      let observed = 0
+      yield* bus.listen(() =>
+        Effect.sync(() => {
+          observed++
+        }),
+      )
+      const event = { id: Event.ID.create(), created: 3333, type: Message.type, data: { text: "held" } }
+      expect(Exit.isFailure(yield* bus.publishPreparedEphemeral(Message, event, () => false).pipe(Effect.exit))).toBe(
+        true,
+      )
+      expect(observed).toBe(0)
+      expect(yield* db.select().from(EventTable).where(eq(EventTable.id, event.id)).all()).toEqual([])
+    }),
+  )
+
   it.effect("increments durable event seq per aggregate", () =>
     Effect.gen(function* () {
       const bus = yield* Bus.Service
