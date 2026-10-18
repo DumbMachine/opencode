@@ -1,5 +1,5 @@
 import { describe, expect } from "bun:test"
-import { DateTime, Effect, Fiber, Layer, LayerMap, Schema, Stream } from "effect"
+import { Context, DateTime, Deferred, Effect, Fiber, Layer, LayerMap, Schema, Stream } from "effect"
 import path from "path"
 import { pathToFileURL } from "url"
 import { eq } from "drizzle-orm"
@@ -94,7 +94,14 @@ const locations = makeGlobalNode({
 })
 const it = testEffect(
   AppNodeBuilder.build(
-    LayerNode.group([Database.node, Bus.node, SessionProjector.node, SessionStore.node, Session.node]),
+    LayerNode.group([
+      Database.node,
+      Bus.node,
+      SessionProjector.node,
+      SessionStore.node,
+      Session.node,
+      LocationServiceMap.node,
+    ]),
     [
       Bus.node.replace(Bus.configured({ persist: true })),
       SessionExecution.node.replace(execution),
@@ -1509,6 +1516,94 @@ describe("Publication requirement compatibility", () => {
       expect(yield* SessionInbox.promotionInput(database.db, sessionID, "input")).toBe("blocked")
       expect(wakeCalls).toEqual([])
       yield* SessionExecutionCapability.clear(sessionID)
+    }),
+  )
+})
+
+describe("Prepared input provenance", () => {
+  const disclosure = {
+    version: 1 as const,
+    endpoint: "https://host.example.test/context",
+    token: "synthetic-producer-token",
+    issuer: "host",
+    audience: "native",
+    keys: [{ id: "key", algorithm: "Ed25519" as const, publicKey: "a".repeat(43) }],
+  }
+  const tracked = { disclosure, mcpRevision: 1, resume: false }
+  const hooksForSession = Effect.gen(function* () {
+    const locations = yield* LocationServiceMap.Service
+    const context = yield* locations.contextEffect(
+      Location.Ref.make({ directory: AbsolutePath.make("/project"), workspaceID: undefined }),
+    )
+    return Context.get(context, PluginHooks.Service)
+  })
+
+  it.effect("retains the original signed preparation through pending and promoted retries", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* Session.Service
+      const bus = yield* Bus.Service
+      const { db } = yield* Database.Service
+      const original = yield* session.prompt({ sessionID, text: "Original human", ...tracked })
+      expect(original.payload.preparedInput).toBeDefined()
+      const pending = yield* session.prompt({ sessionID, id: original.id, text: "Changed retry", ...tracked })
+      expect(pending.payload).toEqual(original.payload)
+      yield* SessionInbox.promote(db, bus, sessionID, "input")
+      expect((yield* session.messages({ sessionID }))[0]).toMatchObject({
+        type: "user",
+        preparedInput: original.payload.preparedInput,
+      })
+      yield* db.delete(EventTable).where(eq(EventTable.aggregate_id, sessionID)).run().pipe(Effect.orDie)
+      const promoted = yield* session.prompt({ sessionID, id: original.id, text: "Another retry", resume: false })
+      expect(promoted.payload.preparedInput).toEqual(original.payload.preparedInput)
+      expect(promoted.payload.text).toBe("Original human")
+    }),
+  )
+
+  it.effect("does not backfill ordinary or hooked admission absence on a later tracked retry", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* Session.Service
+      const ordinary = yield* session.prompt({ sessionID, text: "Original ordinary", resume: false })
+      expect(ordinary.payload.preparedInput).toBeUndefined()
+      const hooks = yield* hooksForSession
+      const hook = yield* hooks.register("session", "prompt", () => Effect.void)
+      const hooked = yield* session.prompt({ sessionID, text: "Original hooked", ...tracked })
+      yield* hook.dispose
+      expect(hooked.payload.preparedInput).toBeUndefined()
+      for (const original of [ordinary, hooked]) {
+        const retry = yield* session.prompt({ sessionID, id: original.id, text: "Retry", resume: false })
+        expect(retry.payload.preparedInput).toBeUndefined()
+        expect(retry.payload.text).toBe(original.payload.text)
+      }
+      const retry = yield* session.prompt({ sessionID, id: hooked.id, text: "Tracked retry", ...tracked })
+      expect(retry.payload.preparedInput).toBeUndefined()
+    }),
+  )
+
+  it.effect("keeps the winning payload and proof when a losing hook preparation finishes later", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* Session.Service
+      const hooks = yield* hooksForSession
+      const entered = yield* Deferred.make<void>()
+      const finish = yield* Deferred.make<void>()
+      const hook = yield* hooks.register("session", "prompt", () =>
+        Effect.gen(function* () {
+          yield* Deferred.succeed(entered, undefined)
+          yield* Deferred.await(finish)
+        }),
+      )
+      const id = SessionMessage.ID.create()
+      const loser = yield* session.prompt({ sessionID, id, text: "Losing text", ...tracked }).pipe(Effect.forkScoped)
+      yield* Deferred.await(entered)
+      yield* hook.dispose
+      const winner = yield* session.prompt({ sessionID, id, text: "Winning text", ...tracked })
+      expect(winner.payload.preparedInput).toBeDefined()
+      yield* Deferred.succeed(finish, undefined)
+      expect((yield* Fiber.join(loser)).payload).toEqual(winner.payload)
+      expect((yield* admitted(id))?.payload).toEqual(winner.payload)
+      expect(yield* admittedCount).toBe(1)
     }),
   )
 })

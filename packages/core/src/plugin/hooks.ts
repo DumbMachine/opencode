@@ -51,6 +51,11 @@ export interface Interface {
     callback: Callback<Domains[Domain][Name], Failures[Domain][Name]>,
     options?: ModelHookOptions,
   ) => Effect.Effect<State.Registration, never, Scope.Scope>
+  readonly triggerObserved: <Domain extends keyof Domains, Name extends keyof Domains[Domain] & keyof Failures[Domain]>(
+    domain: Domain,
+    name: Name,
+    event: Domains[Domain][Name],
+  ) => Effect.Effect<{ readonly event: Domains[Domain][Name]; readonly invoked: number }, Failures[Domain][Name]>
   readonly trigger: <Domain extends keyof Domains, Name extends keyof Domains[Domain] & keyof Failures[Domain]>(
     domain: Domain,
     name: Name,
@@ -85,14 +90,19 @@ const layer = Layer.effect(
       },
     )
 
-    const trigger: Interface["trigger"] = Effect.fnUntraced(function* (domain, name, event) {
-      for (const entry of callbacks.get(key(domain, name)) ?? []) {
+    const triggerObserved: Interface["triggerObserved"] = Effect.fnUntraced(function* (domain, name, event) {
+      const snapshot = callbacks.get(key(domain, name)) ?? []
+      let invoked = 0
+      for (const entry of snapshot) {
         if (entry.options?.providerID !== undefined && entry.options.providerID !== eventProviderID(event)) continue
+        invoked++
         const result: Effect.Effect<void, Failures[typeof domain][typeof name]> = entry.callback(event)
         yield* result
       }
-      return event
+      return Object.freeze({ event, invoked })
     })
+    const trigger: Interface["trigger"] = (domain, name, event) =>
+      triggerObserved(domain, name, event).pipe(Effect.map((result) => result.event))
 
     const has: Interface["has"] = (domain, name, providerID) =>
       Effect.sync(() =>
@@ -101,7 +111,7 @@ const layer = Layer.effect(
         ),
       )
 
-    return Service.of({ has, register, trigger })
+    return Service.of({ has, register, trigger, triggerObserved })
   }),
 )
 

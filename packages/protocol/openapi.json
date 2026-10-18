@@ -6,6 +6,65 @@
     "description": "Experimental HttpApi surface for selected instance routes."
   },
   "paths": {
+    "/api/producer/enrollment": {
+      "post": {
+        "tags": ["server"],
+        "operationId": "server.enrollProducer",
+        "parameters": [],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "ExecutionProducer.Enrollment",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecutionProducer.Enrollment"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                    },
+                    {
+                      "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "description": "Prove possession of the process producer key to an authenticated host. This response alone does not enroll or trust the process.",
+        "summary": "Challenge the native producer identity",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExecutionProducer.EnrollmentRequest"
+              }
+            }
+          },
+          "required": true
+        }
+      }
+    },
     "/api/info": {
       "get": {
         "tags": ["server"],
@@ -14387,6 +14446,60 @@
         "required": ["id", "algorithm", "publicKey"],
         "additionalProperties": false
       },
+      "ExecutionProducer.Enrollment": {
+        "type": "object",
+        "properties": {
+          "key": {
+            "$ref": "#/components/schemas/ExecutionDisclosure.VerificationKey"
+          },
+          "signed": {
+            "$ref": "#/components/schemas/ExecutionProducer.SignedFact"
+          }
+        },
+        "required": ["key", "signed"],
+        "additionalProperties": false
+      },
+      "ExecutionProducer.EnrollmentRequest": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "number",
+            "enum": [1]
+          },
+          "challenge": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{43}$"
+          },
+          "audience": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "required": ["version", "challenge", "audience"],
+        "additionalProperties": false
+      },
+      "ExecutionProducer.SignedFact": {
+        "type": "object",
+        "properties": {
+          "keyID": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "payload": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "signature": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{86}$"
+          }
+        },
+        "required": ["keyID", "payload", "signature"],
+        "additionalProperties": false
+      },
       "FileDiff.Info": {
         "type": "object",
         "properties": {
@@ -18010,6 +18123,9 @@
               "$ref": "#/components/schemas/Prompt.SkillAttachment"
             }
           },
+          "preparedInput": {
+            "$ref": "#/components/schemas/ExecutionProducer.SignedFact"
+          },
           "execution": {
             "$ref": "#/components/schemas/Prompt.Execution"
           },
@@ -18998,6 +19114,9 @@
             },
             "required": ["created"],
             "additionalProperties": false
+          },
+          "preparedInput": {
+            "$ref": "#/components/schemas/ExecutionProducer.SignedFact"
           },
           "execution": {
             "$ref": "#/components/schemas/Prompt.Execution"

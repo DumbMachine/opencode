@@ -1,4 +1,6 @@
 import type {
+  ServerEnrollProducerInput,
+  ServerEnrollProducerOutput,
   ServerInfoOutput,
   ServerPairOutput,
   ServerConnectInput,
@@ -426,6 +428,18 @@ export function make(options: ClientOptions) {
 
   return {
     server: {
+      enrollProducer: (input: ServerEnrollProducerInput, requestOptions?: RequestOptions) =>
+        request<ServerEnrollProducerOutput>(
+          {
+            method: "POST",
+            path: `/api/producer/enrollment`,
+            body: { version: input["version"], challenge: input["challenge"], audience: input["audience"] },
+            successStatus: 200,
+            declaredStatuses: [400, 401],
+            empty: false,
+          },
+          requestOptions,
+        ),
       info: (requestOptions?: RequestOptions) =>
         request<ServerInfoOutput>(
           { method: "GET", path: `/api/info`, successStatus: 200, declaredStatuses: [400, 401], empty: false },

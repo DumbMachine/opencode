@@ -6,6 +6,7 @@ import { Api } from "../api"
 import { ServerAuth } from "../auth"
 import { ServerInfo } from "../server-info"
 import { ServerPairing } from "../pairing"
+import { NativeProducer } from "@opencode/core/execution-producer"
 
 export const ServerHandler = HttpApiBuilder.group(Api, "server.server", (handlers) =>
   Effect.gen(function* () {
@@ -13,6 +14,13 @@ export const ServerHandler = HttpApiBuilder.group(Api, "server.server", (handler
     const auth = yield* ServerAuth.Config
 
     return handlers
+      .handle("server.enrollProducer", (ctx) =>
+        Effect.gen(function* () {
+          if (!ServerAuth.required(auth))
+            return yield* new UnauthorizedError({ message: "Configured server authentication is required" })
+          return yield* NativeProducer.enroll(ctx.payload)
+        }),
+      )
       .handleRaw("server.info", () =>
         Effect.gen(function* () {
           const info = yield* ServerInfo.Service

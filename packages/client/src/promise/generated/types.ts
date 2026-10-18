@@ -1,5 +1,9 @@
 export type JsonValue = null | boolean | number | string | Array<JsonValue> | { [key: string]: JsonValue }
 
+export type ExecutionDisclosureVerificationKey = { id: string; algorithm: "Ed25519"; publicKey: string }
+
+export type ExecutionProducerSignedFact = { keyID: string; payload: string; signature: string }
+
 export type ServerInfo = { version: string; pid: number; urls: Array<string>; paths: { tmp: string } }
 
 export type PairingCode = { code: string; expires_in: number }
@@ -438,6 +442,11 @@ export type McpProtocol = "legacy" | "auto" | "2026-07-28"
 export type ConfigWorktree = { directory: string }
 
 export type ConfigShellOption = { path: string; name: string; acceptable: boolean }
+
+export type ExecutionProducerEnrollment = {
+  key: ExecutionDisclosureVerificationKey
+  signed: ExecutionProducerSignedFact
+}
 
 export type SessionMessageLocationSwitched = {
   id: string
@@ -1771,6 +1780,7 @@ export type SessionMessageUser = {
   id: string
   metadata?: { [x: string]: JsonValue }
   time: { created: number }
+  preparedInput?: ExecutionProducerSignedFact
   execution?: PromptExecution
   text: string
   files?: Array<PromptFileAttachment>
@@ -1785,6 +1795,7 @@ export type SessionInboxUserPayload = {
   files?: Array<PromptFileAttachment>
   agents?: Array<PromptAgentAttachment>
   skills?: Array<PromptSkillAttachment>
+  preparedInput?: ExecutionProducerSignedFact
   execution?: PromptExecution
   metadata?: { [x: string]: JsonValue }
   capabilities?: Array<string>
@@ -1795,6 +1806,7 @@ export type SessionInboxUserPayload1 = {
   files?: Array<PromptFileAttachment>
   agents?: Array<PromptAgentAttachment>
   skills?: Array<PromptSkillAttachment>
+  preparedInput?: ExecutionProducerSignedFact
   execution?: PromptExecution
   metadata?: { [x: string]: any }
   capabilities?: Array<string>
@@ -2762,6 +2774,14 @@ export type WorktreeError = {
 export const isWorktreeError = (value: unknown): value is WorktreeError =>
   typeof value === "object" && value !== null && "name" in value && value["name"] === "WorktreeError"
 
+export type ServerEnrollProducerInput = {
+  readonly version: { readonly version: 1; readonly challenge: string; readonly audience: string }["version"]
+  readonly challenge: { readonly version: 1; readonly challenge: string; readonly audience: string }["challenge"]
+  readonly audience: { readonly version: 1; readonly challenge: string; readonly audience: string }["audience"]
+}
+
+export type ServerEnrollProducerOutput = ExecutionProducerEnrollment
+
 export type ServerInfoOutput = ServerInfo
 
 export type ServerPairOutput = PairingCode
@@ -3118,6 +3138,7 @@ export type SessionImportInput = {
           readonly id: string
           readonly metadata?: { readonly [x: string]: JsonValue }
           readonly time: { readonly created: number }
+          readonly preparedInput?: { readonly keyID: string; readonly payload: string; readonly signature: string }
           readonly execution?: {
             readonly model: { readonly id: string; readonly providerID: string; readonly variant?: string }
             readonly agent: string
@@ -3442,6 +3463,7 @@ export type SessionImportInput = {
           readonly id: string
           readonly metadata?: { readonly [x: string]: JsonValue }
           readonly time: { readonly created: number }
+          readonly preparedInput?: { readonly keyID: string; readonly payload: string; readonly signature: string }
           readonly execution?: {
             readonly model: { readonly id: string; readonly providerID: string; readonly variant?: string }
             readonly agent: string
@@ -3766,6 +3788,7 @@ export type SessionImportInput = {
           readonly id: string
           readonly metadata?: { readonly [x: string]: JsonValue }
           readonly time: { readonly created: number }
+          readonly preparedInput?: { readonly keyID: string; readonly payload: string; readonly signature: string }
           readonly execution?: {
             readonly model: { readonly id: string; readonly providerID: string; readonly variant?: string }
             readonly agent: string

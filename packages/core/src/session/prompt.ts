@@ -8,7 +8,7 @@ import type { ExecutionDisclosure } from "@opencode/schema/execution-disclosure"
 import type { Session } from "@opencode/schema/session"
 import type { SessionMessage } from "@opencode/schema/session-message"
 import { FSUtil } from "@opencode/util/fs-util"
-import { Effect } from "effect"
+import { Effect, type Types } from "effect"
 import path from "path"
 import { fileURLToPath } from "url"
 import { Image } from "../image.js"
@@ -16,6 +16,7 @@ import { Instance } from "../instance/service.js"
 import { Mime } from "../mime.js"
 import { Plugin } from "../plugin/service.js"
 import { PluginHooks } from "../plugin/hooks.js"
+import { NativeProducer } from "../execution-producer.js"
 import { Skill } from "../skill.js"
 import { AttachmentError, SkillNotFoundError } from "./error.js"
 
@@ -38,24 +39,30 @@ export const prepare = Effect.fn("SessionPrompt.prepare")(function* (request: {
   messageID: SessionMessage.ID
   input: Input
 }) {
+  const sessionID = request.session.id,
+    inputID = request.messageID
+  const execution = structuredClone(request.input.execution)
+  const original = structuredClone({
+    text: request.input.text,
+    files: request.input.files,
+    agents: request.input.agents,
+    skills: request.input.skills,
+  })
+  const tracked = request.input.disclosure !== undefined
   const fs = yield* FSUtil.Service
   const instances = yield* Instance.Service
 
   return yield* Effect.gen(function* () {
     yield* Plugin.awaitActivation
     const hooks = yield* PluginHooks.Service
-    const event = yield* hooks.trigger("session", "prompt", {
-      sessionID: request.session.id,
-      messageID: request.messageID,
-      prompt: structuredClone({
-        text: request.input.text,
-        files: request.input.files?.slice(),
-        agents: request.input.agents?.slice(),
-        skills: request.input.skills?.slice(),
-      }),
+    const observed = yield* hooks.triggerObserved("session", "prompt", {
+      sessionID,
+      messageID: inputID,
+      prompt: structuredClone(original) as Types.DeepMutable<typeof original>,
       metadata: structuredClone(request.input.metadata),
       delivery: request.input.delivery ?? "steer",
     })
+    const event = observed.event
     const input = event.prompt
     const files = input.files
       ? yield* Effect.forEach(input.files, materializeAttachment, { concurrency: 8 })
@@ -81,19 +88,29 @@ export const prepare = Effect.fn("SessionPrompt.prepare")(function* (request: {
         }),
       )
     })
+    const payload = SessionInbox.UserPayload.make({
+      ...Prompt.make({
+        text: input.text,
+        agents: input.agents,
+        files,
+        skills: selected?.length ? selected : undefined,
+      }),
+      execution,
+      metadata: structuredClone(event.metadata),
+      capabilities: request.input.capabilities ? [...request.input.capabilities] : undefined,
+    })
+    const prepared = tracked
+      ? yield* NativeProducer.prepareInput({
+          sessionID,
+          inputID,
+          original,
+          invoked: observed.invoked,
+          payload,
+        })
+      : undefined
     return {
       type: "user",
-      payload: SessionInbox.UserPayload.make({
-        ...Prompt.make({
-          text: input.text,
-          agents: input.agents,
-          files,
-          skills: selected?.length ? selected : undefined,
-        }),
-        execution: request.input.execution,
-        metadata: event.metadata,
-        capabilities: request.input.capabilities ? [...request.input.capabilities] : undefined,
-      }),
+      payload: prepared ?? payload,
       delivery: SessionInbox.Delivery.make(event.delivery),
     } satisfies SessionInbox.Item
   }).pipe(instances.provide(request.session))

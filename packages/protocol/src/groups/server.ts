@@ -1,4 +1,5 @@
 import { Schema } from "effect"
+import { ExecutionProducer } from "@opencode/schema/execution-producer"
 import { HttpApiEndpoint, HttpApiGroup, OpenApi } from "effect/unstable/httpapi"
 import { UnauthorizedError } from "../errors.js"
 
@@ -32,6 +33,20 @@ export function isPairingConnectURL(url: URL) {
 }
 
 export const ServerGroup = HttpApiGroup.make("server.server")
+  .add(
+    HttpApiEndpoint.post("server.enrollProducer", "/api/producer/enrollment", {
+      payload: ExecutionProducer.EnrollmentRequest,
+      success: ExecutionProducer.Enrollment,
+      error: UnauthorizedError,
+    }).annotateMerge(
+      OpenApi.annotations({
+        identifier: "server.enrollProducer",
+        summary: "Challenge the native producer identity",
+        description:
+          "Prove possession of the process producer key to an authenticated host. This response alone does not enroll or trust the process.",
+      }),
+    ),
+  )
   .add(
     HttpApiEndpoint.get("server.info", "/api/info", {
       success: ServerInfo,
