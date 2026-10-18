@@ -372,6 +372,7 @@ const make = Effect.fnUntraced(function* (input: {
                 ])
                 .pipe(
                   Effect.provideService(SessionPublicationAdmission.Service, {
+                    publication: structuredClone(proof),
                     accepts: (event) =>
                       valid(permit) &&
                       event.id === id &&

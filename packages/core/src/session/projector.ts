@@ -28,6 +28,7 @@ import { SessionLifecycle } from "./lifecycle.js"
 import { NotFoundError } from "./error.js"
 import type { Event } from "@opencode/schema/event"
 import { SessionPublicationAdmission } from "./publication-admission.js"
+import { SessionPublicationProvenance } from "./publication-provenance.js"
 
 type DatabaseService = Database.Interface["db"]
 type MessageEvent = Exclude<
@@ -236,21 +237,28 @@ function run(db: DatabaseService, event: MessageEvent) {
   return Effect.gen(function* () {
     const decodeRow = (row: typeof SessionMessageTable.$inferSelect) =>
       decodeMessage({ ...row.data, id: row.id, type: row.type })
-    const updateMessage = (message: SessionMessage.Info) => {
-      const encoded = encodeMessage(message)
-      const { id, type, ...data } = encoded
-      return db
-        .update(SessionMessageTable)
-        .set({ type, time_created: DateTime.toEpochMillis(message.time.created), data })
-        .where(
-          and(
-            eq(SessionMessageTable.id, SessionMessage.ID.make(id)),
-            eq(SessionMessageTable.session_id, event.data.sessionID),
-          ),
-        )
-        .run()
-        .pipe(Effect.orDie)
-    }
+    const updateMessage = (message: SessionMessage.Info) =>
+      Effect.gen(function* () {
+        const encoded = encodeMessage(message)
+        const { id, type, ...data } = encoded
+        const provenance = yield* SessionPublicationProvenance.next(db, event.data.sessionID, event, message)
+        yield* db
+          .update(SessionMessageTable)
+          .set({
+            type,
+            time_created: DateTime.toEpochMillis(message.time.created),
+            data,
+            publication_provenance: provenance,
+          })
+          .where(
+            and(
+              eq(SessionMessageTable.id, SessionMessage.ID.make(id)),
+              eq(SessionMessageTable.session_id, event.data.sessionID),
+            ),
+          )
+          .run()
+          .pipe(Effect.orDie)
+      })
     const appendMessage = (message: SessionMessage.Info) => insertMessage(db, event, message)
     const adapter: SessionMessageUpdater.Adapter = {
       getAgent() {
@@ -391,20 +399,24 @@ function run(db: DatabaseService, event: MessageEvent) {
 }
 
 function insertMessage(db: DatabaseService, event: SessionEvent.DurableEvent, message: SessionMessage.Info) {
-  const encoded = encodeMessage(message)
-  const { id, type, ...data } = encoded
-  return db
-    .insert(SessionMessageTable)
-    .values({
-      id: SessionMessage.ID.make(id),
-      session_id: event.data.sessionID,
-      type,
-      seq: event.durable.seq,
-      time_created: DateTime.toEpochMillis(message.time.created),
-      data,
-    })
-    .run()
-    .pipe(Effect.orDie)
+  return Effect.gen(function* () {
+    const encoded = encodeMessage(message)
+    const { id, type, ...data } = encoded
+    const provenance = yield* SessionPublicationProvenance.next(db, event.data.sessionID, event, message)
+    yield* db
+      .insert(SessionMessageTable)
+      .values({
+        id: SessionMessage.ID.make(id),
+        session_id: event.data.sessionID,
+        type,
+        seq: event.durable.seq,
+        time_created: DateTime.toEpochMillis(message.time.created),
+        data,
+        publication_provenance: provenance,
+      })
+      .run()
+      .pipe(Effect.orDie)
+  })
 }
 
 function projectIdle(

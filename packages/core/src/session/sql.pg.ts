@@ -1,3 +1,4 @@
+import type { SessionPublicationProvenance } from "./publication-provenance.js"
 import { pgTable, text, integer, index, primaryKey, real, uniqueIndex, bigint } from "drizzle-orm/pg-core"
 import { sql } from "drizzle-orm"
 import { directoryColumn, pathColumn } from "../database/path.pg.js"
@@ -93,6 +94,7 @@ export const SessionMessageTable = pgTable(
     type: text().$type<SessionMessage.Type>().notNull(),
     seq: bigint({ mode: "number" }).notNull(),
     ...Timestamps,
+    publication_provenance: text().$type<SessionPublicationProvenance.State>(),
     data: text().notNull().$type<SessionMessageData>(),
   },
   (table) => [

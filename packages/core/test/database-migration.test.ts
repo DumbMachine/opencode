@@ -20,6 +20,7 @@ import workspaceMigration from "@opencode/core/database/migration/20260808023530
 import executionClaimsMigration from "@opencode/core/database/migration/20260811161259_execution_claim_attempts"
 import sessionInboxMigration from "@opencode/core/database/migration/20260812181746_session_inbox"
 import sessionViewedStateMigration from "@opencode/core/database/migration/20260819222447_session_viewed_state"
+import messagePublicationProvenanceMigration from "@opencode/core/database/migration/20261018142423_message_publication_provenance"
 import { Global } from "@opencode/util/global"
 
 const run = <A, E>(
@@ -62,6 +63,24 @@ const parkedClient = (arrived: Deferred.Deferred<void>, gate: Deferred.Deferred<
   ).pipe(Layer.provide(SqliteClient.layer({ filename: ":memory:", disableWAL: true })), Layer.provide(Reactivity.layer))
 
 describe("DatabaseMigration", () => {
+  test("adds private message provenance without fabricating legacy associations", async () => {
+    await run(
+      Effect.gen(function* () {
+        const db = yield* makeDb
+        yield* db.run(sql`CREATE TABLE session_message (id text PRIMARY KEY, data text NOT NULL)`)
+        for (const id of ["legacy-human", "legacy-assistant"]) {
+          yield* db.run(sql`INSERT INTO session_message (id, data) VALUES (${id}, ${JSON.stringify({ text: id })})`)
+        }
+        yield* DatabaseMigration.applyOnly(db, [messagePublicationProvenanceMigration])
+        yield* DatabaseMigration.applyOnly(db, [messagePublicationProvenanceMigration])
+        expect(yield* db.all(sql`SELECT id, data, publication_provenance FROM session_message ORDER BY id`)).toEqual([
+          { id: "legacy-assistant", data: JSON.stringify({ text: "legacy-assistant" }), publication_provenance: null },
+          { id: "legacy-human", data: JSON.stringify({ text: "legacy-human" }), publication_provenance: null },
+        ])
+      }),
+    )
+  })
+
   test("defaults missing workspace names while preserving legacy workspace data", async () => {
     await run(
       Effect.gen(function* () {

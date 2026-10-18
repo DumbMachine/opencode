@@ -3,6 +3,7 @@ export * as SessionPublicationAdmission from "./publication-admission.js"
 import { Context, Effect, Option } from "effect"
 import { eq } from "drizzle-orm"
 import type { Event } from "@opencode/schema/event"
+import type { ExecutionDisclosure } from "@opencode/schema/execution-disclosure"
 import { SessionEvent } from "@opencode/schema/session-event"
 import type { Database } from "../database/database.js"
 import { SessionLifecycleTable } from "./sql.js"
@@ -14,6 +15,7 @@ export class Service extends Context.Service<
   Service,
   {
     readonly accepts: (event: Event.Payload) => boolean
+    readonly publication?: ExecutionDisclosure.PublicationProof
   }
 >()("@opencode/SessionPublicationAdmission") {}
 

@@ -207,6 +207,7 @@ const schema: Omit<DatabaseMigration.Migration, "id"> = {
           "seq" BIGINT NOT NULL,
           "time_created" BIGINT NOT NULL,
           "time_updated" BIGINT NOT NULL,
+          "publication_provenance" text,
           "data" text NOT NULL
         );
       `)

@@ -81,6 +81,7 @@ const numericPgFields = new Set([
 ])
 
 const jsonPgFields = new Set([
+  "publication_provenance",
   "context_policy",
   "model",
   "fork_boundary",

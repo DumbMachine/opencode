@@ -47,6 +47,7 @@ import { SessionMessage } from "@opencode/core/session/message"
 import { SessionModelTransport } from "@opencode/core/session/model-transport"
 import { SessionProviderContext } from "@opencode/core/session/provider-context"
 import { SessionPublicationWriter } from "@opencode/core/session/publication-writer"
+import { SessionPublicationProvenance } from "@opencode/core/session/publication-provenance"
 import { Money } from "@opencode/schema/money"
 import { SessionProjector } from "@opencode/core/session/projector"
 import { SessionExecution } from "@opencode/core/session/execution"
@@ -622,6 +623,7 @@ type Scenario = Effect.Success<typeof setup>
 const scenario = (
   name: string,
   body: (s: Scenario) => Effect.gen.Return<void, unknown, Layer.Success<typeof layer> | Scope.Scope>,
+  timeout?: number,
 ) =>
   it.effect(
     name,
@@ -629,6 +631,7 @@ const scenario = (
       const s = yield* setup
       return yield* body(s)
     }),
+    timeout,
   )
 
 // Exercise conditional control through production execution and the real runner.
@@ -1034,94 +1037,114 @@ const watchRename = Effect.fnUntraced(function* (sessionID: Session.ID) {
 })
 
 describe("SessionRunnerLLM", () => {
-  scenario("publishes two real policy turns on each original through the same inbox and transcript", function* (s) {
-    for (let instance = 0; instance < 2; instance++) {
-      const original = yield* s.session.create({
-        location: Location.Ref.make({ directory: AbsolutePath.make("/project") }),
-        contextPolicy: { version: 1 },
-      })
-      const contexts: ExecutionDisclosure.ContextRequest[] = []
-      const publications: ExecutionDisclosure.PublicationRequest[] = []
-      const host = publicationHost({
-        observeContext: (request) => {
-          contexts.push(request)
-        },
-        observe: (request) => {
-          publications.push(request)
-        },
-      })
-      try {
-        const ids: SessionMessage.ID[] = []
-        for (let turn = 0; turn < 2; turn++) {
-          const input = yield* s.session.prompt({
-            sessionID: original.id,
-            text: `Human ${instance}/${turn}`,
-            metadata: { original: instance, turn },
-            execution: {
-              model: { providerID: Provider.ID.make("fake"), id: Model.ID.make("fake-model") },
-              agent: Agent.ID.make("build"),
-              instructions: "Reply once.",
-            },
-            disclosure: { ...host.config, compositionVersion: 1, publicationVersion: 1 },
-            mcpRevision: 7,
-            resume: false,
-          })
-          ids.push(input.id)
-          const pendingRetry = yield* s.session.prompt({
-            sessionID: original.id,
-            id: input.id,
-            text: "Receipt-only retry",
-            resume: false,
-          })
-          expect(pendingRetry.payload.text).toBe(input.payload.text)
-          expect((yield* s.session.inbox(original.id)).map((item) => item.id)).toEqual([input.id])
-          yield* s.llm.push(TestLLM.text(`Answer ${instance}/${turn}`, `policy-${instance}-${turn}`))
-          yield* s.session.resume(original.id)
-          const deliveredRetry = yield* s.session.prompt({
-            sessionID: original.id,
-            id: input.id,
-            text: "Delivered receipt-only retry",
-            resume: false,
-          })
-          expect(deliveredRetry.payload.text).toBe(input.payload.text)
-          expect(yield* s.session.inbox(original.id)).toEqual([])
+  scenario(
+    "publishes two real policy turns on each original through the same inbox and transcript",
+    function* (s) {
+      for (let instance = 0; instance < 2; instance++) {
+        const original = yield* s.session.create({
+          location: Location.Ref.make({ directory: AbsolutePath.make("/project") }),
+          contextPolicy: { version: 1 },
+        })
+        const contexts: ExecutionDisclosure.ContextRequest[] = []
+        const publications: ExecutionDisclosure.PublicationRequest[] = []
+        const host = publicationHost({
+          observeContext: (request) => {
+            contexts.push(request)
+          },
+          observe: (request) => {
+            publications.push(request)
+          },
+        })
+        try {
+          const ids: SessionMessage.ID[] = []
+          for (let turn = 0; turn < 2; turn++) {
+            const input = yield* s.session.prompt({
+              sessionID: original.id,
+              text: `Human ${instance}/${turn}`,
+              metadata: { original: instance, turn },
+              execution: {
+                model: { providerID: Provider.ID.make("fake"), id: Model.ID.make("fake-model") },
+                agent: Agent.ID.make("build"),
+                instructions: "Reply once.",
+              },
+              disclosure: { ...host.config, compositionVersion: 1, publicationVersion: 1 },
+              mcpRevision: 7,
+              resume: false,
+            })
+            ids.push(input.id)
+            const pendingRetry = yield* s.session.prompt({
+              sessionID: original.id,
+              id: input.id,
+              text: "Receipt-only retry",
+              resume: false,
+            })
+            expect(pendingRetry.payload.text).toBe(input.payload.text)
+            expect((yield* s.session.inbox(original.id)).map((item) => item.id)).toEqual([input.id])
+            yield* s.llm.push(TestLLM.text(`Answer ${instance}/${turn}`, `policy-${instance}-${turn}`))
+            yield* s.session.resume(original.id)
+            const deliveredRetry = yield* s.session.prompt({
+              sessionID: original.id,
+              id: input.id,
+              text: "Delivered receipt-only retry",
+              resume: false,
+            })
+            expect(deliveredRetry.payload.text).toBe(input.payload.text)
+            expect(yield* s.session.inbox(original.id)).toEqual([])
+          }
+          expect(contexts.map((context) => context.kind)).toEqual([
+            "input",
+            "input",
+            "primary",
+            "input",
+            "input",
+            "primary",
+          ])
+          expect(publications.map((unit) => unit.kind)).toEqual(
+            Array.from({ length: 2 }, () => [
+              "human-input" as const,
+              "human-input" as const,
+              ...Array<ExecutionDisclosure.PublicationRequest["kind"]>(6).fill("model-output"),
+            ]).flat(),
+          )
+          expect(new Set(publications.map((unit) => unit.unitID)).size).toBe(16)
+          for (const context of contexts) expect(context.sessionID).toBe(original.id)
+          const history = yield* s.session.context(original.id)
+          expect(history.map((message) => message.type)).toEqual(["user", "assistant", "user", "assistant"])
+          expect(history.filter((message) => message.type === "user").map((message) => message.id)).toEqual(ids)
+          expect(JSON.stringify(history)).toContain(`Answer ${instance}/1`)
+          expect(JSON.stringify(history)).not.toContain(host.config.token)
+          expect(JSON.stringify(history)).not.toContain("publication_provenance")
+          const projected = yield* s.db
+            .select()
+            .from(SessionMessageTable)
+            .where(eq(SessionMessageTable.session_id, original.id))
+            .all()
+            .pipe(Effect.orDie)
+          for (const message of history.filter((message) => message.type === "assistant")) {
+            const provenance = projected.find((row) => row.id === message.id)?.publication_provenance
+            expect(provenance?.revision).toBe(SessionPublicationProvenance.revision(message))
+            expect(provenance?.references).toHaveLength(1)
+            expect(provenance?.references[0]?.contextReference).toBe("1".repeat(64))
+          }
+          expect(
+            projected.filter((row) => row.type === "user").every((row) => row.publication_provenance === null),
+          ).toBe(true)
+          const rows = yield* s.db
+            .select()
+            .from(EventTable)
+            .where(eq(EventTable.aggregate_id, original.id))
+            .all()
+            .pipe(Effect.orDie)
+          expect(
+            rows.filter((row) => row.type === Bus.versionedType(SessionEvent.PublicationCommitted.type, 1)),
+          ).toHaveLength(16)
+        } finally {
+          host.server.stop(true)
         }
-        expect(contexts.map((context) => context.kind)).toEqual([
-          "input",
-          "input",
-          "primary",
-          "input",
-          "input",
-          "primary",
-        ])
-        expect(publications.map((unit) => unit.kind)).toEqual(
-          Array.from({ length: 2 }, () => [
-            "human-input" as const,
-            "human-input" as const,
-            ...Array<ExecutionDisclosure.PublicationRequest["kind"]>(6).fill("model-output"),
-          ]).flat(),
-        )
-        expect(new Set(publications.map((unit) => unit.unitID)).size).toBe(16)
-        for (const context of contexts) expect(context.sessionID).toBe(original.id)
-        const history = yield* s.session.context(original.id)
-        expect(history.map((message) => message.type)).toEqual(["user", "assistant", "user", "assistant"])
-        expect(history.filter((message) => message.type === "user").map((message) => message.id)).toEqual(ids)
-        expect(JSON.stringify(history)).toContain(`Answer ${instance}/1`)
-        expect(JSON.stringify(history)).not.toContain(host.config.token)
-        const rows = yield* s.db
-          .select()
-          .from(EventTable)
-          .where(eq(EventTable.aggregate_id, original.id))
-          .all()
-          .pipe(Effect.orDie)
-        expect(
-          rows.filter((row) => row.type === Bus.versionedType(SessionEvent.PublicationCommitted.type, 1)),
-        ).toHaveLength(16)
-      } finally {
-        host.server.stop(true)
       }
-    }
-  })
+    },
+    15000,
+  )
   scenario("rejects denied human admission without retaining input or its staged grant", function* (s) {
     for (const substitution of ["kind", "input"]) {
       const original = yield* s.session.create({

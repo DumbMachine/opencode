@@ -1,8 +1,8 @@
 {
   "version": "7",
   "dialect": "sqlite",
-  "id": "78092380-3a7e-4430-9647-3ac7d7ee1333",
-  "prevIds": ["5aacc289-d87d-46bd-bace-e0e2a4f262f4"],
+  "id": "a313e729-cd3b-4890-a5d3-1e25f0468eff",
+  "prevIds": ["78092380-3a7e-4430-9647-3ac7d7ee1333"],
   "ddl": [
     {
       "name": "account_state",
@@ -1021,6 +1021,16 @@
       "default": null,
       "generated": null,
       "name": "time_updated",
+      "entityType": "columns",
+      "table": "session_message"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "publication_provenance",
       "entityType": "columns",
       "table": "session_message"
     },

@@ -1,3 +1,4 @@
+import type { SessionPublicationProvenance } from "./publication-provenance.js"
 import { sqliteTable, text, integer, index, primaryKey, real, uniqueIndex } from "drizzle-orm/sqlite-core"
 import { sql } from "drizzle-orm"
 import { directoryColumn, pathColumn } from "../database/path.js"
@@ -96,6 +97,7 @@ export const SessionMessageTable = sqliteTable(
     type: text().$type<SessionMessage.Type>().notNull(),
     seq: integer().notNull(),
     ...Timestamps,
+    publication_provenance: text({ mode: "json" }).$type<SessionPublicationProvenance.State>(),
     data: text({ mode: "json" }).notNull().$type<SessionMessageData>(),
   },
   (table) => [
