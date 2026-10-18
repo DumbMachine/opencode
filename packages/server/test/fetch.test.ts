@@ -111,6 +111,7 @@ it.live("serves the HttpApi and enforces Basic auth like the Node server", () =>
     expect(response.headers.get("x-opencode-input-config")).toBe("1")
     expect(response.headers.get("x-opencode-session-retirement")).toBe("1")
     expect(response.headers.get("x-opencode-inbox-capability-renewal")).toBe("2")
+    expect(response.headers.get("x-opencode-context-preflight")).toBe("1")
     expect(response.headers.get("x-opencode-model-budget")).toBe(
       process.env.OPENCODE_MODEL_BUDGET_ENDPOINT && process.env.OPENCODE_MODEL_BUDGET_TOKEN ? "4" : null,
     )
@@ -589,6 +590,66 @@ it.live("renews only pending MCP inputs through the authenticated API without re
       expect(yield* Effect.promise(() => inbox.json())).toEqual({ data: [] })
       expect((yield* request(`${base}/retire`, "POST")).status).toBe(204)
       expect((yield* request(path, "PUT", { mcp: {}, revision: 4 })).status).toBe(404)
+    }
+  }),
+)
+
+it.live("installs and renews only original disclosure components without exposing credentials", () =>
+  Effect.gen(function* () {
+    const handler = yield* ServerFetch.make({ ...options, password: "secret" })
+    const headers = { authorization: `Basic ${btoa("opencode:secret")}`, "content-type": "application/json" }
+    const request = (url: string, method: string, body?: unknown) =>
+      Effect.promise(() =>
+        handler(
+          new Request(`http://opencode.local${url}`, {
+            method,
+            headers,
+            body: body === undefined ? undefined : JSON.stringify(body),
+          }),
+        ),
+      )
+    const config = {
+      version: 1,
+      endpoint: "http://127.0.0.1:1/context",
+      token: "http-private-disclosure-token",
+      issuer: "fixture-host",
+      audience: "fixture-native",
+      keys: [{ id: "key", algorithm: "Ed25519", publicKey: "a".repeat(43) }],
+    }
+    for (const id of ["ses_http_disclosure_one", "ses_http_disclosure_two"]) {
+      expect((yield* request("/api/session", "POST", { id })).status).toBe(200)
+      const base = `/api/session/${id}`
+      const input = `msg_${id}`
+      const prompt = { id: input, text: "Original request", mcp: {}, disclosure: config, mcpRevision: 1, resume: false }
+      const admitted = yield* request(base + "/prompt", "POST", prompt)
+      expect(admitted.status).toBe(200)
+      const admittedBody = yield* Effect.promise(() => admitted.text())
+      expect(admittedBody).toContain('"disclosure"')
+      expect(admittedBody).not.toContain(config.token)
+      expect(admittedBody).not.toContain(config.endpoint)
+      const inbox = yield* request(base + "/inbox", "GET")
+      expect(yield* Effect.promise(() => inbox.text())).not.toContain(config.token)
+      expect(
+        (yield* request(base + "/prompt", "POST", { ...prompt, disclosure: { ...config, token: "replacement" } }))
+          .status,
+      ).toBe(409)
+      const path = `${base}/inbox/${input}/capability`
+      const claim = "claim_" + id
+      expect((yield* request(path + "/claim", "POST", { claim })).status).toBe(200)
+      expect((yield* request(path, "PUT", { mcp: {}, revision: 2, claim })).status).toBe(409)
+      expect((yield* request(path, "PUT", { mcp: {}, disclosure: config, revision: 2, claim })).status).toBe(204)
+      expect((yield* request(path, "PUT", { mcp: {}, disclosure: config, revision: 2, claim })).status).toBe(204)
+      expect(
+        (yield* request(base + "/command", "POST", {
+          name: "unsupported",
+          text: "",
+          disclosure: config,
+          mcpRevision: 1,
+        })).status,
+      ).toBe(400)
+      expect((yield* request(`${base}/inbox/${input}`, "DELETE")).status).toBe(204)
+      expect((yield* request(path, "PUT", { mcp: {}, disclosure: config, revision: 3, claim })).status).toBe(409)
+      expect((yield* request(base + "/retire", "POST")).status).toBe(204)
     }
   }),
 )

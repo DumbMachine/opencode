@@ -596,3 +596,30 @@ it.effect("forked session compaction reuses the fork root prompt cache key", () 
     expect(requests[0]?.promptCacheKey).toBe(rootID)
   }),
 )
+
+it.effect("rejects disclosure-required manual compaction before either provider path", () =>
+  Effect.gen(function* () {
+    requests = []
+    const compaction = yield* SessionCompaction.Service
+    const session = yield* insertSession(Session.ID.make("ses_disclosure_compaction"))
+    const user = SessionMessage.User.make({
+      id: SessionMessage.ID.create(),
+      type: "user",
+      text: "Protected history",
+      capabilities: ["disclosure"],
+      time: { created: DateTime.makeUnsafe(0) },
+    })
+    const context: SessionContext.Loaded = {
+      session,
+      model: resolved,
+      input: user,
+      messages: [user],
+      initial: "",
+      agent: { id: Agent.defaultID, info: Agent.Info.default(Agent.defaultID) },
+      tools: { definitions: [], execute: () => Effect.die("unused") },
+    }
+    const outcome = yield* compaction.compact({ reason: "manual", inputID: SessionMessage.ID.create(), context })
+    expect(outcome).toMatchObject({ status: "failed", error: { type: "compaction.unavailable" } })
+    expect(requests).toEqual([])
+  }),
+)

@@ -108,9 +108,18 @@ export const layer = Layer.effect(
       if (!session) return
       const firstUser = yield* SessionHistory.firstUserMessage(db, session.id)
       if (!firstUser) return
-      const text = !isUntitled(session)
-        ? yield* store.context(session.id).pipe(
-            Effect.map((messages) => {
+      const messages = !isUntitled(session)
+        ? yield* store.context(session.id).pipe(Effect.orElseSucceed(() => undefined))
+        : undefined
+      if (
+        firstUser.capabilities?.includes("disclosure") ||
+        messages?.some((message) => message.type === "user" && message.capabilities?.includes("disclosure")) ||
+        (yield* SessionHistory.requiresDisclosure(db, sessionID))
+      )
+        return yield* Effect.die(new Error("Execution context authorization is unavailable for title generation"))
+      const text =
+        messages !== undefined
+          ? (() => {
               const original = `Original request:\n${firstUser.text.slice(0, MAX_FIRST_MESSAGE_LENGTH)}`
               const recent = messages
                 .flatMap((message) => {
@@ -126,10 +135,8 @@ export const layer = Layer.effect(
               if (!recent) return original
               const prefix = `${original}\n\nRecent conversation:\n`
               return `${prefix}${recent.slice(-(MAX_CONTEXT_LENGTH - prefix.length))}`
-            }),
-            Effect.orElseSucceed(() => firstUser.text),
-          )
-        : firstUser.text
+            })()
+          : firstUser.text
       const selection = yield* context.selectTitle(session, firstUser.execution?.model)
       if (!selection) return
       const title =

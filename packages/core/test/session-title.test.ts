@@ -1,4 +1,4 @@
-import { beforeEach, expect } from "bun:test"
+import { beforeEach, expect, spyOn } from "bun:test"
 import {
   AIError,
   LLMClient,
@@ -23,6 +23,7 @@ import { SessionRunnerModel } from "@opencode/core/session/runner/model"
 import { SessionTable } from "@opencode/core/session/sql"
 import { SessionStore } from "@opencode/core/session/store"
 import { SessionTitle } from "@opencode/core/session/title"
+import { SessionHistory } from "@opencode/core/session/history"
 import { PluginHooks } from "@opencode/core/plugin/hooks"
 import { PluginSupervisor } from "@opencode/core/plugin/supervisor"
 import { Location } from "@opencode/core/location"
@@ -611,5 +612,46 @@ it.effect("automatic title fallback retains its causal input independently of fi
     yield* title.generate(sessionID)
     expect(requests).toHaveLength(1)
     expect(requests[0]?.http?.headers?.["x-opencode-input"]).toBeUndefined()
+  }),
+)
+
+it.effect("rejects marked history that arrives while regeneration selects context", () =>
+  Effect.gen(function* () {
+    const id = Session.ID.make("ses_disclosure_title_race")
+    yield* insertSession(id, "Existing title")
+    yield* prompt(id, "Original ordinary request")
+    const { db } = yield* Database.Service
+    expect(yield* SessionHistory.firstUserMessage(db, id)).toBeDefined()
+    const store = yield* SessionStore.Service
+    const bus = yield* Bus.Service
+    const marked = SessionMessage.ID.create()
+    let selectedContext = false
+    const originalContext = store.context
+    const interleaving = spyOn(store, "context").mockImplementation((sessionID) =>
+      Effect.gen(function* () {
+        selectedContext = true
+        yield* bus.publish(SessionEvent.InboxEnqueued, {
+          sessionID,
+          inboxID: marked,
+          item: {
+            type: "user",
+            payload: { text: "New protected content", capabilities: ["disclosure"] },
+            delivery: "steer",
+          },
+        })
+        yield* bus.publish(SessionEvent.InboxDelivered, { sessionID, inboxID: marked })
+        return yield* originalContext(sessionID)
+      }),
+    )
+    try {
+      const title = yield* SessionTitle.Service
+      const result = yield* Effect.exit(title.generate(id, marked))
+      expect(selectedContext).toBe(true)
+      expect(result._tag).toBe("Failure")
+      expect(requests).toEqual([])
+      expect((yield* store.get(id))?.title).toBe("Existing title")
+    } finally {
+      interleaving.mockRestore()
+    }
   }),
 )

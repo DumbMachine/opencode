@@ -321,6 +321,7 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
               skills: ctx.payload.skills,
               execution: ctx.payload.execution,
               mcp: ctx.payload.mcp,
+              disclosure: ctx.payload.disclosure,
               mcpRevision: ctx.payload.mcpRevision,
               metadata: ctx.payload.metadata,
               delivery: ctx.payload.delivery,
@@ -349,6 +350,11 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
       .handle(
         "session.command",
         Effect.fn(function* (ctx) {
+          if (ctx.payload.disclosure !== undefined)
+            return yield* new InvalidRequestError({
+              message: "Execution context authorization is unavailable for commands",
+              field: "disclosure",
+            })
           yield* session
             .command({
               sessionID: ctx.params.sessionID,

@@ -99,6 +99,7 @@ import { TestClock } from "effect/testing"
 import { asc, desc, eq, sql } from "drizzle-orm"
 import { testEffect } from "./lib/effect"
 import { promptLocationNode } from "./fixture/prompt-location"
+import { disclosureHost } from "./fixture/disclosure-host"
 import { LocationServiceMap } from "@opencode/core/location-service-map"
 import { Expected } from "./lib/session-message"
 import { permissionLayer } from "./lib/permission"
@@ -1029,6 +1030,78 @@ const watchRename = Effect.fnUntraced(function* (sessionID: Session.ID) {
 })
 
 describe("SessionRunnerLLM", () => {
+  scenario("checks disclosure with the captured original input before the provider starts", function* (s) {
+    let checked = 0
+    const host = disclosureHost({
+      unknown: true,
+      observe: (input) => {
+        checked++
+        expect(input.inputID).toBe(original.id)
+        expect(input.kind).toBe("primary")
+        expect(s.requests).toHaveLength(0)
+      },
+    })
+    const original = yield* s.session.prompt({
+      sessionID,
+      text: "Original protected input",
+      disclosure: host.config,
+      mcpRevision: 1,
+      resume: false,
+    })
+    try {
+      yield* s.llm.push(TestLLM.text("Authorized private answer", "disclosure-answer"))
+      yield* s.resume
+      expect(checked).toBe(1)
+      expect(s.requests).toHaveLength(1)
+      expect(yield* s.inbox).toEqual([])
+      expect(JSON.stringify(yield* s.context)).not.toContain(host.config.token)
+    } finally {
+      host.server.stop(true)
+    }
+  })
+  scenario("blocks a substituted disclosure proof before invoking the provider", function* (s) {
+    const host = disclosureHost({
+      mutate: (proof) => ({ ...proof, inputID: SessionMessage.ID.make("msg_other_original") }),
+    })
+    try {
+      yield* s.session.prompt({
+        sessionID,
+        text: "Protected input",
+        disclosure: host.config,
+        mcpRevision: 1,
+        resume: false,
+      })
+      expect((yield* Effect.exit(s.resume))._tag).toBe("Failure")
+      expect(s.requests).toHaveLength(0)
+      expect(JSON.stringify(yield* s.context)).not.toContain(host.config.token)
+    } finally {
+      host.server.stop(true)
+    }
+  })
+  scenario("keeps a disclosure-marked input pending when its process-local service is lost", function* (s) {
+    let checked = 0
+    const host = disclosureHost({
+      observe: () => {
+        checked++
+      },
+    })
+    try {
+      const input = yield* s.session.prompt({
+        sessionID,
+        text: "Pending protected input",
+        disclosure: host.config,
+        mcpRevision: 1,
+        resume: false,
+      })
+      yield* SessionExecutionCapability.clear(sessionID)
+      yield* s.resume
+      expect(s.requests).toHaveLength(0)
+      expect(checked).toBe(0)
+      expect((yield* s.inbox).map((item) => item.id)).toEqual([input.id])
+    } finally {
+      host.server.stop(true)
+    }
+  })
   scenario("applies a new request-scoped grant after an earlier MCP turn", function* (s) {
     const first = yield* s.session.prompt({ sessionID, text: "First", capabilities: ["mcp"], resume: false })
     yield* SessionExecutionCapability.set(sessionID, { inputID: first.id, mcp: {} })

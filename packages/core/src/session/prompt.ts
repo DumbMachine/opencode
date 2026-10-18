@@ -4,6 +4,7 @@ import { Base64, FileAttachment, Prompt } from "@opencode/schema/prompt"
 import { PromptInput } from "@opencode/schema/prompt-input"
 import { SessionInbox } from "@opencode/schema/session-inbox"
 import type { Mcp } from "@opencode/schema/mcp"
+import type { ExecutionDisclosure } from "@opencode/schema/execution-disclosure"
 import type { Session } from "@opencode/schema/session"
 import type { SessionMessage } from "@opencode/schema/session-message"
 import { FSUtil } from "@opencode/util/fs-util"
@@ -25,6 +26,7 @@ export type Input = {
   skills?: PromptInput.Prompt["skills"]
   execution?: SessionInbox.UserPayload["execution"]
   capabilities?: readonly string[]
+  disclosure?: ExecutionDisclosure.Service
   mcp?: Mcp.RequestServers
   mcpRevision?: Mcp.RequestRevision
   metadata?: Record<string, unknown>

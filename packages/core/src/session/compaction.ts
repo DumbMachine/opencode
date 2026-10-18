@@ -202,6 +202,19 @@ export const layer = Layer.effect(
       if (trigger.reason !== "manual" && !settings.auto) return { status: "skipped" }
       const ceiling = calculateCeiling(context.model.limit, settings.buffer)
       if (trigger.reason === "auto" && !due(context, ceiling)) return { status: "skipped" }
+      if (
+        context.disclosure !== undefined ||
+        (context.input?.type === "user" && context.input.capabilities?.includes("disclosure")) ||
+        context.messages.some((message) => message.type === "user" && message.capabilities?.includes("disclosure")) ||
+        (yield* SessionHistory.requiresDisclosure(db, context.session.id))
+      )
+        return {
+          status: "failed",
+          error: {
+            type: "compaction.unavailable",
+            message: "Execution context authorization is unavailable for compaction",
+          },
+        }
       // An unknown window never triggers auto compaction, but the compaction request still needs a size to aim for.
       const cap = Number.isFinite(ceiling)
         ? ceiling

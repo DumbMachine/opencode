@@ -505,6 +505,7 @@ const EndpointSessionPrompt = (raw: RawClient["server.session"]) => (input: Sess
         files: input["files"],
         agents: input["agents"],
         skills: input["skills"],
+        disclosure: input["disclosure"],
         mcpRevision: input["mcpRevision"],
         mcp: input["mcp"],
         execution: input["execution"],
@@ -528,6 +529,7 @@ const EndpointSessionCommand = (raw: RawClient["server.session"]) => (input: Ses
         files: input["files"],
         agents: input["agents"],
         skills: input["skills"],
+        disclosure: input["disclosure"],
         mcpRevision: input["mcpRevision"],
         mcp: input["mcp"],
         delivery: input["delivery"],
@@ -650,7 +652,12 @@ const EndpointSessionInboxRenewCapability =
     preserveEffect<SessionInboxRenewCapabilityOutput>()(
       raw["session.inbox.renewCapability"]({
         params: { sessionID: input["sessionID"], inboxID: input["inboxID"] },
-        payload: { mcp: input["mcp"], revision: input["revision"], claim: input["claim"] },
+        payload: {
+          mcp: input["mcp"],
+          disclosure: input["disclosure"],
+          revision: input["revision"],
+          claim: input["claim"],
+        },
       }).pipe(Effect.mapError(mapClientError)),
     )
 

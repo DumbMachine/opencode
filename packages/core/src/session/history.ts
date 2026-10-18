@@ -184,6 +184,10 @@ export const preview = Effect.fn("SessionHistory.preview")(function* (
         return {
           initial: assembled.initial,
           messages: settled.map((entry) => entry.message),
+          requiresDisclosure:
+            settled.some(
+              (entry) => entry.message.type === "user" && entry.message.capabilities?.includes("disclosure"),
+            ) || (yield* requiresDisclosure(db, sessionID)),
           instructionUpdate: assembled.update,
         }
       }),
@@ -209,3 +213,24 @@ export const firstUserMessage = Effect.fn("SessionHistory.firstUserMessage")(fun
 })
 
 export * as SessionHistory from "./history.js"
+
+/** Auxiliary requests cannot borrow another input's disclosure service. */
+export const requiresDisclosure = Effect.fn("SessionHistory.requiresDisclosure")(function* (
+  db: DatabaseService,
+  sessionID: SessionSchema.ID,
+) {
+  const row = yield* db
+    .select({ id: SessionMessageTable.id })
+    .from(SessionMessageTable)
+    .where(
+      and(
+        eq(SessionMessageTable.session_id, sessionID),
+        eq(SessionMessageTable.type, "user"),
+        sql`json_extract(${SessionMessageTable.data}, '$.capabilities') LIKE '%"disclosure"%'`,
+      ),
+    )
+    .limit(1)
+    .get()
+    .pipe(Effect.orDie)
+  return row !== undefined
+})

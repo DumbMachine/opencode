@@ -455,3 +455,44 @@ it.effect("independent generation retains Session defaults after a configured in
     expect(yield* durableState(db, sessionID)).toEqual(before)
   }),
 )
+
+it.effect("rejects marked content delivered during independent context selection", () =>
+  Effect.gen(function* () {
+    requests.length = 0
+    instruction = "Initial context"
+    const { bus, session } = yield* setup
+    const context = yield* SessionContext.Service
+    const interleaved = SessionContext.Service.of({
+      ...context,
+      select: (...args) =>
+        Effect.gen(function* () {
+          const id = SessionMessage.ID.create()
+          yield* bus.publish(SessionEvent.InboxEnqueued, {
+            sessionID,
+            inboxID: id,
+            item: {
+              type: "user",
+              payload: { text: "New protected content", capabilities: ["disclosure"] },
+              delivery: "steer",
+            },
+          })
+          yield* bus.publish(SessionEvent.InboxDelivered, { sessionID, inboxID: id })
+          return yield* context.select(...args)
+        }),
+    })
+    const isolated = Instance.Service.of({
+      provide: () =>
+        Effect.provide(
+          Layer.mergeAll(
+            Layer.succeed(SessionContext.Service, interleaved),
+            Layer.mock(Plugin.Service, { awaitActivation: Effect.void }),
+          ) as Layer.Layer<Instance.Services>,
+        ),
+    })
+    const exit = yield* Effect.exit(
+      SessionGenerate.generate({ session, prompt: "Generate" }).pipe(Effect.provideService(Instance.Service, isolated)),
+    )
+    expect(exit._tag).toBe("Failure")
+    expect(requests).toEqual([])
+  }),
+)

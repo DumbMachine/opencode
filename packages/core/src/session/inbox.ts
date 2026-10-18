@@ -17,6 +17,7 @@ import {
   UserPayload,
 } from "@opencode/schema/session-inbox"
 import type { Mcp } from "@opencode/schema/mcp"
+import type { ExecutionDisclosure } from "@opencode/schema/execution-disclosure"
 import { Database } from "../database/database.js"
 import { Bus } from "../bus.js"
 import { KeyedMutex } from "../effect/keyed-mutex.js"
@@ -243,7 +244,7 @@ export const make = Effect.fn("SessionInbox.make")(function* () {
           if (
             pending?.sessionID !== input.sessionID ||
             pending.type !== "user" ||
-            !pending.payload.capabilities?.includes("mcp")
+            !pending.payload.capabilities?.some((value) => value === "mcp" || value === "disclosure")
           )
             return yield* new LifecycleConflict({ id: input.id })
           const renewal = yield* SessionExecutionCapability.beginRenewal(input.sessionID, input.id, input.claim)
@@ -258,7 +259,8 @@ export const make = Effect.fn("SessionInbox.make")(function* () {
   const renewCapability = Effect.fn("SessionInbox.renewCapability")(
     (
       input: PendingRef & {
-        readonly mcp: Mcp.RequestServers
+        readonly mcp?: Mcp.RequestServers
+        readonly disclosure?: ExecutionDisclosure.Service
         readonly revision?: number
         readonly claim?: string
       },
@@ -267,14 +269,20 @@ export const make = Effect.fn("SessionInbox.make")(function* () {
         input.sessionID,
         Effect.gen(function* () {
           yield* SessionLifecycle.check(db, input.sessionID)
-          const grant = { inputID: input.id, mcp: input.mcp, revision: input.revision }
+          const grant = { inputID: input.id, mcp: input.mcp, disclosure: input.disclosure, revision: input.revision }
           if (input.claim && (yield* SessionExecutionCapability.committedRenewal(input.sessionID, grant, input.claim)))
             return
           const pending = yield* find(db, input.id)
           if (
             pending?.sessionID !== input.sessionID ||
             pending.type !== "user" ||
-            !pending.payload.capabilities?.includes("mcp")
+            !pending.payload.capabilities?.some((value) => value === "mcp" || value === "disclosure")
+          )
+            return yield* new LifecycleConflict({ id: input.id })
+          const required = pending.payload.capabilities ?? []
+          if (
+            (input.mcp !== undefined) !== required.includes("mcp") ||
+            (input.disclosure !== undefined) !== required.includes("disclosure")
           )
             return yield* new LifecycleConflict({ id: input.id })
           // Claim readiness before the host changes its issuer row. An
@@ -671,8 +679,8 @@ const readyRows = (sessionID: SessionSchema.ID, rows: ReadonlyArray<typeof Sessi
       const input = fromRow(row)
       if (
         input.type === "user" &&
-        input.payload.capabilities?.includes("mcp") &&
-        !(yield* SessionExecutionCapability.ready(sessionID, input.id))
+        input.payload.capabilities?.some((value) => value === "mcp" || value === "disclosure") &&
+        !(yield* SessionExecutionCapability.ready(sessionID, input.id, input.payload.capabilities))
       )
         return false
     }

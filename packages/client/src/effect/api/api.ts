@@ -15,6 +15,7 @@ import type { SessionMessage } from "@opencode/schema/session-message"
 import type { SessionInbox } from "@opencode/schema/session-inbox"
 import type { PromptInput } from "@opencode/schema/prompt-input"
 import type { AgentAttachment } from "@opencode/schema/prompt"
+import type { ExecutionDisclosure } from "@opencode/schema/execution-disclosure"
 import type { Mcp } from "@opencode/schema/mcp"
 import type { Skill } from "@opencode/schema/skill"
 import type { FileDiff } from "@opencode/schema/file-diff"
@@ -275,6 +276,7 @@ export type SessionPromptInput = {
   readonly files?: ReadonlyArray<PromptInput.FileAttachment> | undefined
   readonly agents?: ReadonlyArray<AgentAttachment> | undefined
   readonly skills?: ReadonlyArray<PromptInput.SkillAttachment> | undefined
+  readonly disclosure?: ExecutionDisclosure.Service | undefined
   readonly mcpRevision?: Mcp.RequestRevision | undefined
   readonly mcp?: Mcp.RequestServers | undefined
   readonly execution?:
@@ -294,6 +296,7 @@ export type SessionCommandInput = {
   readonly files?: ReadonlyArray<PromptInput.FileAttachment> | undefined
   readonly agents?: ReadonlyArray<AgentAttachment> | undefined
   readonly skills?: ReadonlyArray<PromptInput.SkillAttachment> | undefined
+  readonly disclosure?: ExecutionDisclosure.Service | undefined
   readonly mcpRevision?: Mcp.RequestRevision | undefined
   readonly mcp?: Mcp.RequestServers | undefined
   readonly delivery?: SessionInbox.Delivery | undefined
@@ -397,7 +400,8 @@ export type SessionInboxBeginCapabilityRenewalOperation<E = never> = (
 export type SessionInboxRenewCapabilityInput = {
   readonly sessionID: Session.ID
   readonly inboxID: SessionMessage.ID
-  readonly mcp: Mcp.RequestServers
+  readonly mcp?: Mcp.RequestServers | undefined
+  readonly disclosure?: ExecutionDisclosure.Service | undefined
   readonly revision?: Mcp.RequestRevision | undefined
   readonly claim?: Mcp.RequestClaim | undefined
 }

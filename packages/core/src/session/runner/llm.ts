@@ -264,13 +264,16 @@ const layer = Layer.effect(
         yield* SessionExecutionCapability.get(sessionID, preview.input?.type === "user" ? preview.input.id : undefined),
       )
       if (!grant) return preview
+      if (grant.mcp === undefined) return { ...preview, disclosure: structuredClone(grant.disclosure) }
       const executionMcp = yield* mcp.request(grant.mcp)
       const next = yield* context.select(sessionID, executionMcp, {
         input: preview.input,
         selection: { ...selected, model: preview.model.ref },
       })
       yield* InstructionState.prepare(db, bus, next.instructions, sessionID)
-      return yield* context.load(next)
+      const loaded = yield* context.load(next)
+      if (loaded.input?.id !== grant.inputID) return yield* Effect.interrupt
+      return { ...loaded, disclosure: structuredClone(grant.disclosure) }
     })
 
     const prepareSelection = Effect.fn("SessionRunner.prepareSelection")(function* (
@@ -317,6 +320,8 @@ const layer = Layer.effect(
         })
         const prepared = yield* context.request.primary({
           session: loaded.session,
+          disclosure: loaded.disclosure,
+          disclosureComponents: loaded.disclosureComponents,
           inputID: loaded.input?.type === "user" ? loaded.input.id : undefined,
           agent: loaded.agent.id,
           model: loaded.model,
@@ -472,8 +477,14 @@ export const executionGrant = Effect.fn("SessionRunner.executionGrant")(function
   grant: SessionExecutionCapability.Grant | undefined,
 ) {
   const latest = [...messages].toReversed().find((message) => message.type === "user")
-  if (!latest?.capabilities?.includes("mcp")) return undefined
-  if (!grant || latest.id !== grant.inputID)
-    return yield* new ExecutionCapabilityUnavailableError({ sessionID, inputID: latest.id })
+  const required = latest?.capabilities ?? []
+  if (!required.some((value) => value === "mcp" || value === "disclosure")) return undefined
+  if (
+    !grant ||
+    latest?.id !== grant.inputID ||
+    (required.includes("mcp") && grant.mcp === undefined) ||
+    (required.includes("disclosure") && grant.disclosure === undefined)
+  )
+    return yield* new ExecutionCapabilityUnavailableError({ sessionID, inputID: latest!.id })
   return grant
 })

@@ -4,6 +4,7 @@ import { DateTime, Effect, Fiber, Scope } from "effect"
 import type { Agent } from "@opencode/schema/agent"
 import type { Model } from "@opencode/schema/model"
 import type { Mcp } from "@opencode/schema/mcp"
+import type { ExecutionDisclosure } from "@opencode/schema/execution-disclosure"
 import type { Permission } from "@opencode/schema/permission"
 import { Event } from "@opencode/schema/event"
 import { FSUtil } from "@opencode/util/fs-util"
@@ -143,7 +144,12 @@ export const make = Effect.fn("Session.make")(function* () {
   const renewInboxCapability = Effect.fn("Session.renewInboxCapability")(function* (
     sessionID: SessionSchema.ID,
     inboxID: SessionMessage.ID,
-    input: { readonly mcp: Mcp.RequestServers; readonly revision?: number; readonly claim?: string },
+    input: {
+      readonly mcp?: Mcp.RequestServers
+      readonly disclosure?: ExecutionDisclosure.Service
+      readonly revision?: number
+      readonly claim?: string
+    },
   ) {
     yield* get(sessionID)
     yield* admission
@@ -169,6 +175,8 @@ export const make = Effect.fn("Session.make")(function* () {
     Effect.uninterruptibleMask((restore) =>
       Effect.gen(function* () {
         const session = yield* get(sessionID)
+        if (input.disclosure !== undefined && input.mcpRevision === undefined)
+          return yield* new PromptConflictError({ sessionID, messageID: input.id ?? SessionMessage.ID.create() })
         const messageID = input.id ?? SessionMessage.ID.create()
         const request = {
           id: messageID,
@@ -184,10 +192,16 @@ export const make = Effect.fn("Session.make")(function* () {
                 SessionPrompt.prepare({
                   session,
                   messageID,
-                  input:
-                    input.mcp === undefined
-                      ? input
-                      : { ...input, capabilities: [...new Set([...(input.capabilities ?? []), "mcp"])] },
+                  input: {
+                    ...input,
+                    capabilities: [
+                      ...new Set([
+                        ...(input.capabilities ?? []),
+                        ...(input.mcp === undefined ? [] : ["mcp"]),
+                        ...(input.disclosure === undefined ? [] : ["disclosure"]),
+                      ]),
+                    ],
+                  },
                 }).pipe(Effect.provideService(Instance.Service, instances), Effect.provideService(FSUtil.Service, fs)),
               )
           // Preparation may wait on hooks or attachments. Only final admission
@@ -202,12 +216,17 @@ export const make = Effect.fn("Session.make")(function* () {
                 if (latest.revert) yield* SessionRevert.commit(bus, latest)
               }
               const admitted = current ?? (yield* admission.admit({ id: messageID, sessionID, item: item! }))
-              if (input.mcp !== undefined) {
-                if (!admitted.payload.capabilities?.includes("mcp"))
+              if (input.mcp !== undefined || input.disclosure !== undefined) {
+                const required = admitted.payload.capabilities ?? []
+                if (
+                  (input.mcp !== undefined) !== required.includes("mcp") ||
+                  (input.disclosure !== undefined) !== required.includes("disclosure")
+                )
                   return yield* new SessionInbox.LifecycleConflict({ id: messageID })
                 const installed = yield* SessionExecutionCapability.set(sessionID, {
                   inputID: admitted.id,
                   mcp: input.mcp,
+                  disclosure: input.disclosure,
                   revision: input.mcpRevision,
                 })
                 if (!installed) return yield* new SessionInbox.LifecycleConflict({ id: messageID })

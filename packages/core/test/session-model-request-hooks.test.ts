@@ -1,5 +1,9 @@
 import { describe, expect } from "bun:test"
 import { OpenAIChat } from "@opencode/ai/protocols"
+import { compileRequest } from "@opencode/ai/route/client"
+import { Message, SystemPart, ToolDefinition, Media } from "@opencode/ai"
+import { SessionDisclosure } from "@opencode/core/session/disclosure"
+import { disclosureHost } from "./fixture/disclosure-host"
 import { Agent } from "@opencode/schema/agent"
 import { Money } from "@opencode/schema/money"
 import { SessionMessage } from "@opencode/schema/session-message"
@@ -12,7 +16,7 @@ import { AbsolutePath } from "@opencode/core/schema"
 import { SessionModelRequest } from "@opencode/core/session/model-request"
 import { SessionModelTransport } from "@opencode/core/session/model-transport"
 import { SessionRunnerModel } from "@opencode/core/session/runner/model"
-import { DateTime, Effect, Stream } from "effect"
+import { DateTime, Effect, Fiber, Stream } from "effect"
 import { HttpClientRequest, HttpClientResponse } from "effect/unstable/http"
 import { testEffect } from "./lib/effect"
 import { PluginTestLayer } from "./plugin/fixture"
@@ -188,5 +192,101 @@ describe("SessionModelRequest input provenance", () => {
       }
       expect(observed).toEqual([SessionMessage.ID.make("msg_original_requester"), undefined])
     }).pipe(Effect.provideService(SessionModelTransport.Service, transport)),
+  )
+})
+
+describe("SessionModelRequest disclosure boundary", () => {
+  it.effect("attests the post-hook, post-media snapshot and isolates aliases retained by hooks", () =>
+    Effect.gen(function* () {
+      const arrived = Promise.withResolvers<void>()
+      const release = Promise.withResolvers<void>()
+      let observed = ""
+      const host = disclosureHost({
+        observe: async (input) => {
+          observed = input.contextDigest
+          arrived.resolve()
+          await release.promise
+        },
+      })
+      const schema = { type: "object", properties: { query: { type: "string", description: "original-schema" } } }
+      const system = SystemPart.make("original-system")
+      const text = { type: "text" as const, text: "original-user" }
+      const hooks = yield* PluginHooks.Service
+      yield* hooks.register("session", "context", (event) =>
+        Effect.sync(() => {
+          event.messages.push(Message.system("hook-added-context"))
+        }),
+      )
+      const requests = yield* SessionModelRequest.Service.pipe(Effect.provide(SessionModelRequest.layer))
+      const fiber = yield* Effect.forkChild(
+        requests.primary({
+          session,
+          inputID: SessionMessage.ID.make("msg_prepared_original"),
+          agent: Agent.ID.make("build"),
+          model,
+          disclosure: host.config,
+          system: [system],
+          messages: [Message.user([text, { type: "media", media: Media.base64("aGVsbG8=", "image/png") }])],
+          tools: {
+            definitions: [
+              ToolDefinition.make({
+                name: "lookup",
+                description: "Lookup",
+                inputSchema: schema,
+                outputSchema: { type: "string" },
+                native: { provider: { type: "native-search" } },
+                metadata: { version: "one" },
+              }),
+            ],
+            execute: () => Effect.die("unused"),
+          },
+        }),
+      )
+      yield* Effect.promise(() => arrived.promise)
+      text.text = "changed-during-host-wait"
+      schema.properties.query.description = "changed-schema-during-host-wait"
+      release.resolve()
+      const prepared = yield* Fiber.join(fiber)
+      host.server.stop(true)
+      expect(prepared.disclosure?.proof.contextDigest).toBe(observed)
+      expect(SessionDisclosure.digest(SessionDisclosure.logicalContext(prepared.request))).toBe(observed)
+      expect(JSON.stringify(prepared.request.messages)).toContain("hook-added-context")
+      expect(JSON.stringify(prepared.request.messages)).toContain("original-user")
+      expect(JSON.stringify(prepared.request.messages)).not.toContain("changed-during-host-wait")
+      expect(JSON.stringify(prepared.request.messages)).toContain("this model does not support image input")
+      expect(JSON.stringify(prepared.request.tools)).toContain("original-schema")
+      expect(JSON.stringify(prepared.request.tools)).toContain("native-search")
+      const sent = yield* compileRequest(prepared.request)
+      expect(JSON.stringify(sent.body)).toContain("original-user")
+      expect(JSON.stringify(sent.body)).not.toContain("changed-during-host-wait")
+      expect(SessionDisclosure.digest(SessionDisclosure.logicalContext(prepared.request))).toBe(observed)
+      expect(JSON.stringify(prepared.event)).not.toContain(host.config.token)
+    }).pipe(Effect.provideService(SessionModelTransport.Service, transport)),
+  )
+  it.effect(
+    "rejects required primary transport hooks and unsupported auxiliary requests before preparation returns",
+    () =>
+      Effect.gen(function* () {
+        const host = disclosureHost()
+        const requests = yield* SessionModelRequest.Service.pipe(Effect.provide(SessionModelRequest.layer))
+        const input = {
+          session,
+          inputID: SessionMessage.ID.make("msg_blocked"),
+          agent: Agent.ID.make("build"),
+          model,
+          disclosure: host.config,
+          system: [],
+          messages: [],
+        }
+        for (const kind of ["compaction", "title", "generate"] as const) {
+          const operation: Effect.Effect<unknown> = requests[kind](input)
+          const exit = yield* Effect.exit(operation)
+          expect(exit._tag).toBe("Failure")
+        }
+        const hooks = yield* PluginHooks.Service
+        yield* hooks.register("session", "http.request", () => Effect.void)
+        expect((yield* Effect.exit(requests.primary(input)))._tag).toBe("Failure")
+        host.server.stop(true)
+      }).pipe(Effect.provideService(SessionModelTransport.Service, transport)),
   )
 })

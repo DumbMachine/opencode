@@ -5,6 +5,7 @@ import { AgentAttachment, PromptMention } from "./prompt.js"
 import { optional, statics } from "./schema.js"
 import { Skill } from "./skill.js"
 import { Mcp } from "./mcp.js"
+import { ExecutionDisclosure } from "./execution-disclosure.js"
 
 export interface FileAttachment extends Schema.Schema.Type<typeof FileAttachment> {}
 export const FileAttachment = Schema.Struct({
@@ -32,6 +33,7 @@ export const Prompt = Schema.Struct({
   files: Schema.Array(FileAttachment).pipe(optional),
   agents: Schema.Array(AgentAttachment).pipe(optional),
   skills: Schema.Array(SkillAttachment).pipe(optional),
+  disclosure: ExecutionDisclosure.Service.pipe(optional),
   mcpRevision: Mcp.RequestRevision.pipe(optional).annotate({
     description:
       "Monotonic host credential revision for this input. Older revisions cannot replace an installed grant.",

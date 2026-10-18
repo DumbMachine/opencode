@@ -4078,6 +4078,14 @@ export type SessionPromptInput = {
       readonly id: string
       readonly mention?: { readonly start: number; readonly end: number; readonly text: string }
     }>
+    readonly disclosure?: {
+      readonly version: 1
+      readonly endpoint: string
+      readonly token: string
+      readonly issuer: string
+      readonly audience: string
+      readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+    }
     readonly mcpRevision?: number
     readonly mcp?: {
       readonly [x: string]: {
@@ -4116,6 +4124,14 @@ export type SessionPromptInput = {
       readonly id: string
       readonly mention?: { readonly start: number; readonly end: number; readonly text: string }
     }>
+    readonly disclosure?: {
+      readonly version: 1
+      readonly endpoint: string
+      readonly token: string
+      readonly issuer: string
+      readonly audience: string
+      readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+    }
     readonly mcpRevision?: number
     readonly mcp?: {
       readonly [x: string]: {
@@ -4154,6 +4170,14 @@ export type SessionPromptInput = {
       readonly id: string
       readonly mention?: { readonly start: number; readonly end: number; readonly text: string }
     }>
+    readonly disclosure?: {
+      readonly version: 1
+      readonly endpoint: string
+      readonly token: string
+      readonly issuer: string
+      readonly audience: string
+      readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+    }
     readonly mcpRevision?: number
     readonly mcp?: {
       readonly [x: string]: {
@@ -4192,6 +4216,14 @@ export type SessionPromptInput = {
       readonly id: string
       readonly mention?: { readonly start: number; readonly end: number; readonly text: string }
     }>
+    readonly disclosure?: {
+      readonly version: 1
+      readonly endpoint: string
+      readonly token: string
+      readonly issuer: string
+      readonly audience: string
+      readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+    }
     readonly mcpRevision?: number
     readonly mcp?: {
       readonly [x: string]: {
@@ -4230,6 +4262,14 @@ export type SessionPromptInput = {
       readonly id: string
       readonly mention?: { readonly start: number; readonly end: number; readonly text: string }
     }>
+    readonly disclosure?: {
+      readonly version: 1
+      readonly endpoint: string
+      readonly token: string
+      readonly issuer: string
+      readonly audience: string
+      readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+    }
     readonly mcpRevision?: number
     readonly mcp?: {
       readonly [x: string]: {
@@ -4251,6 +4291,52 @@ export type SessionPromptInput = {
     readonly delivery?: ("steer" | "queue") | null
     readonly resume?: boolean | null
   }["skills"]
+  readonly disclosure?: {
+    readonly id?: string | null
+    readonly text: string
+    readonly files?: ReadonlyArray<{
+      readonly uri: string
+      readonly name?: string
+      readonly description?: string
+      readonly mention?: { readonly start: number; readonly end: number; readonly text: string }
+    }>
+    readonly agents?: ReadonlyArray<{
+      readonly name: string
+      readonly mention?: { readonly start: number; readonly end: number; readonly text: string }
+    }>
+    readonly skills?: ReadonlyArray<{
+      readonly id: string
+      readonly mention?: { readonly start: number; readonly end: number; readonly text: string }
+    }>
+    readonly disclosure?: {
+      readonly version: 1
+      readonly endpoint: string
+      readonly token: string
+      readonly issuer: string
+      readonly audience: string
+      readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+    }
+    readonly mcpRevision?: number
+    readonly mcp?: {
+      readonly [x: string]: {
+        readonly type: "remote"
+        readonly url: string
+        readonly headers?: { readonly [x: string]: string }
+        readonly oauth?: false
+        readonly codemode?: boolean
+        readonly approval_bridge?: ReadonlyArray<string>
+        readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
+      }
+    }
+    readonly execution?: {
+      readonly model: { readonly id: string; readonly providerID: string; readonly variant?: string }
+      readonly agent: string
+      readonly instructions?: string
+    }
+    readonly metadata?: { readonly [x: string]: JsonValue }
+    readonly delivery?: ("steer" | "queue") | null
+    readonly resume?: boolean | null
+  }["disclosure"]
   readonly mcpRevision?: {
     readonly id?: string | null
     readonly text: string
@@ -4268,6 +4354,14 @@ export type SessionPromptInput = {
       readonly id: string
       readonly mention?: { readonly start: number; readonly end: number; readonly text: string }
     }>
+    readonly disclosure?: {
+      readonly version: 1
+      readonly endpoint: string
+      readonly token: string
+      readonly issuer: string
+      readonly audience: string
+      readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+    }
     readonly mcpRevision?: number
     readonly mcp?: {
       readonly [x: string]: {
@@ -4306,6 +4400,14 @@ export type SessionPromptInput = {
       readonly id: string
       readonly mention?: { readonly start: number; readonly end: number; readonly text: string }
     }>
+    readonly disclosure?: {
+      readonly version: 1
+      readonly endpoint: string
+      readonly token: string
+      readonly issuer: string
+      readonly audience: string
+      readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+    }
     readonly mcpRevision?: number
     readonly mcp?: {
       readonly [x: string]: {
@@ -4344,6 +4446,14 @@ export type SessionPromptInput = {
       readonly id: string
       readonly mention?: { readonly start: number; readonly end: number; readonly text: string }
     }>
+    readonly disclosure?: {
+      readonly version: 1
+      readonly endpoint: string
+      readonly token: string
+      readonly issuer: string
+      readonly audience: string
+      readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+    }
     readonly mcpRevision?: number
     readonly mcp?: {
       readonly [x: string]: {
@@ -4382,6 +4492,14 @@ export type SessionPromptInput = {
       readonly id: string
       readonly mention?: { readonly start: number; readonly end: number; readonly text: string }
     }>
+    readonly disclosure?: {
+      readonly version: 1
+      readonly endpoint: string
+      readonly token: string
+      readonly issuer: string
+      readonly audience: string
+      readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+    }
     readonly mcpRevision?: number
     readonly mcp?: {
       readonly [x: string]: {
@@ -4420,6 +4538,14 @@ export type SessionPromptInput = {
       readonly id: string
       readonly mention?: { readonly start: number; readonly end: number; readonly text: string }
     }>
+    readonly disclosure?: {
+      readonly version: 1
+      readonly endpoint: string
+      readonly token: string
+      readonly issuer: string
+      readonly audience: string
+      readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+    }
     readonly mcpRevision?: number
     readonly mcp?: {
       readonly [x: string]: {
@@ -4458,6 +4584,14 @@ export type SessionPromptInput = {
       readonly id: string
       readonly mention?: { readonly start: number; readonly end: number; readonly text: string }
     }>
+    readonly disclosure?: {
+      readonly version: 1
+      readonly endpoint: string
+      readonly token: string
+      readonly issuer: string
+      readonly audience: string
+      readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+    }
     readonly mcpRevision?: number
     readonly mcp?: {
       readonly [x: string]: {
@@ -4502,6 +4636,14 @@ export type SessionCommandInput = {
       readonly id: string
       readonly mention?: { readonly start: number; readonly end: number; readonly text: string }
     }>
+    readonly disclosure?: {
+      readonly version: 1
+      readonly endpoint: string
+      readonly token: string
+      readonly issuer: string
+      readonly audience: string
+      readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+    }
     readonly mcpRevision?: number
     readonly mcp?: {
       readonly [x: string]: {
@@ -4533,6 +4675,14 @@ export type SessionCommandInput = {
       readonly id: string
       readonly mention?: { readonly start: number; readonly end: number; readonly text: string }
     }>
+    readonly disclosure?: {
+      readonly version: 1
+      readonly endpoint: string
+      readonly token: string
+      readonly issuer: string
+      readonly audience: string
+      readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+    }
     readonly mcpRevision?: number
     readonly mcp?: {
       readonly [x: string]: {
@@ -4564,6 +4714,14 @@ export type SessionCommandInput = {
       readonly id: string
       readonly mention?: { readonly start: number; readonly end: number; readonly text: string }
     }>
+    readonly disclosure?: {
+      readonly version: 1
+      readonly endpoint: string
+      readonly token: string
+      readonly issuer: string
+      readonly audience: string
+      readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+    }
     readonly mcpRevision?: number
     readonly mcp?: {
       readonly [x: string]: {
@@ -4595,6 +4753,14 @@ export type SessionCommandInput = {
       readonly id: string
       readonly mention?: { readonly start: number; readonly end: number; readonly text: string }
     }>
+    readonly disclosure?: {
+      readonly version: 1
+      readonly endpoint: string
+      readonly token: string
+      readonly issuer: string
+      readonly audience: string
+      readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+    }
     readonly mcpRevision?: number
     readonly mcp?: {
       readonly [x: string]: {
@@ -4626,6 +4792,14 @@ export type SessionCommandInput = {
       readonly id: string
       readonly mention?: { readonly start: number; readonly end: number; readonly text: string }
     }>
+    readonly disclosure?: {
+      readonly version: 1
+      readonly endpoint: string
+      readonly token: string
+      readonly issuer: string
+      readonly audience: string
+      readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+    }
     readonly mcpRevision?: number
     readonly mcp?: {
       readonly [x: string]: {
@@ -4640,6 +4814,45 @@ export type SessionCommandInput = {
     }
     readonly delivery?: ("steer" | "queue") | null
   }["skills"]
+  readonly disclosure?: {
+    readonly name: string
+    readonly text: string
+    readonly files?: ReadonlyArray<{
+      readonly uri: string
+      readonly name?: string
+      readonly description?: string
+      readonly mention?: { readonly start: number; readonly end: number; readonly text: string }
+    }>
+    readonly agents?: ReadonlyArray<{
+      readonly name: string
+      readonly mention?: { readonly start: number; readonly end: number; readonly text: string }
+    }>
+    readonly skills?: ReadonlyArray<{
+      readonly id: string
+      readonly mention?: { readonly start: number; readonly end: number; readonly text: string }
+    }>
+    readonly disclosure?: {
+      readonly version: 1
+      readonly endpoint: string
+      readonly token: string
+      readonly issuer: string
+      readonly audience: string
+      readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+    }
+    readonly mcpRevision?: number
+    readonly mcp?: {
+      readonly [x: string]: {
+        readonly type: "remote"
+        readonly url: string
+        readonly headers?: { readonly [x: string]: string }
+        readonly oauth?: false
+        readonly codemode?: boolean
+        readonly approval_bridge?: ReadonlyArray<string>
+        readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
+      }
+    }
+    readonly delivery?: ("steer" | "queue") | null
+  }["disclosure"]
   readonly mcpRevision?: {
     readonly name: string
     readonly text: string
@@ -4657,6 +4870,14 @@ export type SessionCommandInput = {
       readonly id: string
       readonly mention?: { readonly start: number; readonly end: number; readonly text: string }
     }>
+    readonly disclosure?: {
+      readonly version: 1
+      readonly endpoint: string
+      readonly token: string
+      readonly issuer: string
+      readonly audience: string
+      readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+    }
     readonly mcpRevision?: number
     readonly mcp?: {
       readonly [x: string]: {
@@ -4688,6 +4909,14 @@ export type SessionCommandInput = {
       readonly id: string
       readonly mention?: { readonly start: number; readonly end: number; readonly text: string }
     }>
+    readonly disclosure?: {
+      readonly version: 1
+      readonly endpoint: string
+      readonly token: string
+      readonly issuer: string
+      readonly audience: string
+      readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+    }
     readonly mcpRevision?: number
     readonly mcp?: {
       readonly [x: string]: {
@@ -4719,6 +4948,14 @@ export type SessionCommandInput = {
       readonly id: string
       readonly mention?: { readonly start: number; readonly end: number; readonly text: string }
     }>
+    readonly disclosure?: {
+      readonly version: 1
+      readonly endpoint: string
+      readonly token: string
+      readonly issuer: string
+      readonly audience: string
+      readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+    }
     readonly mcpRevision?: number
     readonly mcp?: {
       readonly [x: string]: {
@@ -4878,8 +5115,8 @@ export type SessionInboxBeginCapabilityRenewalOutput = { data: McpRequestClaimRe
 export type SessionInboxRenewCapabilityInput = {
   readonly sessionID: { readonly sessionID: string; readonly inboxID: string }["sessionID"]
   readonly inboxID: { readonly sessionID: string; readonly inboxID: string }["inboxID"]
-  readonly mcp: {
-    readonly mcp: {
+  readonly mcp?: {
+    readonly mcp?: {
       readonly [x: string]: {
         readonly type: "remote"
         readonly url: string
@@ -4889,12 +5126,20 @@ export type SessionInboxRenewCapabilityInput = {
         readonly approval_bridge?: ReadonlyArray<string>
         readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
       }
-    }
+    } | null
+    readonly disclosure?: {
+      readonly version: 1
+      readonly endpoint: string
+      readonly token: string
+      readonly issuer: string
+      readonly audience: string
+      readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+    } | null
     readonly revision?: number | null
     readonly claim?: string | null
   }["mcp"]
-  readonly revision?: {
-    readonly mcp: {
+  readonly disclosure?: {
+    readonly mcp?: {
       readonly [x: string]: {
         readonly type: "remote"
         readonly url: string
@@ -4904,12 +5149,43 @@ export type SessionInboxRenewCapabilityInput = {
         readonly approval_bridge?: ReadonlyArray<string>
         readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
       }
-    }
+    } | null
+    readonly disclosure?: {
+      readonly version: 1
+      readonly endpoint: string
+      readonly token: string
+      readonly issuer: string
+      readonly audience: string
+      readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+    } | null
+    readonly revision?: number | null
+    readonly claim?: string | null
+  }["disclosure"]
+  readonly revision?: {
+    readonly mcp?: {
+      readonly [x: string]: {
+        readonly type: "remote"
+        readonly url: string
+        readonly headers?: { readonly [x: string]: string }
+        readonly oauth?: false
+        readonly codemode?: boolean
+        readonly approval_bridge?: ReadonlyArray<string>
+        readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
+      }
+    } | null
+    readonly disclosure?: {
+      readonly version: 1
+      readonly endpoint: string
+      readonly token: string
+      readonly issuer: string
+      readonly audience: string
+      readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+    } | null
     readonly revision?: number | null
     readonly claim?: string | null
   }["revision"]
   readonly claim?: {
-    readonly mcp: {
+    readonly mcp?: {
       readonly [x: string]: {
         readonly type: "remote"
         readonly url: string
@@ -4919,7 +5195,15 @@ export type SessionInboxRenewCapabilityInput = {
         readonly approval_bridge?: ReadonlyArray<string>
         readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
       }
-    }
+    } | null
+    readonly disclosure?: {
+      readonly version: 1
+      readonly endpoint: string
+      readonly token: string
+      readonly issuer: string
+      readonly audience: string
+      readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+    } | null
     readonly revision?: number | null
     readonly claim?: string | null
   }["claim"]

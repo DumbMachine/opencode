@@ -8,6 +8,7 @@ import { and, desc, eq } from "drizzle-orm"
 import { Project } from "./project.js"
 import { Model } from "@opencode/schema/model"
 import type { Mcp } from "@opencode/schema/mcp"
+import type { ExecutionDisclosure } from "@opencode/schema/execution-disclosure"
 import { Location } from "./location.js"
 import { SessionMessage } from "./session/message.js"
 import { PromptInput } from "@opencode/schema/prompt-input"
@@ -161,7 +162,12 @@ export interface Interface {
     input: InboxItemRef & { readonly claim: string },
   ) => Effect.Effect<Mcp.RequestClaimReceipt, NotFoundError | InboxConflictError>
   readonly renewInboxCapability: (
-    input: InboxItemRef & { readonly mcp: Mcp.RequestServers; readonly revision?: number; readonly claim?: string },
+    input: InboxItemRef & {
+      readonly mcp?: Mcp.RequestServers
+      readonly disclosure?: ExecutionDisclosure.Service
+      readonly revision?: number
+      readonly claim?: string
+    },
   ) => Effect.Effect<void, NotFoundError | InboxConflictError>
   readonly cancelInbox: (input: InboxItemRef) => Effect.Effect<void, NotFoundError | InboxConflictError>
   readonly steerInbox: (input: InboxItemRef) => Effect.Effect<void, NotFoundError | InboxConflictError>

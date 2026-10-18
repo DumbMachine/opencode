@@ -21,6 +21,7 @@ import { Session } from "@opencode/core/session"
 import { SessionMessage } from "@opencode/core/session/message"
 import { SessionProjector } from "@opencode/core/session/projector"
 import { SessionExecution } from "@opencode/core/session/execution"
+import { SessionExecutionCapability } from "@opencode/core/session/execution-capability"
 import { SessionInbox } from "@opencode/core/session/inbox"
 import { SessionInboxTable, SessionMessageTable, SessionTable } from "@opencode/core/session/sql"
 import { SessionStore } from "@opencode/core/session/store"
@@ -1232,6 +1233,87 @@ describe("Session.inbox", () => {
       expect(wakeCalls).toEqual([])
       expect(yield* eventCount(Bus.versionedType(SessionEvent.InboxDeliveryChanged.type, 1))).toBe(2)
       expect(yield* eventCount(Bus.versionedType(SessionEvent.InboxCancelled.type, 1))).toBe(1)
+    }),
+  )
+})
+
+describe("Disclosure input admission", () => {
+  it.effect("stores only markers, parks after grant loss and renews exact required components", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* Session.Service
+      const { db } = yield* Database.Service
+      const config = {
+        version: 1 as const,
+        endpoint: "https://host.example.test/context",
+        token: "private-disclosure-token",
+        issuer: "host",
+        audience: "native",
+        keys: [{ id: "key", algorithm: "Ed25519" as const, publicKey: "a".repeat(43) }],
+      }
+      const input = yield* session.prompt({
+        sessionID,
+        text: "Original protected request",
+        mcp: {},
+        disclosure: config,
+        mcpRevision: 1,
+        resume: false,
+      })
+      expect(input.payload.capabilities).toEqual(["mcp", "disclosure"])
+      expect(JSON.stringify(yield* admitted(input.id))).not.toContain("private-disclosure-token")
+      expect(JSON.stringify(yield* admitted(input.id))).not.toContain("host.example.test")
+      const captured = yield* SessionExecutionCapability.get(sessionID, input.id)
+      expect(captured?.disclosure?.token).toBe("private-disclosure-token")
+      yield* SessionExecutionCapability.clear(sessionID)
+      expect(yield* SessionInbox.promotionInput(db, sessionID, "input")).toBe("blocked")
+      const claim = "host-renewal"
+      yield* session.beginInboxCapabilityRenewal({ sessionID, inboxID: input.id, claim })
+      expect(
+        (yield* Effect.exit(
+          session.renewInboxCapability({ sessionID, inboxID: input.id, claim, mcp: {}, revision: 2 }),
+        ))._tag,
+      ).toBe("Failure")
+      expect(yield* SessionInbox.promotionInput(db, sessionID, "input")).toBe("blocked")
+      yield* session.renewInboxCapability({
+        sessionID,
+        inboxID: input.id,
+        claim,
+        mcp: {},
+        disclosure: config,
+        revision: 2,
+      })
+      expect(yield* SessionInbox.promotionInput(db, sessionID, "input")).not.toBe("blocked")
+      yield* session.cancelInbox({ sessionID, inboxID: input.id })
+      expect(yield* SessionExecutionCapability.get(sessionID, input.id)).toBeUndefined()
+    }),
+  )
+  it.effect("does not add a disclosure requirement to an existing ordinary admission", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* Session.Service
+      const original = yield* session.prompt({ sessionID, text: "Ordinary original", resume: false })
+      const config = {
+        version: 1 as const,
+        endpoint: "https://host.example.test/context",
+        token: "private",
+        issuer: "host",
+        audience: "native",
+        keys: [{ id: "key", algorithm: "Ed25519" as const, publicKey: "a".repeat(43) }],
+      }
+      expect(
+        (yield* session
+          .prompt({
+            sessionID,
+            id: original.id,
+            text: "replacement",
+            disclosure: config,
+            mcpRevision: 1,
+            resume: false,
+          })
+          .pipe(Effect.flip))._tag,
+      ).toBe("Session.PromptConflictError")
+      expect((yield* admitted(original.id))?.payload).toMatchObject({ text: "Ordinary original" })
+      expect(yield* SessionExecutionCapability.get(sessionID, original.id)).toBeUndefined()
     }),
   )
 })

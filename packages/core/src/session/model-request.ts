@@ -38,6 +38,8 @@ import { SessionSchema } from "./schema.js"
 import { SessionSystemPrompt } from "./system-prompt.js"
 import { toLLMMessages } from "./runner/to-llm-message.js"
 import type { SessionMessage } from "./message.js"
+import type { ExecutionDisclosure } from "@opencode/schema/execution-disclosure"
+import { SessionDisclosure } from "./disclosure.js"
 
 const IMAGE_BYTES_TRIGGER = 25 * 1024 * 1024 // 25 MiB
 const IMAGE_BYTES_TARGET = 15 * 1024 * 1024 // 15 MiB
@@ -49,6 +51,7 @@ const GENERATION_KEYS = new Set(Object.keys(GenerationOptions.fields))
 export type ExecuteError = Tool.Error | Permission.DeclinedError | QuestionTool.CancelledError
 
 export interface Prepared<Event = SessionRequest> {
+  readonly disclosure?: Effect.Success<ReturnType<typeof SessionDisclosure.prepare>>
   readonly event: Event
   readonly request: LLMRequest
   readonly options: StreamOptions
@@ -60,6 +63,8 @@ export interface Prepared<Event = SessionRequest> {
 }
 
 export interface Input {
+  readonly disclosure?: ExecutionDisclosure.Service
+  readonly disclosureComponents?: readonly ExecutionDisclosure.Component[]
   readonly session: SessionSchema.Info
   readonly agent: Agent.ID
   readonly inputID?: SessionMessage.ID
@@ -282,7 +287,7 @@ export const layer = Layer.effect(
       )
       headers["x-opencode-session"] = scope.sessionID
       if (inputID !== undefined) headers["x-opencode-input"] = inputID
-      const request = LLMRequest.update(base, {
+      const routed = LLMRequest.update(base, {
         model: route === base.model.route ? base.model : LanguageModel.update(base.model, { route }),
         http: new HttpOptions({
           body: base.http?.body,
@@ -290,6 +295,13 @@ export const layer = Layer.effect(
           query: base.http?.query,
         }),
       })
+      const request =
+        input.disclosure === undefined
+          ? routed
+          : yield* Effect.try({
+              try: () => SessionDisclosure.snapshot(routed),
+              catch: () => new Error("Execution context authorization is unavailable"),
+            }).pipe(Effect.orDie)
       // History selects native windows against the catalog route before hooks run. A newly installed
       // routing hook must not send an existing opaque window to another deployment; `prepare` has no
       // error channel, so like hook failures this surfaces as a defect.
@@ -335,6 +347,35 @@ export const layer = Layer.effect(
               return HttpClientResponse.fromWeb(sent, after.response)
             }).pipe(Effect.mapError((cause) => (cause instanceof Error ? cause : new Error(String(cause)))))
         : undefined
+      // Untracked transport hooks can replace attested bytes after this seam.
+      // Until they carry lineage, a required disclosure request cannot use them.
+      const hasWebSocketHooks =
+        input.disclosure !== undefined &&
+        ((yield* hooks.has("session", "experimental.ws.send", model.ref.providerID)) ||
+          (yield* hooks.has("session", "experimental.ws.receive", model.ref.providerID)) ||
+          (yield* hooks.has("session", "experimental.ws.handshake", model.ref.providerID)))
+      if (
+        input.disclosure !== undefined &&
+        (hasHttpHooks || hasWebSocketHooks || inputID === undefined || kind !== "primary")
+      )
+        return yield* Effect.die(new Error("Execution context authorization is unavailable"))
+      const disclosure =
+        input.disclosure === undefined
+          ? undefined
+          : yield* Effect.gen(function* () {
+              const contextDigest = SessionDisclosure.digest(SessionDisclosure.logicalContext(request))
+              return yield* SessionDisclosure.prepare(input.disclosure!, {
+                sessionID: session.id,
+                inputID: inputID!,
+                kind,
+                contextDigest,
+                components: [
+                  ...(input.disclosureComponents ?? []),
+                  { kind: "tools", id: "advertised-definitions", revision: SessionDisclosure.digest(request.tools) },
+                  { kind: "prepared-context", id: "logical-request", revision: contextDigest },
+                ],
+              })
+            })
       // HTTP hooks wrap every HTTP request, including the WebSocket fallback path. The route decides
       // which transport actually carries the request, so both hook families are always offered.
       const webSocket =
@@ -365,6 +406,7 @@ export const layer = Layer.effect(
 
       return {
         event: shaped,
+        disclosure,
         request,
         options: { ...(http ? { http } : {}), ...(webSocket ? { webSocket } : {}) },
         retry: (event: Parameters<Prepared["retry"]>[0]) =>

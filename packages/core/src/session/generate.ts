@@ -37,6 +37,8 @@ export const generate = Effect.fn("SessionGenerate.generate")(function* (input: 
       selection.instructions,
       SessionProviderContext.provenance(model) ?? "local",
     )
+    if (history.requiresDisclosure)
+      return yield* Effect.die(new Error("Execution context authorization is unavailable for independent generation"))
     const transcript = SessionModelRequest.baseTranscript({
       agent: selection.agent.info,
       model,

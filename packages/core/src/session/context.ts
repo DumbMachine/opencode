@@ -29,6 +29,8 @@ import { SessionModelRequest } from "./model-request.js"
 import { SessionRunnerModel } from "./runner/model.js"
 import { SessionSchema } from "./schema.js"
 import { SessionStore } from "./store.js"
+import type { ExecutionDisclosure } from "@opencode/schema/execution-disclosure"
+import { Hash } from "@opencode/util/hash"
 
 export interface Selection {
   readonly input?: SessionMessage.User | SessionMessage.Synthetic
@@ -41,6 +43,8 @@ export interface Selection {
 }
 
 export interface Loaded {
+  readonly disclosure?: ExecutionDisclosure.Service
+  readonly disclosureComponents?: readonly ExecutionDisclosure.Component[]
   readonly executionInstructions?: string
   readonly input?: SessionMessage.User | SessionMessage.Synthetic
   readonly session: SessionSchema.Info
@@ -247,6 +251,31 @@ const layer = Layer.effect(
         agent: selection.agent,
         model,
         initial: history.initial,
+        disclosureComponents: [
+          { kind: "instructions" as const, id: selection.session.id, revision: Hash.sha256(history.initial) },
+          ...history.entries.map((entry) => ({
+            kind: "message" as const,
+            id: entry.message.id,
+            revision: Hash.sha256(JSON.stringify(entry.message)),
+          })),
+          {
+            kind: "agent" as const,
+            id: selection.agent.id,
+            revision: Hash.sha256(JSON.stringify(selection.agent.info)),
+          },
+          ...(selection.ephemeral === undefined
+            ? []
+            : [{ kind: "ephemeral" as const, id: selection.session.id, revision: Hash.sha256(selection.ephemeral) }]),
+          ...(history.input?.type === "user" && history.input.execution?.instructions !== undefined
+            ? [
+                {
+                  kind: "input-instructions" as const,
+                  id: history.input.id,
+                  revision: Hash.sha256(history.input.execution.instructions),
+                },
+              ]
+            : []),
+        ],
         ephemeral: selection.ephemeral,
         messages: history.entries.map((entry) => entry.message),
         input: history.input,

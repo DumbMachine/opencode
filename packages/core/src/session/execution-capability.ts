@@ -1,15 +1,16 @@
 export * as SessionExecutionCapability from "./execution-capability.js"
 
 import { Clock, Effect } from "effect"
-import { isDeepStrictEqual } from "node:util"
 import { Hash } from "@opencode/util/hash"
 import { Mcp } from "@opencode/schema/mcp"
+import type { ExecutionDisclosure } from "@opencode/schema/execution-disclosure"
 import { SessionMessage } from "./message.js"
 import { SessionSchema } from "./schema.js"
 
 export interface Grant {
   readonly inputID: SessionMessage.ID
-  readonly mcp: Mcp.RequestServers
+  readonly mcp?: Mcp.RequestServers
+  readonly disclosure?: ExecutionDisclosure.Service
   readonly revision?: number
 }
 
@@ -117,10 +118,16 @@ export const commitRenewal = (sessionID: SessionSchema.ID, grant: Grant, claim: 
     return true
   })
 
-export const ready = (sessionID: SessionSchema.ID, inputID: SessionMessage.ID) =>
+export const ready = (sessionID: SessionSchema.ID, inputID: SessionMessage.ID, required: readonly string[] = []) =>
   Effect.sync(() => {
     const renewal = renewals.get(renewalKey(sessionID, inputID))
-    return (!renewal || renewal.committed !== undefined) && grants.get(sessionID)?.has(inputID) === true
+    const grant = grants.get(sessionID)?.get(inputID)
+    return (
+      (!renewal || renewal.committed !== undefined) &&
+      grant !== undefined &&
+      (!required.includes("mcp") || grant.mcp !== undefined) &&
+      (!required.includes("disclosure") || grant.disclosure !== undefined)
+    )
   })
 
 export const clear = (sessionID: SessionSchema.ID) =>
@@ -141,7 +148,8 @@ export const get = (sessionID: SessionSchema.ID, inputID: SessionMessage.ID | un
       return undefined
     }
     selected.set(sessionID, inputID)
-    return grants.get(sessionID)?.get(inputID)
+    const grant = grants.get(sessionID)?.get(inputID)
+    return grant === undefined ? undefined : structuredClone(grant)
   })
 
 // Input identity is process-local, like its installed credentials. During
@@ -166,14 +174,15 @@ export const set = (sessionID: SessionSchema.ID, grant: Grant) =>
   })
 
 function install(sessionID: SessionSchema.ID, grant: Grant) {
+  if (grant.disclosure !== undefined && grant.revision === undefined) return false
   let inputs = grants.get(sessionID)
   if (!inputs) grants.set(sessionID, (inputs = new Map()))
   const previous = inputs.get(grant.inputID)
   if (previous?.revision !== undefined) {
     if (grant.revision === undefined || grant.revision < previous.revision) return false
-    if (grant.revision === previous.revision) return isDeepStrictEqual(grant.mcp, previous.mcp)
+    if (grant.revision === previous.revision) return fingerprint(grant) === fingerprint(previous)
   }
-  inputs.set(grant.inputID, grant)
+  inputs.set(grant.inputID, structuredClone(grant))
   return true
 }
 
