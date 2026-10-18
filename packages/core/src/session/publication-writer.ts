@@ -137,11 +137,12 @@ export const captureInput = Effect.fnUntraced(
         const owned = Schema.decodeUnknownSync(SessionInbox.UserPayload)(
           JSON.parse(JSON.stringify(Schema.encodeUnknownSync(SessionInbox.UserPayload)(payload))),
         )
-        if (owned.files?.length || owned.agents?.length || owned.skills?.length) return yield* Effect.die(unavailable())
+        if ((service.compositionVersion !== 3 && owned.files?.length) || owned.agents?.length || owned.skills?.length)
+          return yield* Effect.die(unavailable())
         const contextDigest = SessionDisclosure.digest({ kind: "native-human-input-v1", payload: owned })
         const request =
-          service.compositionVersion === 2
-            ? yield* NativeProducer.inputContext(sessionID, inputID, owned)
+          service.compositionVersion === 2 || service.compositionVersion === 3
+            ? yield* NativeProducer.inputContext(sessionID, inputID, owned, service.compositionVersion === 3)
             : SessionDisclosure.makeRequest({
                 sessionID,
                 inputID,
@@ -152,7 +153,11 @@ export const captureInput = Effect.fnUntraced(
         if (!request || request.contextDigest !== contextDigest) return yield* Effect.die(unavailable())
         if (!live()) return yield* Effect.die(unavailable())
         const prepared = yield* SessionDisclosure.prepareRequest(service, request)
-        if (!live() || !prepared.publication || (service.compositionVersion === 2 && !prepared.proof.complete))
+        if (
+          !live() ||
+          !prepared.publication ||
+          ((service.compositionVersion === 2 || service.compositionVersion === 3) && !prepared.proof.complete)
+        )
           return yield* Effect.die(unavailable())
         return yield* make({ prepared, state: { sessionID, inputID, revision, bus, database, live } })
       },

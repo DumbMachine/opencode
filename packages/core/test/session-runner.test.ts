@@ -113,6 +113,7 @@ import { Expected } from "./lib/session-message"
 import { permissionLayer } from "./lib/permission"
 import { agentHost, modelHost, host, noProviders } from "./plugin/host"
 import { CodeModeInstructions } from "@opencode/core/codemode/instructions"
+import { Skill } from "@opencode/schema/skill"
 
 const emptyCodeMode = `\n\n${CodeModeInstructions.render({ total: 0, shown: 0, namespaces: [] })}`
 type ToolBarrier = {
@@ -233,6 +234,7 @@ const makeRunnerState = (compaction?: SessionRunnerModel.Resolved["compaction"])
     }).pipe(Effect.andThen(Deferred.succeed(barrier.release, undefined)), Effect.asVoid)
   return {
     currentModel: model,
+    modelCapabilities: { tools: true, input: ["text", "image"], output: ["text"] } satisfies Model.Capabilities,
     compaction,
     modelResolveHook: resolvesModel,
     systemBaseline: "Initial context",
@@ -350,7 +352,7 @@ const layer = Layer.unwrap(
           Effect.map(() => {
             const selected = session.model?.id === "replacement" ? replacementModel : state.currentModel
             return SessionRunnerModel.resolved(selected, {
-              capabilities: { tools: true, input: ["text", "image"], output: ["text"] },
+              capabilities: state.modelCapabilities,
               cost: [],
               limit: modelLimits.get(String(selected.id)) ?? defaultModelLimit,
               variant: session.model?.variant,
@@ -1040,12 +1042,18 @@ const watchRename = Effect.fnUntraced(function* (sessionID: Session.ID) {
   )
 })
 
-function* verifyOriginalPolicyTurns(s: Scenario, compositionVersion: 1 | 2) {
+function* verifyOriginalPolicyTurns(s: Scenario, compositionVersion: 1 | 2 | 3) {
   const enrolled = yield* NativeProducer.enroll({
     version: 1,
     challenge: "c".repeat(43),
     audience: "fixture-closed-host",
-    contracts: ["human-plaintext-identity-v1", "model-plaintext-projection-v1", "model-request-only-plaintext-v1"],
+    contracts: [
+      "human-plaintext-identity-v1",
+      "model-plaintext-projection-v1",
+      "model-request-only-plaintext-v1",
+      "human-inline-identity-v1",
+      "model-request-only-inline-v1",
+    ],
   })
   for (let instance = 0; instance < 2; instance++) {
     const original = yield* s.session.create({
@@ -1055,7 +1063,7 @@ function* verifyOriginalPolicyTurns(s: Scenario, compositionVersion: 1 | 2) {
     const contexts: ExecutionDisclosure.ContextRequest[] = []
     const publications: ExecutionDisclosure.PublicationRequest[] = []
     const host = publicationHost({
-      context: (proof) => (compositionVersion === 2 ? { ...proof, mode: "complete", complete: true } : proof),
+      context: (proof) => (compositionVersion >= 2 ? { ...proof, mode: "complete", complete: true } : proof),
       observeContext: (request) => {
         contexts.push(request)
       },
@@ -1068,7 +1076,23 @@ function* verifyOriginalPolicyTurns(s: Scenario, compositionVersion: 1 | 2) {
       for (let turn = 0; turn < 2; turn++) {
         const input = yield* s.session.prompt({
           sessionID: original.id,
-          text: `Human ${instance}/${turn}`,
+          text: compositionVersion === 3 && turn === 0 ? "" : `Human ${instance}/${turn}`,
+          files:
+            compositionVersion === 3
+              ? [
+                  {
+                    uri: "data:text/plain;base64," + Buffer.from(`Source ${instance}/${turn} λ`).toString("base64"),
+                    name: `source-${turn}.txt`,
+                    description: "Exact text",
+                  },
+                  ...Array.from({ length: 2 }, () => ({
+                    uri: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+                    name: "same-image.png",
+                    description: "Repeated image",
+                    mention: { start: 0, end: 9, text: "[Image 1]" },
+                  })),
+                ]
+              : undefined,
           metadata: { original: instance, turn },
           execution: {
             model: { providerID: Provider.ID.make("fake"), id: Model.ID.make("fake-model") },
@@ -1116,12 +1140,14 @@ function* verifyOriginalPolicyTurns(s: Scenario, compositionVersion: 1 | 2) {
       )
       expect(new Set(publications.map((unit) => unit.unitID)).size).toBe(16)
       for (const context of contexts) expect(context.sessionID).toBe(original.id)
-      if (compositionVersion === 2) {
+      if (compositionVersion >= 2) {
         for (const context of contexts) {
           if (!context.composition) throw new Error("Missing closed composition")
-          const composed = Schema.decodeUnknownSync(ExecutionProducer.RequestOnlyComposition)(
-            JSON.parse(context.composition.payload),
-          )
+          const composed = Schema.decodeUnknownSync(
+            compositionVersion === 3
+              ? ExecutionProducer.InlineRequestOnlyComposition
+              : ExecutionProducer.RequestOnlyComposition,
+          )(JSON.parse(context.composition.payload))
           expect(composed.complete).toBe(true)
           expect(context.kind).toBe(composed.kind)
           expect(composed.componentsDigest).toBe(SessionDisclosure.digest(context.components))
@@ -1159,10 +1185,27 @@ function* verifyOriginalPolicyTurns(s: Scenario, compositionVersion: 1 | 2) {
         ).toBe(true)
         expect(s.requests.at(-1)?.messages.map((message) => message.role)).toEqual(["user", "assistant", "user"])
         expect(s.requests.at(-1)?.system.map((part) => part.text)).toEqual(["Reply once."])
+        if (compositionVersion === 3) {
+          const last = s.requests.at(-1)!
+          for (const user of last.messages.filter((message) => message.role === "user")) {
+            expect(user.content.filter((part) => part.type === "media")).toHaveLength(2)
+            expect(
+              user.content
+                .filter((part) => part.type === "text")
+                .map((part) => part.text)
+                .join("\n"),
+            ).toContain("Exact text")
+          }
+          // Compile the same admitted model request through the actual adapter;
+          // it must carry both repeated images in their measured order.
+          const encoded = yield* compileRequest(last)
+          const body = JSON.stringify(encoded)
+          expect(body.match(/iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB/g)).toHaveLength(4)
+        }
       }
       const history = yield* s.session.context(original.id)
       expect(history.map((message) => message.type)).toEqual(["user", "assistant", "user", "assistant"])
-      if (compositionVersion === 2) {
+      if (compositionVersion >= 2) {
         for (const context of contexts) {
           for (const component of context.components) {
             if (JSON.parse(component.proof!).contract !== "session-user-context-v1") continue
@@ -1228,6 +1271,207 @@ describe("SessionRunnerLLM", () => {
       yield* verifyOriginalPolicyTurns(s, 2)
     },
     15000,
+  )
+  scenario(
+    "preserves attachment-only and multifile original inputs and private assistant provenance through actual requests",
+    function* (s) {
+      yield* verifyOriginalPolicyTurns(s, 3)
+    },
+    15000,
+  )
+  scenario(
+    "retains large inline history without normalization or automatic image removal",
+    function* (s) {
+      const original = yield* s.session.create({
+        location: Location.Ref.make({ directory: AbsolutePath.make("/project") }),
+        contextPolicy: { version: 1 },
+      })
+      const contexts: ExecutionDisclosure.ContextRequest[] = []
+      const host = publicationHost({
+        context: (proof) => ({ ...proof, mode: "complete", complete: true }),
+        observeContext: (request) => {
+          contexts.push(request)
+        },
+      })
+      try {
+        const bytes = Buffer.alloc(10 * 1024 * 1024, 97)
+        Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).copy(bytes)
+        const data = bytes.toString("base64")
+        for (let input = 0; input < 2; input++) {
+          yield* s.session.prompt({
+            sessionID: original.id,
+            text: "",
+            files: [{ uri: "data:image/png;base64," + data, name: `large-${input}.png` }],
+            disclosure: { ...host.config, compositionVersion: 3, publicationVersion: 1 },
+            mcpRevision: 7,
+            resume: false,
+          })
+          yield* s.llm.push(TestLLM.text(`Large answer ${input}`, `inline-large-${input}`))
+          yield* s.session.resume(original.id)
+        }
+        expect(s.requests).toHaveLength(2)
+        const images = s.requests[1]!.messages.flatMap((message) =>
+          message.content.filter((part) => part.type === "media"),
+        )
+        expect(images).toHaveLength(2)
+        for (const image of images) {
+          expect(image.media.inline()?.base64).toBe(data)
+          expect(image.media.mediaType).toBe("image/png")
+        }
+        expect(JSON.parse(contexts.at(-1)!.composition!.payload).complete).toBe(true)
+      } finally {
+        host.server.stop(true)
+      }
+    },
+    45000,
+  )
+  scenario("refuses unsupported inline media capabilities before model preflight or physical I/O", function* (s) {
+    s.modelCapabilities.input = ["text"]
+    const original = yield* s.session.create({
+      location: Location.Ref.make({ directory: AbsolutePath.make("/project") }),
+      contextPolicy: { version: 1 },
+    })
+    const contexts: ExecutionDisclosure.ContextRequest[] = []
+    const host = publicationHost({
+      context: (proof) => ({ ...proof, mode: "complete", complete: true }),
+      observeContext: (request) => {
+        contexts.push(request)
+      },
+    })
+    try {
+      yield* s.session.prompt({
+        sessionID: original.id,
+        text: "",
+        files: [
+          {
+            uri: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+          },
+        ],
+        disclosure: { ...host.config, compositionVersion: 3, publicationVersion: 1 },
+        mcpRevision: 7,
+        resume: false,
+      })
+      expect(Exit.isFailure(yield* s.session.resume(original.id).pipe(Effect.exit))).toBe(true)
+      expect(contexts.map((request) => request.kind)).toEqual(["input", "input"])
+      expect(s.requests).toHaveLength(0)
+    } finally {
+      host.server.stop(true)
+    }
+  })
+  scenario("rejects unsupported inline dependencies before any host publication or model I/O", function* (s) {
+    const original = yield* s.session.create({
+      location: Location.Ref.make({ directory: AbsolutePath.make("/project") }),
+      contextPolicy: { version: 1 },
+    })
+    let called = 0
+    const host = publicationHost({
+      context: (proof) => ({ ...proof, mode: "complete", complete: true }),
+      observeContext: () => {
+        called++
+      },
+      observe: () => {
+        called++
+      },
+    })
+    try {
+      const service = { ...host.config, compositionVersion: 3 as const, publicationVersion: 1 as const }
+      for (const unsupported of [
+        { files: [{ uri: "file:///private/tmp/should-not-be-read.txt" }] },
+        { files: [{ uri: "file:///private/tmp/should-not-be-read.txt?start=1&end=2" }] },
+        { files: [{ uri: "https://example.invalid/should-not-be-fetched.txt" }] },
+        { files: [{ uri: "resource://should-not-be-fetched" }] },
+        { files: [{ uri: "data:application/pdf;base64,JVBERi0=" }] },
+        { files: [{ uri: "data:image/heic;base64,aW5saW5l" }] },
+        { files: [{ uri: "data:text/plain;base64,/w==" }] },
+        { files: Array.from({ length: 17 }, () => ({ uri: "data:text/plain;base64,aW5saW5l" })) },
+        { agents: [{ name: "helper" }] },
+        { skills: [{ id: Skill.ID.make("skill_unavailable") }] },
+      ]) {
+        const result = yield* s.session
+          .prompt({
+            sessionID: original.id,
+            text: "Unattestable",
+            ...unsupported,
+            disclosure: service,
+            mcpRevision: 7,
+            resume: false,
+          })
+          .pipe(Effect.exit)
+        expect(Exit.isFailure(result)).toBe(true)
+        expect(called).toBe(0)
+        expect(s.requests).toHaveLength(0)
+        expect(yield* s.session.inbox(original.id)).toEqual([])
+      }
+    } finally {
+      host.server.stop(true)
+    }
+  })
+  scenario(
+    "rejects changed inline bytes, descriptors, order and transplanted facts before another preflight",
+    function* (s) {
+      const original = yield* s.session.create({
+        location: Location.Ref.make({ directory: AbsolutePath.make("/project") }),
+        contextPolicy: { version: 1 },
+      })
+      let contexts = 0
+      const host = publicationHost({
+        context: (proof) => ({ ...proof, mode: "complete", complete: true }),
+        observeContext: () => {
+          contexts++
+        },
+      })
+      try {
+        const service = { ...host.config, compositionVersion: 3 as const, publicationVersion: 1 as const }
+        const admitted = yield* s.session.prompt({
+          sessionID: original.id,
+          text: "",
+          files: [
+            { uri: "data:text/plain;base64,b25l", name: "one.txt" },
+            { uri: "data:text/plain;base64,dHdv", name: "two.txt" },
+          ],
+          disclosure: service,
+          mcpRevision: 7,
+          resume: false,
+        })
+        const other = yield* s.session.prompt({
+          sessionID: original.id,
+          text: "Other original",
+          disclosure: service,
+          mcpRevision: 7,
+          resume: false,
+        })
+        const captured = yield* SessionPublicationWriter.captureInput({
+          sessionID: original.id,
+          inputID: admitted.id,
+          revision: 7,
+          service,
+        })
+        for (const changed of [
+          { ...admitted.payload, files: [...admitted.payload.files!].reverse() },
+          {
+            ...admitted.payload,
+            files: admitted.payload.files!.map((file, index) =>
+              index === 0 ? { ...file, data: "dHdv" as typeof file.data } : file,
+            ),
+          },
+          {
+            ...admitted.payload,
+            files: admitted.payload.files!.map((file, index) =>
+              index === 0 ? { ...file, name: "changed.txt" } : file,
+            ),
+          },
+          { ...admitted.payload, preparedInput: other.payload.preparedInput },
+        ]) {
+          expect(Exit.isFailure(yield* captured.prepareInput(changed).pipe(Effect.exit))).toBe(true)
+          expect(contexts).toBe(2)
+          expect(s.requests).toHaveLength(0)
+        }
+        yield* s.session.cancelInbox({ sessionID: original.id, inboxID: admitted.id })
+        yield* s.session.cancelInbox({ sessionID: original.id, inboxID: other.id })
+      } finally {
+        host.server.stop(true)
+      }
+    },
   )
   scenario("refuses partial host proofs for closed human input and model context", function* (s) {
     for (const denied of ["input", "primary"]) {
@@ -1490,7 +1734,12 @@ describe("SessionRunnerLLM", () => {
     }
   })
   scenario("invalidates a held human preflight on cancellation or renewal", function* (s) {
-    for (const control of ["cancel", "renew"]) {
+    for (const [control, compositionVersion] of [
+      ["cancel", 1],
+      ["renew", 1],
+      ["cancel", 3],
+      ["renew", 3],
+    ] as const) {
       const original = yield* s.session.create({
         location: Location.Ref.make({ directory: AbsolutePath.make("/project") }),
         contextPolicy: { version: 1 },
@@ -1499,6 +1748,7 @@ describe("SessionRunnerLLM", () => {
       const release = yield* Deferred.make<void>()
       let hold = false
       const host = publicationHost({
+        context: (proof) => (compositionVersion === 3 ? { ...proof, mode: "complete", complete: true } : proof),
         observeContext: async () => {
           if (!hold) return
           Effect.runSync(Deferred.succeed(arrived, undefined))
@@ -1506,10 +1756,12 @@ describe("SessionRunnerLLM", () => {
         },
       })
       try {
-        const disclosure = { ...host.config, compositionVersion: 1 as const, publicationVersion: 1 as const }
+        const disclosure = { ...host.config, compositionVersion, publicationVersion: 1 as const }
         const input = yield* s.session.prompt({
           sessionID: original.id,
           text: "Original held context",
+          files:
+            compositionVersion === 3 ? [{ uri: "data:text/plain;base64,aW5saW5l", name: "inline.txt" }] : undefined,
           disclosure,
           mcpRevision: 7,
           resume: false,

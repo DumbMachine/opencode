@@ -29,8 +29,14 @@ export const FileSource = Schema.Union([
   .annotate({ identifier: "Prompt.FileSource" })
 export type FileSource = typeof FileSource.Type
 
+// Group repetition exhausts JavaScript regexp limits on valid multi-megabyte
+// attachments. These linear checks accept exactly the same padded language.
 export const Base64 = Schema.String.check(
-  Schema.isPattern(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/),
+  Schema.makeFilter(
+    (value: string) => value.length % 4 === 0 && /^[A-Za-z0-9+/]*={0,2}(?![\s\S])/.test(value),
+    // Preserve the same portable wire pattern and arbitrary constraints.
+    Schema.isPattern(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/).annotations,
+  ),
 ).annotate({ identifier: "Prompt.Base64" })
 export type Base64 = typeof Base64.Type
 

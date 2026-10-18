@@ -5,7 +5,18 @@ import { ExecutionProducer } from "@opencode/schema/execution-producer"
 import { OpenCode as PromiseOpenCode } from "../src/promise/index"
 import { OpenCode as EffectOpenCode, ExecutionProducer as ClientProducer } from "../src/effect/index"
 
-const input = { version: 1 as const, challenge: "c".repeat(43), audience: "host" }
+const input = {
+  version: 1 as const,
+  challenge: "c".repeat(43),
+  audience: "host",
+  contracts: [
+    "human-plaintext-identity-v1",
+    "model-plaintext-projection-v1",
+    "model-request-only-plaintext-v1",
+    "human-inline-identity-v1",
+    "model-request-only-inline-v1",
+  ] satisfies ExecutionProducer.EnrollmentRequest["contracts"],
+}
 const output = {
   key: { id: "key", algorithm: "Ed25519" as const, publicKey: "p".repeat(43) },
   signed: { keyID: "key", payload: "{}", signature: "s".repeat(86) },
@@ -29,6 +40,8 @@ test("Promise producer enrollment uses the canonical authenticated control path"
 test("Effect producer enrollment retains the canonical browser-safe contract", async () => {
   expect(ClientProducer.Enrollment).toBe(ExecutionProducer.Enrollment)
   expect(ClientProducer.SignedFact).toBe(ExecutionProducer.SignedFact)
+  expect(ClientProducer.PreparedInlineInput).toBe(ExecutionProducer.PreparedInlineInput)
+  expect(ClientProducer.InlineRequestOnlyComposition).toBe(ExecutionProducer.InlineRequestOnlyComposition)
   const requests: string[] = []
   const httpClient = HttpClient.make((request) => {
     requests.push(request.method + " " + request.url)

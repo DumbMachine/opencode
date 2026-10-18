@@ -14,6 +14,7 @@ import { SessionPublicationProvenance } from "./session/publication-provenance.j
 import { toLLMMessages } from "./session/runner/to-llm-message.js"
 import { Hash } from "@opencode/util/hash"
 import { SessionDisclosure } from "./session/disclosure.js"
+import { SessionInlineIdentity } from "./session/inline-identity.js"
 
 // Only the nonsecret durable execution selection and required contract markers.
 // Instructions and metadata have independent source bindings.
@@ -60,6 +61,17 @@ const create = () => {
               input.contracts.includes("model-request-only-plaintext-v1")
                 ? ["model-request-only-plaintext-v1" as const]
                 : []),
+              ...(input.contracts?.includes("model-plaintext-projection-v1") &&
+              input.contracts.includes("model-request-only-plaintext-v1") &&
+              input.contracts.includes("human-inline-identity-v1")
+                ? ["human-inline-identity-v1" as const]
+                : []),
+              ...(input.contracts?.includes("model-plaintext-projection-v1") &&
+              input.contracts.includes("model-request-only-plaintext-v1") &&
+              input.contracts.includes("human-inline-identity-v1") &&
+              input.contracts.includes("model-request-only-inline-v1")
+                ? ["model-request-only-inline-v1" as const]
+                : []),
             ],
             issuedAt: Date.now(),
           }),
@@ -85,24 +97,36 @@ const create = () => {
           }),
         ),
       ),
-    requestOnly: (input: ExecutionDisclosure.ContextRequest, messageCount: number) =>
+    requestOnly: (input: ExecutionDisclosure.ContextRequest, messageCount: number, inlineIdentity = false) =>
+      signed(
+        JSON.stringify({
+          version: 1,
+          purpose: "native-model-composition",
+          producerEpoch: epoch,
+          contract: inlineIdentity ? "model-request-only-inline-v1" : "model-request-only-plaintext-v1",
+          sessionID: input.sessionID,
+          inputID: input.inputID,
+          kind: input.kind === "input" ? "input" : "primary",
+          attempt: input.attempt,
+          contextDigest: input.contextDigest,
+          componentsDigest: input.componentsDigest,
+          complete: true,
+          messageCount,
+          instructionInputID: input.inputID,
+          issuedAt: Date.now(),
+        } satisfies ExecutionProducer.InlineRequestOnlyComposition | ExecutionProducer.RequestOnlyComposition),
+      ),
+    preparedInline: (
+      input: Omit<ExecutionProducer.PreparedInlineInput, "version" | "purpose" | "producerEpoch" | "contract">,
+    ) =>
       signed(
         JSON.stringify(
-          ExecutionProducer.RequestOnlyComposition.make({
+          ExecutionProducer.PreparedInlineInput.make({
+            ...input,
             version: 1,
-            purpose: "native-model-composition",
+            purpose: "native-input-preparation",
             producerEpoch: epoch,
-            contract: "model-request-only-plaintext-v1",
-            sessionID: input.sessionID,
-            inputID: input.inputID,
-            kind: input.kind === "input" ? "input" : "primary",
-            attempt: input.attempt,
-            contextDigest: input.contextDigest,
-            componentsDigest: input.componentsDigest,
-            complete: true,
-            messageCount,
-            instructionInputID: input.inputID,
-            issuedAt: Date.now(),
+            contract: "human-inline-identity-v1",
           }),
         ),
       ),
@@ -147,22 +171,28 @@ export const prepareInput = (input: {
     readonly skills?: readonly unknown[]
   }
   readonly invoked: number
+  readonly inlineIdentity?: boolean
   readonly payload: SessionInbox.UserPayload
 }) =>
   Effect.sync(() => {
     if (
       input.invoked !== 0 ||
-      input.original.files?.length ||
+      (!input.inlineIdentity && input.original.files?.length) ||
       input.original.agents?.length ||
       input.original.skills?.length ||
-      input.payload.files?.length ||
+      (!input.inlineIdentity && input.payload.files?.length) ||
       input.payload.agents?.length ||
       input.payload.skills?.length ||
       input.original.text !== input.payload.text
     )
       return undefined
-    const parentTextRevision = textRevision(input.original.text)
-    if (parentTextRevision === undefined) return undefined
+    const parentRevision = input.inlineIdentity
+      ? SessionInlineIdentity.originalRevision(input.original)
+      : textRevision(input.original.text)
+    const preparedRevision = input.inlineIdentity
+      ? SessionInlineIdentity.revision(input.payload)
+      : textRevision(input.payload.text)
+    if (parentRevision === undefined || parentRevision !== preparedRevision) return undefined
     // Own the exact schema/JSON representation before signing. The fact itself
     // is absent from this projection, avoiding a self-referential payload hash.
     const content = { ...input.payload, preparedInput: undefined }
@@ -171,13 +201,21 @@ export const prepareInput = (input: {
     )
     return {
       ...payload,
-      preparedInput: processSigner().prepared({
-        sessionID: input.sessionID,
-        inputID: input.inputID,
-        parentTextRevision,
-        preparedTextRevision: parentTextRevision,
-        preparedPayloadRevision: SessionDisclosure.digest(payload),
-      }),
+      preparedInput: input.inlineIdentity
+        ? processSigner().preparedInline({
+            sessionID: input.sessionID,
+            inputID: input.inputID,
+            parentContentRevision: parentRevision,
+            preparedContentRevision: parentRevision,
+            preparedPayloadRevision: SessionDisclosure.digest(payload),
+          })
+        : processSigner().prepared({
+            sessionID: input.sessionID,
+            inputID: input.inputID,
+            parentTextRevision: parentRevision,
+            preparedTextRevision: parentRevision,
+            preparedPayloadRevision: SessionDisclosure.digest(payload),
+          }),
     } satisfies SessionInbox.UserPayload
   }).pipe(
     Effect.catchCauseIf(
@@ -197,6 +235,7 @@ export const captureContext = (input: {
   readonly messages: readonly SessionMessage.Info[]
   readonly components: readonly ExecutionDisclosure.Component[]
   readonly requestOnly?: {
+    readonly inlineIdentity?: boolean
     readonly provenance: readonly {
       readonly id: typeof SessionMessageID.Type
       readonly state: SessionPublicationProvenance.State | null
@@ -232,7 +271,7 @@ export const captureContext = (input: {
       const message = Schema.decodeUnknownSync(SessionMessage.Info)(
         JSON.parse(JSON.stringify(Schema.encodeUnknownSync(SessionMessage.Info)(original))),
       )
-      const projected = toLLMMessages([message], input.model, input.providerMetadataKey)
+      const projected = toLLMMessages([message], input.model, input.providerMetadataKey, requestOnly?.inlineIdentity)
       const position = index
       index += projected.length
       if (
@@ -259,23 +298,14 @@ export const captureContext = (input: {
         message.type !== "user" ||
         !message.preparedInput ||
         projected.length !== 1 ||
-        message.files?.length ||
+        (!requestOnly?.inlineIdentity && message.files?.length) ||
         message.agents?.length ||
         message.skills?.length ||
         Hash.sha256(JSON.stringify(message)) !== revision
       )
         continue
-      const fact = Schema.decodeUnknownSync(ExecutionProducer.PreparedInput)(JSON.parse(message.preparedInput.payload))
       const { preparedInput: _, ...payload } = Schema.decodeUnknownSync(SessionInbox.UserPayload)(message)
-      const text = textRevision(message.text)
-      if (
-        fact.sessionID !== sessionID ||
-        fact.inputID !== message.id ||
-        text === undefined ||
-        fact.parentTextRevision !== text ||
-        fact.preparedTextRevision !== text ||
-        fact.preparedPayloadRevision !== SessionDisclosure.digest(payload)
-      )
+      if (!preparedIdentity(sessionID, message.id, message.preparedInput, payload, requestOnly?.inlineIdentity))
         continue
       const instructions = message.execution?.instructions ?? ""
       if (Buffer.from(instructions, "utf8").toString("utf8") !== instructions) continue
@@ -357,7 +387,10 @@ export const captureContext = (input: {
             contextDigest: SessionDisclosure.digest(SessionDisclosure.logicalContext(request)),
             components,
           })
-          const observed = { ...owned, composition: processSigner().requestOnly(owned, request.messages.length) }
+          const observed = {
+            ...owned,
+            composition: processSigner().requestOnly(owned, request.messages.length, requestOnly.inlineIdentity),
+          }
           return Buffer.byteLength(JSON.stringify(observed)) > 512 * 1024 ? undefined : observed
         }
         // Caller-supplied evidence is never endorsed by this signer. Only the
@@ -420,23 +453,23 @@ export const inputContext = (
   sessionID: typeof SessionID.Type,
   inputID: typeof SessionMessageID.Type,
   payload: SessionInbox.UserPayload,
+  inlineIdentity = false,
 ) =>
   Effect.sync(() => {
     const owned = Schema.decodeUnknownSync(SessionInbox.UserPayload)(
       JSON.parse(JSON.stringify(Schema.encodeSync(SessionInbox.UserPayload)(payload))),
     )
-    if (!owned.preparedInput || owned.files?.length || owned.agents?.length || owned.skills?.length) return undefined
-    const fact = Schema.decodeUnknownSync(ExecutionProducer.PreparedInput)(JSON.parse(owned.preparedInput.payload))
+    if (
+      !owned.preparedInput ||
+      (!inlineIdentity && owned.files?.length) ||
+      owned.agents?.length ||
+      owned.skills?.length
+    )
+      return undefined
     const { preparedInput: _, ...content } = owned
-    const text = textRevision(owned.text)
     const instructions = owned.execution?.instructions ?? ""
     if (
-      !text ||
-      fact.sessionID !== sessionID ||
-      fact.inputID !== inputID ||
-      fact.parentTextRevision !== text ||
-      fact.preparedTextRevision !== text ||
-      fact.preparedPayloadRevision !== SessionDisclosure.digest(content) ||
+      !preparedIdentity(sessionID, inputID, owned.preparedInput, content, inlineIdentity) ||
       Buffer.from(instructions, "utf8").toString("utf8") !== instructions
     )
       return undefined
@@ -460,10 +493,42 @@ export const inputContext = (
       contextDigest: SessionDisclosure.digest({ kind: "native-human-input-v1", payload: owned }),
       components: [{ kind: "message", id: inputID, revision, proof }],
     })
-    return { ...request, composition: processSigner().requestOnly(request, 1) }
+    return { ...request, composition: processSigner().requestOnly(request, 1, inlineIdentity) }
   }).pipe(
     Effect.catchCauseIf(
       (cause) => !Cause.hasInterrupts(cause),
       () => Effect.die(new Error("Native input context provenance is unavailable")),
     ),
   )
+
+function preparedIdentity(
+  sessionID: typeof SessionID.Type,
+  inputID: typeof SessionMessageID.Type,
+  signed: ExecutionProducer.SignedFact,
+  payload: SessionInbox.UserPayload,
+  inlineIdentity = false,
+) {
+  const decoded = JSON.parse(signed.payload)
+  if (inlineIdentity && decoded.contract === "human-inline-identity-v1") {
+    const fact = Schema.decodeUnknownSync(ExecutionProducer.PreparedInlineInput)(decoded)
+    const content = SessionInlineIdentity.revision(payload)
+    return (
+      content !== undefined &&
+      fact.sessionID === sessionID &&
+      fact.inputID === inputID &&
+      fact.parentContentRevision === content &&
+      fact.preparedContentRevision === content &&
+      fact.preparedPayloadRevision === SessionDisclosure.digest(payload)
+    )
+  }
+  const fact = Schema.decodeUnknownSync(ExecutionProducer.PreparedInput)(decoded)
+  const text = textRevision(payload.text)
+  return (
+    text !== undefined &&
+    fact.sessionID === sessionID &&
+    fact.inputID === inputID &&
+    fact.parentTextRevision === text &&
+    fact.preparedTextRevision === text &&
+    fact.preparedPayloadRevision === SessionDisclosure.digest(payload)
+  )
+}

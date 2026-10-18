@@ -27,6 +27,7 @@ export const ServerHandler = HttpApiBuilder.group(Api, "server.server", (handler
           return HttpServerResponse.jsonUnsafe(
             {
               version: info.app.version ?? "unknown",
+              contextInlineCompositionVersion: 1,
               pid: process.pid ?? 0,
               urls: info.urls(),
               paths: info.paths,
@@ -37,6 +38,7 @@ export const ServerHandler = HttpApiBuilder.group(Api, "server.server", (handler
                 "x-opencode-context-preflight": "1",
                 "x-opencode-context-policy": "1",
                 "x-opencode-context-composition": "2",
+                "x-opencode-context-inline-composition": "1",
                 "x-opencode-context-publication": "1",
                 "x-opencode-session-retirement": "1",
                 "x-opencode-inbox-capability-renewal": "2",

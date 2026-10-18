@@ -338,6 +338,7 @@ const layer = Layer.effect(
         const transcript = SessionModelRequest.baseTranscript({
           agent: loaded.agent.info,
           contextPolicy: loaded.session.contextPolicy,
+          compositionVersion: loaded.disclosure?.compositionVersion,
           model: loaded.model,
           tools: loaded.tools,
           initial: loaded.initial,

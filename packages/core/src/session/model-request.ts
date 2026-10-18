@@ -40,6 +40,7 @@ import { SessionSystemPrompt } from "./system-prompt.js"
 import { toLLMMessages } from "./runner/to-llm-message.js"
 import type { SessionMessage } from "./message.js"
 import type { ExecutionDisclosure } from "@opencode/schema/execution-disclosure"
+import { SessionInlineIdentity } from "./inline-identity.js"
 import { SessionInputRequirements } from "./input-requirements.js"
 import { SessionDisclosure } from "./disclosure.js"
 import { SessionExecutionCapability } from "./execution-capability.js"
@@ -98,6 +99,7 @@ export interface Input {
 export const baseTranscript = (input: {
   readonly agent: Agent.Info
   readonly contextPolicy?: SessionSchema.Info["contextPolicy"]
+  readonly compositionVersion?: ExecutionDisclosure.Service["compositionVersion"]
   readonly model: SessionRunnerModel.Resolved
   readonly tools: Tool.Snapshot
   readonly initial: string
@@ -121,7 +123,7 @@ export const baseTranscript = (input: {
     )
       .filter((part) => part.length > 0)
       .map(SystemPart.make),
-    messages: toLLMMessages(input.messages, input.model.ref, providerMetadataKey),
+    messages: toLLMMessages(input.messages, input.model.ref, providerMetadataKey, input.compositionVersion === 3),
   }
 }
 
@@ -247,9 +249,11 @@ export const layer = Layer.effect(
       ) => Effect.Effect<{ readonly event: S; readonly invoked: number }>,
     ) {
       const service = input.disclosure === undefined ? undefined : structuredClone(input.disclosure)
-      const requestOnly = service?.compositionVersion === 2
+      const requestOnly = service?.compositionVersion === 2 || service?.compositionVersion === 3
       if (requestOnly && !input.session.contextPolicy)
         return yield* Effect.die(new Error("Execution context authorization is unavailable"))
+      if (service?.compositionVersion === 3 && !SessionInlineIdentity.withinRequestLimit(input.messages))
+        return yield* Effect.die(new Error("Inline attachment history exceeds the 41943040 byte request limit"))
       if (
         (input.session.contextPolicy && (kind !== "primary" || service?.publicationVersion !== 1)) ||
         (!input.session.contextPolicy && service?.publicationVersion === 1)
@@ -275,7 +279,9 @@ export const layer = Layer.effect(
               providerMetadataKey: model.model.route.providerMetadataKey ?? model.model.provider,
               messages: input.disclosureMessages,
               components: input.disclosureComponents ?? [],
-              requestOnly: requestOnly ? { provenance: input.disclosureProvenance ?? [] } : undefined,
+              requestOnly: requestOnly
+                ? { provenance: input.disclosureProvenance ?? [], inlineIdentity: service?.compositionVersion === 3 }
+                : undefined,
             })
           : undefined
       const revision = input.disclosureRevision
@@ -335,6 +341,14 @@ export const layer = Layer.effect(
       const generation = Object.fromEntries(entries.filter(([k]) => GENERATION_KEYS.has(k))) as GenerationOptionsFields
       const providerOptions = Object.fromEntries(entries.filter(([k]) => !GENERATION_KEYS.has(k)))
       const affinity = session.parentID ?? session.fork?.sessionID ?? session.id
+      const supported = unsupportedParts(shaped.messages, model.capabilities)
+      // Inline identity cannot endorse replacement text or drop earlier images.
+      // Preserve the actual renderer bytes and reject unsupported modalities.
+      if (
+        service?.compositionVersion === 3 &&
+        SessionDisclosure.digest(supported) !== SessionDisclosure.digest(shaped.messages)
+      )
+        return yield* Effect.die(new Error("Execution context provenance is unavailable"))
       const base = LLM.request({
         model: model.model,
         http: {
@@ -351,7 +365,7 @@ export const layer = Layer.effect(
         // TODO: Persist cache lineage so nested forks reuse the root session's cache key.
         promptCacheKey: /^ses_[0-9a-f]{64}$/.test(affinity) ? affinity.slice(4) : affinity,
         system: shaped.system,
-        messages: boundImages(unsupportedParts(shaped.messages, model.capabilities)),
+        messages: service?.compositionVersion === 3 ? shaped.messages : boundImages(supported),
         tools: Array.from(hooked, ([name, t]) => ({ ...t, name })),
         toolChoice: input.toolChoice,
         generation: Object.keys(generation).length === 0 ? undefined : generation,
@@ -619,7 +633,8 @@ export const layer = Layer.effect(
           agentHook(
             "context",
             input.agent,
-            !!input.session.contextPolicy && input.disclosure?.compositionVersion === 2,
+            !!input.session.contextPolicy &&
+              (input.disclosure?.compositionVersion === 2 || input.disclosure?.compositionVersion === 3),
           ),
         ),
       compaction: (input) => prepare("compaction", input, agentHook("compaction", input.agent)),

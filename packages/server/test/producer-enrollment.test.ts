@@ -69,6 +69,21 @@ it.live("producer enrollment requires configured and authenticated native server
     expect(info.status).toBe(200)
     expect(info.headers.get("x-opencode-context-policy")).toBe("1")
     expect(info.headers.get("x-opencode-context-composition")).toBe("2")
+    expect(info.headers.get("x-opencode-context-inline-composition")).toBe("1")
+    expect(yield* Effect.promise(() => info.json())).toMatchObject({ contextInlineCompositionVersion: 1 })
+    const contracts = [
+      "human-plaintext-identity-v1",
+      "model-plaintext-projection-v1",
+      "model-request-only-plaintext-v1",
+      "human-inline-identity-v1",
+      "model-request-only-inline-v1",
+    ]
+    const inline = yield* Effect.promise(() => handler(request({ ...challenge, contracts }, "fixture-native-password")))
+    expect(inline.status).toBe(200)
+    const enrolledInline = Schema.decodeUnknownSync(ExecutionProducer.Enrollment)(
+      yield* Effect.promise(() => inline.json()),
+    )
+    expect(JSON.parse(enrolledInline.signed.payload).contracts).toEqual(contracts)
     expect(info.headers.get("x-opencode-context-publication")).toBe("1")
   }).pipe(Effect.scoped),
 )

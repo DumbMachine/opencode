@@ -46,7 +46,13 @@ export type ServerEnrollProducerInput = {
   readonly challenge: string
   readonly audience: string
   readonly contracts?:
-    | ReadonlyArray<"human-plaintext-identity-v1" | "model-plaintext-projection-v1" | "model-request-only-plaintext-v1">
+    | ReadonlyArray<
+        | "human-plaintext-identity-v1"
+        | "model-plaintext-projection-v1"
+        | "model-request-only-plaintext-v1"
+        | "human-inline-identity-v1"
+        | "model-request-only-inline-v1"
+      >
     | undefined
 }
 export type ServerEnrollProducerOutput = ExecutionProducer.Enrollment
@@ -56,6 +62,7 @@ export type ServerEnrollProducerOperation<E = never> = (
 
 export type ServerInfoOutput = {
   readonly version: string
+  readonly contextInlineCompositionVersion?: 1 | undefined
   readonly pid: number
   readonly urls: ReadonlyArray<string>
   readonly paths: { readonly tmp: string }

@@ -17,6 +17,7 @@ import { Mime } from "../mime.js"
 import { Plugin } from "../plugin/service.js"
 import { PluginHooks } from "../plugin/hooks.js"
 import { NativeProducer } from "../execution-producer.js"
+import { SessionInlineIdentity } from "./inline-identity.js"
 import { Skill } from "../skill.js"
 import { AttachmentError, SkillNotFoundError } from "./error.js"
 
@@ -48,8 +49,14 @@ export const prepare = Effect.fn("SessionPrompt.prepare")(function* (request: {
     agents: request.input.agents,
     skills: request.input.skills,
   })
-  if (request.session.contextPolicy && (original.files?.length || original.agents?.length || original.skills?.length))
-    return yield* Effect.die(new Error("Session context policy does not support attachments"))
+  const inlineIdentity = request.input.disclosure?.compositionVersion === 3
+  if (
+    request.session.contextPolicy &&
+    (original.agents?.length ||
+      original.skills?.length ||
+      (inlineIdentity ? SessionInlineIdentity.originalRevision(original) === undefined : original.files?.length))
+  )
+    return yield* Effect.die(new Error("Session context policy does not support these attachments"))
   const tracked = request.input.disclosure !== undefined
   const fs = yield* FSUtil.Service
   const instances = yield* Instance.Service
@@ -69,7 +76,7 @@ export const prepare = Effect.fn("SessionPrompt.prepare")(function* (request: {
     const event = observed.event
     const input = event.prompt
     const files = input.files
-      ? yield* Effect.forEach(input.files, materializeAttachment, { concurrency: 8 })
+      ? yield* Effect.forEach(input.files, (file) => materializeAttachment(file, inlineIdentity), { concurrency: 8 })
       : undefined
     const requested = input.skills
     const selected = yield* Effect.gen(function* () {
@@ -109,6 +116,7 @@ export const prepare = Effect.fn("SessionPrompt.prepare")(function* (request: {
           inputID,
           original,
           invoked: observed.invoked,
+          inlineIdentity,
           payload,
         })
       : undefined
@@ -122,7 +130,13 @@ export const prepare = Effect.fn("SessionPrompt.prepare")(function* (request: {
 
 const materializeAttachment = Effect.fn("SessionPrompt.materializeAttachment")(function* (
   input: PromptInput.FileAttachment,
+  inlineIdentity = false,
 ) {
+  if (inlineIdentity) {
+    const materialized = SessionInlineIdentity.materialize(input)
+    if (!materialized) return yield* Effect.die(new Error("Native inline attachment identity is unavailable"))
+    return materialized
+  }
   const label = attachmentLabel(input)
   const resolved = input.uri.startsWith("data:")
     ? {

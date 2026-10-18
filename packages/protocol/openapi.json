@@ -14409,7 +14409,7 @@
           },
           "compositionVersion": {
             "type": "number",
-            "enum": [1, 2]
+            "enum": [1, 2, 3]
           },
           "issuer": {
             "type": "string",
@@ -14489,11 +14489,13 @@
               "enum": [
                 "human-plaintext-identity-v1",
                 "model-plaintext-projection-v1",
-                "model-request-only-plaintext-v1"
+                "model-request-only-plaintext-v1",
+                "human-inline-identity-v1",
+                "model-request-only-inline-v1"
               ]
             },
             "minItems": 1,
-            "maxItems": 3
+            "maxItems": 5
           }
         },
         "required": ["version", "challenge", "audience"],
@@ -17834,6 +17836,10 @@
         "properties": {
           "version": {
             "type": "string"
+          },
+          "contextInlineCompositionVersion": {
+            "type": "number",
+            "enum": [1]
           },
           "pid": {
             "type": "integer",

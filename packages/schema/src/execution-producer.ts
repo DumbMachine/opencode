@@ -13,6 +13,8 @@ export const Contract = Schema.Literals([
   "human-plaintext-identity-v1",
   "model-plaintext-projection-v1",
   "model-request-only-plaintext-v1",
+  "human-inline-identity-v1",
+  "model-request-only-inline-v1",
 ])
 
 export interface SignedFact extends Schema.Schema.Type<typeof SignedFact> {}
@@ -27,7 +29,7 @@ export const EnrollmentRequest = Schema.Struct({
   version: Schema.Literal(1),
   challenge: Schema.String.check(Schema.isPattern(/^[A-Za-z0-9_-]{43}$/)),
   audience: bounded(512),
-  contracts: Schema.Array(Contract).check(Schema.isMinLength(1), Schema.isMaxLength(3)).pipe(optional),
+  contracts: Schema.Array(Contract).check(Schema.isMinLength(1), Schema.isMaxLength(5)).pipe(optional),
 }).annotate({ identifier: "ExecutionProducer.EnrollmentRequest" })
 
 export interface EnrollmentProof extends Schema.Schema.Type<typeof EnrollmentProof> {}
@@ -39,7 +41,7 @@ export const EnrollmentProof = Schema.Struct({
   producerEpoch: bounded(128),
   bootNonce: Schema.String.check(Schema.isPattern(/^[A-Za-z0-9_-]{43}$/)).pipe(optional),
   key: VerificationKey,
-  contracts: Schema.Array(Contract).check(Schema.isMinLength(1), Schema.isMaxLength(3)),
+  contracts: Schema.Array(Contract).check(Schema.isMinLength(1), Schema.isMaxLength(5)),
   issuedAt: Schema.Int,
 }).annotate({ identifier: "ExecutionProducer.EnrollmentProof" })
 
@@ -63,6 +65,21 @@ export const PreparedInput = Schema.Struct({
   preparedTextRevision: Digest,
   preparedPayloadRevision: Digest,
 }).annotate({ identifier: "ExecutionProducer.PreparedInput" })
+
+// Separate from plaintext identity: this commitment includes exact text and
+// ordered inline descriptors, byte digests and lengths, including empty text.
+export interface PreparedInlineInput extends Schema.Schema.Type<typeof PreparedInlineInput> {}
+export const PreparedInlineInput = Schema.Struct({
+  version: Schema.Literal(1),
+  purpose: Schema.Literal("native-input-preparation"),
+  producerEpoch: bounded(128),
+  contract: Schema.Literal("human-inline-identity-v1"),
+  sessionID: SessionID,
+  inputID: SessionMessageID,
+  parentContentRevision: Digest,
+  preparedContentRevision: Digest,
+  preparedPayloadRevision: Digest,
+}).annotate({ identifier: "ExecutionProducer.PreparedInlineInput" })
 
 // A projection is a bounded observation of one consumed human message, not a
 // completeness claim about the rest of the request or its physical transport.
@@ -145,3 +162,10 @@ export const RequestOnlyComposition = Schema.Struct({
   issuedAt: Schema.Int,
 }).annotate({ identifier: "ExecutionProducer.RequestOnlyComposition" })
 export interface RequestOnlyComposition extends Schema.Schema.Type<typeof RequestOnlyComposition> {}
+
+// Enrolled independently: the plaintext contract never widens implicitly.
+export const InlineRequestOnlyComposition = Schema.Struct({
+  ...RequestOnlyComposition.fields,
+  contract: Schema.Literal("model-request-only-inline-v1"),
+}).annotate({ identifier: "ExecutionProducer.InlineRequestOnlyComposition" })
+export interface InlineRequestOnlyComposition extends Schema.Schema.Type<typeof InlineRequestOnlyComposition> {}

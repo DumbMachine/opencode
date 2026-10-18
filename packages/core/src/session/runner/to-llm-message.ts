@@ -247,7 +247,12 @@ const modelSwitched = (message: SessionMessage.ModelSelected, model: Model.Ref):
   return [Message.effort({ effort: to.effort, previous: from.effort })]
 }
 
-function toLLMMessage(message: SessionMessage.Info, model: Model.Ref, providerMetadataKey: string): Message[] {
+function toLLMMessage(
+  message: SessionMessage.Info,
+  model: Model.Ref,
+  providerMetadataKey: string,
+  inlineIdentity: boolean,
+): Message[] {
   switch (message.type) {
     case "agent-switched":
     case "idle":
@@ -267,7 +272,9 @@ function toLLMMessage(message: SessionMessage.Info, model: Model.Ref, providerMe
       const content = [
         ...(message.skills ?? []).flatMap((skill) => (skill.text === undefined ? [] : [Message.text(skill.text)])),
         ...(message.text === "" ? [] : [Message.text(message.text)]),
-        ...userAttachmentContent(message.files ?? []),
+        ...(inlineIdentity
+          ? (message.files ?? []).flatMap(attachmentContent)
+          : userAttachmentContent(message.files ?? [])),
       ]
       if (content.length === 0) return []
       return [
@@ -328,4 +335,5 @@ export const toLLMMessages = (
   messages: readonly SessionMessage.Info[],
   model: Model.Ref,
   providerMetadataKey: string = model.providerID,
-) => messages.flatMap((message) => toLLMMessage(message, model, providerMetadataKey))
+  inlineIdentity = false,
+) => messages.flatMap((message) => toLLMMessage(message, model, providerMetadataKey, inlineIdentity))
