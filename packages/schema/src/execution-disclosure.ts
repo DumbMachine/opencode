@@ -57,6 +57,19 @@ export const ContextRequest = Schema.Struct({
   components: Schema.Array(Component).check(Schema.isMaxLength(2048)),
 }).annotate({ identifier: "ExecutionDisclosure.ContextRequest" })
 
+// Signed inside ContextProof; never trusted from an unsigned response field.
+export interface PublicationService extends Schema.Schema.Type<typeof PublicationService> {}
+export const PublicationService = Schema.Struct({
+  version: Schema.Literal(1),
+  endpoint: bounded(2048),
+  audience: bounded(512),
+  keys: Schema.Array(VerificationKey).check(Schema.isMinLength(1), Schema.isMaxLength(8)),
+  organizationID: bounded(32),
+  threadID: bounded(64),
+  capabilityID: bounded(32),
+  capabilityGeneration: Schema.Int.check(Schema.isGreaterThan(0), Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER)),
+}).annotate({ identifier: "ExecutionDisclosure.PublicationService" })
+
 export interface ContextProof extends Schema.Schema.Type<typeof ContextProof> {}
 export const ContextProof = Schema.Struct({
   version: Schema.Literal(1),
@@ -69,6 +82,7 @@ export const ContextProof = Schema.Struct({
   contextDigest: Digest,
   componentsDigest: Digest,
   contextReference: bounded(256),
+  publication: PublicationService.pipe(optional),
   mode: Schema.Literals(["complete", "actor-private-unknown"]),
   complete: Schema.Boolean,
   issuedAt: Schema.Int,
@@ -82,3 +96,36 @@ export const SignedProof = Schema.Struct({
   payload: bounded(16384),
   signature: Schema.String.check(Schema.isPattern(/^[A-Za-z0-9_-]{86}$/)),
 }).annotate({ identifier: "ExecutionDisclosure.SignedProof" })
+
+// A fresh permit binds one immutable output unit, not a general stream.
+export interface PublicationRequest extends Schema.Schema.Type<typeof PublicationRequest> {}
+export const PublicationRequest = Schema.Struct({
+  version: Schema.Literal(1),
+  sessionID: Session.ID,
+  inputID: SessionMessage.ID,
+  contextReference: Digest,
+  contextDigest: Digest,
+  componentsDigest: Digest,
+  attempt: bounded(128),
+  kind: Schema.Literal("model-output"),
+  unitID: bounded(128),
+  unitDigest: Digest,
+}).annotate({ identifier: "ExecutionDisclosure.PublicationRequest" })
+
+export interface PublicationProof extends Schema.Schema.Type<typeof PublicationProof> {}
+export const PublicationProof = Schema.Struct({
+  ...PublicationRequest.fields,
+  purpose: Schema.Literal("thread-publication"),
+  issuer: bounded(512),
+  audience: bounded(512),
+  organizationID: bounded(32),
+  threadID: bounded(64),
+  capabilityID: bounded(32),
+  capabilityGeneration: Schema.Int.check(Schema.isGreaterThan(0), Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER)),
+  receiptReference: Digest,
+  authorizationVersion: bounded(256),
+  manifestBinding: Digest,
+  audienceBinding: Digest,
+  issuedAt: Schema.Int,
+  expiresAt: Schema.Int,
+}).annotate({ identifier: "ExecutionDisclosure.PublicationProof" })

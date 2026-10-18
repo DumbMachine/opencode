@@ -5,6 +5,7 @@ import { Effect, Schema } from "effect"
 import { LLMRequest, Media } from "@opencode/ai"
 import { ExecutionDisclosure } from "@opencode/schema/execution-disclosure"
 import { Hash } from "@opencode/util/hash"
+import { SessionPublication } from "./publication.js"
 
 // Canonical ordering is for content identity, never a provenance assertion.
 export const digest = (value: unknown): string => {
@@ -109,7 +110,7 @@ export const prepare = (
         now - proof.issuedAt > 120_000
       )
         throw new Error()
-      return { proof, signed }
+      return { proof, signed, publication: SessionPublication.make(config, proof) }
     },
     catch: () => new Error("Execution context authorization is unavailable"),
   }).pipe(Effect.orDie)
