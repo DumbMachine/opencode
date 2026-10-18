@@ -8,6 +8,7 @@ export interface Interface {
   readonly execute: (
     request: HttpClientRequest.HttpClientRequest,
     middleware?: HttpMiddleware,
+    beforeDispatch?: Effect.Effect<void>,
   ) => Effect.Effect<HttpClientResponse.HttpClientResponse, AIError>
 }
 

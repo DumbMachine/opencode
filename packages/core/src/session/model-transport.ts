@@ -12,7 +12,21 @@ import {
 } from "@opencode/ai/route"
 import { AIError, AIErrorReason, TransportError, type TransportOperation } from "@opencode/ai"
 import { Hash } from "@opencode/util/hash"
-import { Cause, Clock, Context, Effect, Fiber, Layer, Metric, Queue, Scope, Semaphore, Stream } from "effect"
+import {
+  Cause,
+  Clock,
+  Context,
+  Effect,
+  Exit,
+  Fiber,
+  Layer,
+  Metric,
+  Option,
+  Queue,
+  Scope,
+  Semaphore,
+  Stream,
+} from "effect"
 import { Headers } from "effect/unstable/http"
 import { Socket } from "effect/unstable/socket"
 import { makeGlobalNode } from "@opencode/util/effect/app-node"
@@ -384,8 +398,17 @@ export const makeLayer = (connector: WebSocketConnector) =>
           queue: yield* Queue.unbounded<string, AIError>(),
           delivery: "send-attempted",
         }
+        yield* exchange.beforeDispatch ?? Effect.void
         channel.active = active
         const sent = yield* channel.connection.sendText(message).pipe(
+          // This finalizer records definitive non-delivery before any interruptible
+          // reader/connection cleanup can discard that billing evidence.
+          Effect.onExit((exit) => {
+            const error = Option.getOrUndefined(Exit.findErrorOption(exit))
+            return error?.reason._tag === "Transport" && error.reason.delivery === "not-sent"
+              ? (exchange.onNotSent ?? Effect.void)
+              : Effect.void
+          }),
           Effect.withSpan("SessionModelTransport.send"),
           Effect.onInterrupt(() => closeChannel(owner, channel)),
           Effect.result,

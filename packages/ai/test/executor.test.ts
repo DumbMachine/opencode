@@ -29,6 +29,140 @@ const expectAIError = (error: unknown) => {
 const largeProviderMessage = `Upstream request failed: ${"validation failed; ".repeat(1_000)}`
 
 describe("RequestExecutor", () => {
+  it.effect("records a definitively unsent direct WebSocket before connection release", () =>
+    Effect.gen(function* () {
+      const order: string[] = []
+      const webSocket = WebSocketTransport.makeDirect({
+        open: () =>
+          Effect.succeed({
+            sendText: () =>
+              Effect.sync(() => {
+                order.push("send")
+              }).pipe(
+                Effect.andThen(
+                  Effect.fail(
+                    new AIError({
+                      reason: new TransportError({
+                        message: "Closed before send",
+                        transport: "websocket",
+                        operation: "write",
+                        delivery: "not-sent",
+                      }),
+                    }),
+                  ),
+                ),
+              ),
+            messages: Stream.empty,
+            close: Effect.sync(() => {
+              order.push("close")
+            }),
+          }),
+      })
+      const result = yield* webSocket
+        .execute({
+          id: "direct-unsent",
+          connect: { url: "wss://provider.test", headers: Headers.empty },
+          fallback: () => Stream.empty,
+          beforeDispatch: Effect.sync(() => {
+            order.push("guard")
+          }),
+          onNotSent: Effect.sync(() => {
+            order.push("unsent")
+          }),
+          driver: {
+            create: () => Effect.succeed({ message: "original", mode: "full" }),
+            observe: (_create, frame) => Effect.succeed({ type: "frame" as const, frame }),
+          },
+        })
+        .pipe(Effect.scoped, Effect.exit)
+      expect(result._tag).toBe("Failure")
+      expect(order).toEqual(["guard", "send", "unsent", "close"])
+    }),
+  )
+
+  it.effect("checks physical dispatch after both shared and request middleware waits", () =>
+    Effect.gen(function* () {
+      const order: string[] = []
+      let sent = 0
+      const base = RequestExecutor.layer.pipe(
+        Layer.provide(
+          handlerLayer((input) =>
+            Effect.sync(() => {
+              sent++
+              return input.respond("ok")
+            }),
+          ),
+        ),
+      )
+      const wrapped = RequestExecutor.middleware(
+        (input, next) =>
+          Effect.sync(() => {
+            order.push("shared")
+          }).pipe(Effect.andThen(() => next(input))),
+        base,
+      )
+      const executor = yield* RequestExecutor.Service.pipe(Effect.provide(wrapped))
+      const result = yield* executor
+        .execute(
+          request,
+          (input, next) =>
+            Effect.sync(() => {
+              order.push("request")
+            }).pipe(Effect.andThen(() => next(input))),
+          Effect.sync(() => {
+            order.push("guard")
+            throw new Error("Admission ended")
+          }),
+        )
+        .pipe(Effect.exit)
+      expect(result._tag).toBe("Failure")
+      expect(sent).toBe(0)
+      expect(order).toEqual(["shared", "request", "guard"])
+    }),
+  )
+
+  it.effect("checks direct WebSocket dispatch after connection and driver preparation", () =>
+    Effect.gen(function* () {
+      let live = true,
+        sent = 0,
+        closed = 0
+      const webSocket = WebSocketTransport.makeDirect({
+        open: () =>
+          Effect.succeed({
+            sendText: () =>
+              Effect.sync(() => {
+                sent++
+              }),
+            messages: Stream.empty,
+            close: Effect.sync(() => {
+              closed++
+            }),
+          }),
+      })
+      const result = yield* webSocket
+        .execute({
+          id: "guarded-direct",
+          connect: { url: "wss://provider.test", headers: Headers.empty },
+          fallback: () => Stream.empty,
+          beforeDispatch: Effect.sync(() => {
+            if (!live) throw new Error("Admission ended")
+          }),
+          driver: {
+            create: () =>
+              Effect.sync(() => {
+                live = false
+                return { message: "never-sent", mode: "full" as const }
+              }),
+            observe: (_create, frame) => Effect.succeed({ type: "frame" as const, frame }),
+          },
+        })
+        .pipe(Effect.scoped, Effect.exit)
+      expect(result._tag).toBe("Failure")
+      expect(sent).toBe(0)
+      expect(closed).toBe(1)
+    }),
+  )
+
   it.effect("preserves externally captured HTTP errors without inventing response context", () =>
     Effect.sync(() => {
       const cause = new Error("upstream request failed")

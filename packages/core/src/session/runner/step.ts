@@ -101,7 +101,11 @@ export const make = Effect.gen(function* () {
     // A local execution starts only after its Tool.Called publication completes.
     let overflowFailure: ProviderErrorEvent | undefined
     // Read to the end, not just the finish event, so the next request can reuse this response.
-    const providerStream = llm.stream(input.prepared.request, input.prepared.options).pipe(
+    const providerStream = Stream.unwrap(
+      (input.prepared.assertCurrent ?? Effect.void).pipe(
+        Effect.map(() => llm.stream(input.prepared.request, input.prepared.options)),
+      ),
+    ).pipe(
       Stream.runForEach((event) =>
         Effect.gen(function* () {
           if (overflowFailure || publisher.hasProviderError()) return

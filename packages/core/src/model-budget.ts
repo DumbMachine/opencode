@@ -248,7 +248,7 @@ export const make = (client: LLMClientShape, endpoint: string, token: string, kv
           model_id: request.model.id,
         }
         const state = yield* Effect.acquireRelease(
-          Effect.sync(() => ({ dispatched: false, admitted: false, uncertain: false })),
+          Effect.sync(() => ({ dispatched: 0, admitted: false, uncertain: false })),
           (state) =>
             !state.dispatched && (state.admitted || state.uncertain)
               ? record({ ...attempt, operation: "cancel", usage: zeroUsage })
@@ -294,10 +294,28 @@ export const make = (client: LLMClientShape, endpoint: string, token: string, kv
             ),
           )
         return Stream.suspend(() => {
-          // From this point a provider outcome may be unknown. Never issue a
-          // no-charge cancellation merely because this stream is interrupted.
-          state.dispatched = true
-          return client.stream(bounded, options)
+          // With a physical admission guard, its successful send boundary marks
+          // dispatch. Refusal after reserve must retain the no-send cancellation.
+          // Ordinary clients keep the existing conservative unknown-outcome rule.
+          if (!options?.beforeDispatch) state.dispatched++
+          return client.stream(
+            bounded,
+            options?.beforeDispatch
+              ? {
+                  ...options,
+                  beforeDispatch: options.beforeDispatch.pipe(
+                    Effect.andThen(
+                      Effect.sync(() => {
+                        state.dispatched++
+                      }),
+                    ),
+                  ),
+                  onNotSent: Effect.sync(() => {
+                    state.dispatched = Math.max(0, state.dispatched - 1)
+                  }).pipe(Effect.andThen(options.onNotSent ?? Effect.void)),
+                }
+              : options,
+          )
         }).pipe(
           Stream.tap((event) => {
             observed = true

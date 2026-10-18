@@ -1,4 +1,4 @@
-import { Cause, Effect, Queue, Stream } from "effect"
+import { Cause, Effect, Exit, Option, Queue, Stream } from "effect"
 import { Headers } from "effect/unstable/http"
 import { Socket } from "effect/unstable/socket"
 import {
@@ -356,7 +356,14 @@ export const makeDirect = (connector: WebSocketConnector): WebSocketChannelExecu
         (connection) => connection.close,
       )
       const create = yield* exchange.driver.create(undefined)
+      yield* exchange.beforeDispatch ?? Effect.void
       yield* connection.sendText(create.message).pipe(
+        Effect.onExit((exit) => {
+          const error = Option.getOrUndefined(Exit.findErrorOption(exit))
+          return error?.reason._tag === "Transport" && error.reason.delivery === "not-sent"
+            ? (exchange.onNotSent ?? Effect.void)
+            : Effect.void
+        }),
         Effect.mapError(
           (error) =>
             new AIError({
@@ -491,6 +498,8 @@ export const json = <Body, Message>(input: JsonInput<Body, Message>): JsonTransp
       observe: (_create, frame) => Effect.succeed({ type: "frame", frame }),
     }
     const exchange: WebSocketChannelExchange = {
+      beforeDispatch: options?.beforeDispatch,
+      onNotSent: options?.onNotSent,
       id: request.id ?? "request",
       connect: { url: prepared.url, headers: prepared.headers },
       fallback: () =>

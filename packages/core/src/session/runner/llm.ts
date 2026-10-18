@@ -259,14 +259,23 @@ const layer = Layer.effect(
       selected: SessionContext.Selection,
     ) {
       const preview = yield* context.load(selected)
+      const captured = yield* SessionExecutionCapability.getWithSelection(
+        sessionID,
+        preview.input?.type === "user" ? preview.input.id : undefined,
+      )
       const grant = yield* executionGrant(
         sessionID,
         preview.input ? [preview.input] : [],
-        yield* SessionExecutionCapability.get(sessionID, preview.input?.type === "user" ? preview.input.id : undefined),
+        captured.grant,
         preview.messages,
       )
       if (!grant) return preview
-      if (grant.mcp === undefined) return { ...preview, disclosure: structuredClone(grant.disclosure) }
+      const disclosure = {
+        disclosure: structuredClone(grant.disclosure),
+        disclosureRevision: grant.revision,
+        disclosureCurrent: captured.current,
+      }
+      if (grant.mcp === undefined) return { ...preview, ...disclosure }
       const executionMcp = yield* mcp.request(grant.mcp)
       const next = yield* context.select(sessionID, executionMcp, {
         input: preview.input,
@@ -276,7 +285,7 @@ const layer = Layer.effect(
       const loaded = yield* context.load(next)
       if (loaded.input?.id !== grant.inputID) return yield* Effect.interrupt
       yield* executionGrant(sessionID, [loaded.input], grant, loaded.messages)
-      return { ...loaded, disclosure: structuredClone(grant.disclosure) }
+      return { ...loaded, ...disclosure }
     })
 
     const prepareSelection = Effect.fn("SessionRunner.prepareSelection")(function* (
@@ -324,6 +333,8 @@ const layer = Layer.effect(
         const prepared = yield* context.request.primary({
           session: loaded.session,
           disclosure: loaded.disclosure,
+          disclosureRevision: loaded.disclosureRevision,
+          disclosureCurrent: loaded.disclosureCurrent,
           disclosureComponents: loaded.disclosureComponents,
           inputID: loaded.input?.type === "user" ? loaded.input.id : undefined,
           agent: loaded.agent.id,

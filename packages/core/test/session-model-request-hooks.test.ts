@@ -3,6 +3,8 @@ import { OpenAIChat } from "@opencode/ai/protocols"
 import { compileRequest } from "@opencode/ai/route/client"
 import { Message, SystemPart, ToolDefinition, Media } from "@opencode/ai"
 import { SessionDisclosure } from "@opencode/core/session/disclosure"
+import { SessionExecutionCapability } from "@opencode/core/session/execution-capability"
+import { SessionRunCoordinator } from "@opencode/core/session/run-coordinator"
 import { disclosureHost } from "./fixture/disclosure-host"
 import { Agent } from "@opencode/schema/agent"
 import { Money } from "@opencode/schema/money"
@@ -195,6 +197,14 @@ describe("SessionModelRequest input provenance", () => {
   )
 })
 
+const captureDisclosure = (inputID: SessionMessage.ID, service: Parameters<typeof SessionDisclosure.prepare>[0]) =>
+  Effect.gen(function* () {
+    yield* SessionExecutionCapability.clear(session.id)
+    expect(yield* SessionExecutionCapability.set(session.id, { inputID, disclosure: service, revision: 1 })).toBe(true)
+    const captured = yield* SessionExecutionCapability.getWithSelection(session.id, inputID)
+    return { disclosureRevision: 1, disclosureCurrent: captured.current }
+  })
+
 describe("SessionModelRequest disclosure boundary", () => {
   it.effect("attests the post-hook, post-media snapshot and isolates aliases retained by hooks", () =>
     Effect.gen(function* () {
@@ -218,10 +228,13 @@ describe("SessionModelRequest disclosure boundary", () => {
         }),
       )
       const requests = yield* SessionModelRequest.Service.pipe(Effect.provide(SessionModelRequest.layer))
+      const inputID = SessionMessage.ID.make("msg_prepared_original")
+      const captured = yield* captureDisclosure(inputID, host.config)
       const fiber = yield* Effect.forkChild(
         requests.primary({
+          ...captured,
           session,
-          inputID: SessionMessage.ID.make("msg_prepared_original"),
+          inputID,
           agent: Agent.ID.make("build"),
           model,
           disclosure: host.config,
@@ -261,7 +274,11 @@ describe("SessionModelRequest disclosure boundary", () => {
       expect(JSON.stringify(sent.body)).not.toContain("changed-during-host-wait")
       expect(SessionDisclosure.digest(SessionDisclosure.logicalContext(prepared.request))).toBe(observed)
       expect(JSON.stringify(prepared.event)).not.toContain(host.config.token)
-    }).pipe(Effect.provideService(SessionModelTransport.Service, transport)),
+    }).pipe(
+      Effect.provideService(SessionModelTransport.Service, transport),
+      Effect.provideService(SessionRunCoordinator.Ownership, { live: () => true }),
+      Effect.ensuring(SessionExecutionCapability.clear(session.id)),
+    ),
   )
   it.effect(
     "rejects required primary transport hooks and unsupported auxiliary requests before preparation returns",
@@ -269,9 +286,12 @@ describe("SessionModelRequest disclosure boundary", () => {
       Effect.gen(function* () {
         const host = disclosureHost()
         const requests = yield* SessionModelRequest.Service.pipe(Effect.provide(SessionModelRequest.layer))
+        const inputID = SessionMessage.ID.make("msg_blocked")
+        const captured = yield* captureDisclosure(inputID, host.config)
         const input = {
+          ...captured,
           session,
-          inputID: SessionMessage.ID.make("msg_blocked"),
+          inputID,
           agent: Agent.ID.make("build"),
           model,
           disclosure: host.config,
@@ -287,9 +307,221 @@ describe("SessionModelRequest disclosure boundary", () => {
         yield* hooks.register("session", "http.request", () => Effect.void)
         expect((yield* Effect.exit(requests.primary(input)))._tag).toBe("Failure")
         host.server.stop(true)
-      }).pipe(Effect.provideService(SessionModelTransport.Service, transport)),
+      }).pipe(
+        Effect.provideService(SessionModelTransport.Service, transport),
+        Effect.provideService(SessionRunCoordinator.Ownership, { live: () => true }),
+        Effect.ensuring(SessionExecutionCapability.clear(session.id)),
+      ),
   )
 })
+
+for (const timing of ["before-hooks", "during-preflight"] as const) {
+  it.effect(`rejects equal grant replacement ${timing} without reviving original authority`, () =>
+    Effect.gen(function* () {
+      const arrived = Promise.withResolvers<void>()
+      const release = Promise.withResolvers<void>()
+      let contacted = 0,
+        hooked = 0
+      const host = disclosureHost({
+        observe: async () => {
+          contacted++
+          arrived.resolve()
+          await release.promise
+        },
+      })
+      const inputID = SessionMessage.ID.create()
+      const captured = yield* captureDisclosure(inputID, host.config)
+      const hooks = yield* PluginHooks.Service
+      yield* hooks.register("session", "context", () =>
+        Effect.sync(() => {
+          hooked++
+        }),
+      )
+      const replace = Effect.gen(function* () {
+        yield* SessionExecutionCapability.clear(session.id)
+        expect(
+          yield* SessionExecutionCapability.set(session.id, { inputID, revision: 1, disclosure: host.config }),
+        ).toBe(true)
+        yield* SessionExecutionCapability.select(session.id, inputID)
+      })
+      try {
+        if (timing === "before-hooks") yield* replace
+        const requests = yield* SessionModelRequest.Service.pipe(Effect.provide(SessionModelRequest.layer))
+        const pending = yield* requests
+          .primary({
+            ...captured,
+            session,
+            inputID,
+            agent: Agent.ID.make("build"),
+            model,
+            disclosure: host.config,
+            system: [],
+            messages: [Message.user("original")],
+          })
+          .pipe(Effect.exit, Effect.forkChild)
+        if (timing === "during-preflight") {
+          yield* Effect.promise(() => arrived.promise)
+          yield* replace
+        }
+        release.resolve()
+        expect((yield* Fiber.join(pending))._tag).toBe("Failure")
+        expect(contacted).toBe(timing === "before-hooks" ? 0 : 1)
+        expect(hooked).toBe(timing === "before-hooks" ? 0 : 1)
+      } finally {
+        release.resolve()
+        host.server.stop(true)
+      }
+    }).pipe(
+      Effect.provideService(SessionModelTransport.Service, transport),
+      Effect.provideService(SessionRunCoordinator.Ownership, { live: () => true }),
+      Effect.ensuring(SessionExecutionCapability.clear(session.id)),
+    ),
+  )
+}
+
+it.effect("captures service before hooks and rechecks owner before preflight and tools", () =>
+  Effect.gen(function* () {
+    let contacted = 0,
+      tools = 0,
+      live = true
+    const host = disclosureHost({
+      observe: () => {
+        contacted++
+      },
+    })
+    const inputID = SessionMessage.ID.create()
+    const captured = yield* captureDisclosure(inputID, host.config)
+    const publicService = structuredClone(host.config)
+    const hooks = yield* PluginHooks.Service
+    yield* hooks.register("session", "context", () =>
+      Effect.sync(() => {
+        publicService.endpoint = "https://substituted.example.test"
+        publicService.token = "different-token"
+      }),
+    )
+    try {
+      const requests = yield* SessionModelRequest.Service.pipe(Effect.provide(SessionModelRequest.layer))
+      const prepared = yield* requests
+        .primary({
+          ...captured,
+          session,
+          inputID,
+          agent: Agent.ID.make("build"),
+          model,
+          disclosure: publicService,
+          system: [],
+          messages: [Message.user("original")],
+          tools: {
+            definitions: [
+              ToolDefinition.make({ name: "lookup", description: "Lookup", inputSchema: { type: "object" } }),
+            ],
+            execute: () =>
+              Effect.sync(() => {
+                tools++
+                return { content: [{ type: "text" as const, text: "result" }] }
+              }),
+          },
+        })
+        .pipe(Effect.provideService(SessionRunCoordinator.Ownership, { live: () => live }))
+      expect(contacted).toBe(1)
+      expect(prepared.assertCurrent).toBeDefined()
+      yield* prepared.assertCurrent!
+      live = false
+      expect((yield* Effect.exit(prepared.assertCurrent!))._tag).toBe("Failure")
+      expect(
+        (yield* Effect.exit(
+          prepared.executeTool({
+            sessionID: session.id,
+            agent: Agent.ID.make("build"),
+            messageID: SessionMessage.ID.create(),
+            call: { type: "tool-call", id: "call_lookup", name: "lookup", input: {} },
+            progress: () => Effect.void,
+          }),
+        ))._tag,
+      ).toBe("Failure")
+      expect(tools).toBe(0)
+      // A new preparation cannot cross the context-hook wait after owner loss.
+      const nextService = structuredClone(host.config)
+      const nextCapture = yield* captureDisclosure(inputID, nextService)
+      live = true
+      yield* hooks.register("session", "model.request", () =>
+        Effect.sync(() => {
+          live = false
+        }),
+      )
+      expect(
+        (yield* requests
+          .primary({
+            ...nextCapture,
+            session,
+            inputID,
+            agent: Agent.ID.make("build"),
+            model,
+            disclosure: nextService,
+            system: [],
+            messages: [],
+          })
+          .pipe(Effect.provideService(SessionRunCoordinator.Ownership, { live: () => live }), Effect.exit))._tag,
+      ).toBe("Failure")
+      expect(contacted).toBe(1)
+    } finally {
+      host.server.stop(true)
+    }
+  }).pipe(
+    Effect.provideService(SessionModelTransport.Service, transport),
+    Effect.ensuring(SessionExecutionCapability.clear(session.id)),
+  ),
+)
+
+it.effect("retains a private proof deadline independently of public proof aliases", () =>
+  Effect.gen(function* () {
+    const host = disclosureHost({ mutate: (proof) => ({ ...proof, expiresAt: proof.issuedAt + 250 }) })
+    const inputID = SessionMessage.ID.create()
+    const captured = yield* captureDisclosure(inputID, host.config)
+    let executed = 0
+    try {
+      const requests = yield* SessionModelRequest.Service.pipe(Effect.provide(SessionModelRequest.layer))
+      const prepared = yield* requests.primary({
+        ...captured,
+        session,
+        inputID,
+        agent: Agent.ID.make("build"),
+        model,
+        disclosure: host.config,
+        system: [],
+        messages: [],
+        tools: {
+          definitions: [
+            ToolDefinition.make({ name: "lookup", description: "Lookup", inputSchema: { type: "object" } }),
+          ],
+          execute: () =>
+            Effect.sync(() => {
+              executed++
+              return { content: [{ type: "text" as const, text: "result" }] }
+            }),
+        },
+      })
+      const deadline = prepared.disclosure!.proof.expiresAt
+      Object.assign(prepared.disclosure!.proof, { expiresAt: Date.now() + 60_000 })
+      yield* Effect.promise(() => Bun.sleep(Math.max(0, deadline - Date.now()) + 25))
+      expect((yield* Effect.exit(prepared.assertCurrent!))._tag).toBe("Failure")
+      yield* prepared.executeTool({
+        sessionID: session.id,
+        agent: Agent.ID.make("build"),
+        messageID: SessionMessage.ID.create(),
+        call: { type: "tool-call", id: "call_long_response", name: "lookup", input: {} },
+        progress: () => Effect.void,
+      })
+      expect(executed).toBe(1)
+    } finally {
+      host.server.stop(true)
+    }
+  }).pipe(
+    Effect.provideService(SessionModelTransport.Service, transport),
+    Effect.provideService(SessionRunCoordinator.Ownership, { live: () => true }),
+    Effect.ensuring(SessionExecutionCapability.clear(session.id)),
+  ),
+)
 
 it.effect("rejects unsupported publication requirements before context hooks or host requests", () =>
   Effect.gen(function* () {

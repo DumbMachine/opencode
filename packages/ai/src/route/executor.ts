@@ -232,18 +232,23 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient> = Layer.e
   Service,
   Effect.gen(function* () {
     const http = yield* HttpClient.HttpClient
-    const executeOnce = (request: HttpClientRequest.HttpClientRequest, middleware?: HttpMiddleware) =>
+    const executeOnce = (
+      request: HttpClientRequest.HttpClientRequest,
+      middleware?: HttpMiddleware,
+      beforeDispatch: Effect.Effect<void> = Effect.void,
+    ) =>
       Effect.gen(function* () {
         if (!middleware)
-          return yield* http.execute(request).pipe(
+          return yield* beforeDispatch.pipe(Effect.andThen(() => http.execute(request))).pipe(
             Effect.mapError((error) => httpError({ error, request, operation: "request" })),
             Effect.flatMap(statusError),
           )
 
         const response = yield* middleware(request, (input) =>
-          http
-            .execute(input)
-            .pipe(Effect.mapError((cause) => (cause instanceof Error ? cause : new Error(String(cause))))),
+          beforeDispatch.pipe(
+            Effect.andThen(() => http.execute(input)),
+            Effect.mapError((cause) => (cause instanceof Error ? cause : new Error(String(cause)))),
+          ),
         ).pipe(Effect.mapError((error) => httpError({ error, request, operation: "request" })))
         return yield* statusError(response)
       })
@@ -262,10 +267,11 @@ export const middleware = (fn: HttpMiddleware, executor: Layer.Layer<Service> = 
     Effect.gen(function* () {
       const inner = yield* Service
       return Service.of({
-        execute: (request, next) =>
+        execute: (request, next, beforeDispatch) =>
           inner.execute(
             request,
             next === undefined ? fn : (input, handler) => fn(input, (forwarded) => next(forwarded, handler)),
+            beforeDispatch,
           ),
       })
     }),

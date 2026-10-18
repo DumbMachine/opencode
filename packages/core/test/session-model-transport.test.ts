@@ -104,6 +104,35 @@ const automatic = () => {
 }
 
 describe("SessionModelTransport", () => {
+  test("rechecks physical admission after persistent-channel send hooks", async () => {
+    const fixture = automatic()
+    let live = true
+    await run(
+      fixture.connector,
+      Effect.gen(function* () {
+        const service = yield* SessionModelTransport.Service
+        const executor = service.bind(session, {
+          send: (message) =>
+            Effect.sync(() => {
+              live = false
+              return message
+            }),
+        })
+        const result = yield* collect(executor, {
+          ...exchange("blocked"),
+          beforeDispatch: Effect.sync(() => {
+            if (!live) throw new Error("Admission ended")
+          }),
+        }).pipe(Effect.exit)
+        expect(result._tag).toBe("Failure")
+        expect(fixture.connections).toHaveLength(1)
+        expect(fixture.connections[0].sent).toEqual([])
+        // Rejection did not install an active exchange or poison the next admitted request.
+        expect(yield* collect(service.bind(session), exchange("next"))).toEqual(["completed:next"])
+      }),
+    )
+  })
+
   test("exposes response metadata once the lazy connection opens", async () => {
     const http = new HttpContext({
       url: "https://provider.test/responses",

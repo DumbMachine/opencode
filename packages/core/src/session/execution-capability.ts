@@ -174,6 +174,25 @@ export const get = (sessionID: SessionSchema.ID, inputID: SessionMessage.ID | un
 // delivery it is unknown until the durable user message commits.
 export const selectedInput = (sessionID: SessionSchema.ID) => selected.get(sessionID)
 
+// Select, copy and capture atomically before the runner rebuilds MCP/instructions.
+// A later equal installation cannot lend authority to that earlier context.
+export const getWithSelection = (sessionID: SessionSchema.ID, inputID: SessionMessage.ID | undefined) =>
+  Effect.sync(() => {
+    if (inputID === undefined) {
+      selected.delete(sessionID)
+      return { grant: undefined, current: undefined }
+    }
+    selected.set(sessionID, inputID)
+    const installed = grants.get(sessionID)?.get(inputID)
+    return {
+      grant: installed === undefined ? undefined : structuredClone(installed),
+      current:
+        installed?.disclosure !== undefined && installed.revision !== undefined
+          ? captureSelection(sessionID, inputID, installed.revision)
+          : undefined,
+    }
+  })
+
 // A publication callback must retain this exact installation, not merely an
 // equal input ID/revision reinstalled after cancellation or process recovery.
 // This observer never changes the selected input or exposes credentials.

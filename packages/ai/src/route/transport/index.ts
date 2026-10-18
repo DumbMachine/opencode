@@ -18,6 +18,8 @@ export interface TransportExecution<Frame> {
 }
 
 export interface TransportExecuteOptions {
+  readonly beforeDispatch?: Effect.Effect<void>
+  readonly onNotSent?: Effect.Effect<void>
   readonly webSocket?: WebSocketChannelExecutor
 }
 

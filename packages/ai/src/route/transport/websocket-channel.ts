@@ -16,6 +16,9 @@ export interface WebSocketChannelExecution {
 }
 
 export interface WebSocketChannelExchange {
+  /** Rechecked after connection, queueing and message preparation, immediately before sending. */
+  readonly beforeDispatch?: Effect.Effect<void>
+  readonly onNotSent?: Effect.Effect<void>
   readonly id: string
   readonly connect: {
     readonly url: string

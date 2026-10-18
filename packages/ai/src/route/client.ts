@@ -181,6 +181,10 @@ export interface Interface {
 }
 
 export interface StreamOptions {
+  /** Nonserialized admission check, run at every physical HTTP/WS send after preparation and waits. */
+  readonly beforeDispatch?: Effect.Effect<void>
+  /** A successful dispatch check was followed by a definitively unsent physical attempt. */
+  readonly onNotSent?: Effect.Effect<void>
   readonly http?: HttpMiddleware
   readonly webSocket?: WebSocketChannelExecutor
 }

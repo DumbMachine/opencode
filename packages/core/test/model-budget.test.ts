@@ -1,5 +1,7 @@
 import { expect, test } from "bun:test"
-import { LLM, Message } from "@opencode/ai"
+import { AIError, LLM, Message, TransportError } from "@opencode/ai"
+import { SessionModelTransport } from "@opencode/core/session/model-transport"
+import { Session } from "@opencode/schema/session"
 import { Media } from "@opencode/ai/media"
 import { OpenAIChat, OpenAIResponses } from "@opencode/ai/protocols"
 import { Auth, LLMClient, RequestExecutor } from "@opencode/ai/route"
@@ -480,3 +482,150 @@ test("budgeted native compaction fails explicitly before HTTP or journaling for 
     server.stop(true)
   }
 })
+
+for (const boundary of ["reserve", "transport-preparation"] as const) {
+  test(`cancels a reservation when physical admission ends during ${boundary}`, async () => {
+    const events: string[] = []
+    let live = true
+    const server = Bun.serve({
+      port: 0,
+      async fetch(req) {
+        const path = new URL(req.url).pathname
+        await req.json()
+        events.push(path)
+        if (path === "/reserve" && boundary === "reserve") live = false
+        return Response.json({ ok: true })
+      },
+    })
+    const layer = Layer.merge(
+      LayerNode.compile(KV.node),
+      LLMClient.layer.pipe(Layer.provide(RequestExecutor.layer.pipe(Layer.provide(FetchHttpClient.layer)))),
+    )
+    try {
+      const result = await Effect.runPromise(
+        Effect.gen(function* () {
+          const base = yield* LLMClient.Service
+          const client = ModelBudget.make(base, server.url.origin, "test", yield* KV.Service, 128)
+          const request = LLM.request({
+            model: OpenAIChat.route
+              .with({
+                endpoint: { baseURL: server.url.origin + "/v1/" },
+                auth: Auth.custom((input) =>
+                  Effect.sync(() => {
+                    if (boundary === "transport-preparation") live = false
+                    return input.headers
+                  }),
+                ),
+              })
+              .model({ id: "test" }),
+            http: { headers: { "x-opencode-session": `physical-${boundary}`, "x-opencode-input": "msg_original" } },
+            prompt: "Original input",
+          })
+          return yield* client
+            .stream(request, {
+              beforeDispatch: Effect.sync(() => {
+                if (!live) throw new Error("Admission ended")
+              }),
+            })
+            .pipe(Stream.runDrain, Effect.exit)
+        }).pipe(Effect.provide(layer)),
+      )
+      expect(result._tag).toBe("Failure")
+      expect(events).toEqual(["/reserve", "/cancel"])
+    } finally {
+      server.stop(true)
+    }
+  })
+}
+
+for (const interruptedCleanup of [false, true]) {
+  test(`cancels after proven unsent WebSocket with ${interruptedCleanup ? "interrupted cleanup" : "denied HTTP fallback"}`, async () => {
+    const events: string[] = []
+    const closing = Promise.withResolvers<void>()
+    const releaseClose = Promise.withResolvers<void>()
+    let live = true,
+      attempted = 0
+    const server = Bun.serve({
+      port: 0,
+      async fetch(req) {
+        events.push(new URL(req.url).pathname)
+        await req.json()
+        return Response.json({ ok: true })
+      },
+    })
+    const layer = Layer.mergeAll(
+      LayerNode.compile(KV.node),
+      LLMClient.layer.pipe(Layer.provide(RequestExecutor.layer.pipe(Layer.provide(FetchHttpClient.layer)))),
+      SessionModelTransport.makeLayer({
+        open: () =>
+          Effect.succeed({
+            sendText: () =>
+              Effect.sync(() => {
+                live = false
+                attempted++
+              }).pipe(
+                Effect.andThen(
+                  Effect.fail(
+                    new AIError({
+                      reason: new TransportError({
+                        message: "Socket closed before send",
+                        transport: "websocket",
+                        operation: "write",
+                        phase: "send",
+                        delivery: "not-sent",
+                      }),
+                    }),
+                  ),
+                ),
+              ),
+            messages: Stream.empty,
+            close: interruptedCleanup
+              ? Effect.promise(() => {
+                  closing.resolve()
+                  return releaseClose.promise
+                })
+              : Effect.void,
+          }),
+      }),
+    )
+    try {
+      const result = await Effect.runPromise(
+        Effect.gen(function* () {
+          const base = yield* LLMClient.Service
+          const transport = yield* SessionModelTransport.Service
+          const client = ModelBudget.make(base, server.url.origin, "test", yield* KV.Service, 128)
+          const request = LLM.request({
+            model: OpenAIResponses.route
+              .with({ endpoint: { baseURL: server.url.origin + "/v1/" }, auth: Auth.bearer("test") })
+              .model({ id: "test" }),
+            http: { headers: { "x-opencode-session": "ses_unsent_fallback", "x-opencode-input": "msg_original" } },
+            prompt: "Original input",
+          })
+          const operation = client
+            .stream(request, {
+              webSocket: transport.bind(Session.ID.make("ses_unsent_fallback")),
+              beforeDispatch: Effect.sync(() => {
+                if (!live) throw new Error("Admission ended")
+              }),
+            })
+            .pipe(Stream.runDrain)
+          if (!interruptedCleanup) return yield* Effect.exit(operation)
+          const pending = yield* Effect.forkChild(operation)
+          yield* Effect.promise(() => closing.promise)
+          const interrupted = yield* Fiber.interrupt(pending).pipe(Effect.forkChild)
+          // Let interruption reach the blocked close before releasing cleanup.
+          yield* Effect.yieldNow
+          releaseClose.resolve()
+          yield* Fiber.join(interrupted)
+          return yield* Fiber.await(pending)
+        }).pipe(Effect.provide(layer), Effect.scoped),
+      )
+      expect(result._tag).toBe("Failure")
+      expect(attempted).toBe(1)
+      expect(events).toEqual(["/reserve", "/cancel"])
+    } finally {
+      releaseClose.resolve()
+      server.stop(true)
+    }
+  })
+}

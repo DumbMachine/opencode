@@ -44,6 +44,8 @@ export interface Selection {
 
 export interface Loaded {
   readonly disclosure?: ExecutionDisclosure.Service
+  readonly disclosureRevision?: number
+  readonly disclosureCurrent?: () => boolean
   readonly disclosureComponents?: readonly ExecutionDisclosure.Component[]
   readonly executionInstructions?: string
   readonly input?: SessionMessage.User | SessionMessage.Synthetic

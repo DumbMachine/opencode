@@ -475,7 +475,8 @@ const layer = Layer.unwrap(
             )
         }
         const coordinator = yield* SessionRunCoordinator.make<Session.ID, SessionRunner.RunError>({
-          drain: (sessionID, force) => drain(sessionID, force),
+          drain: (sessionID, force, _promotable, live) =>
+            drain(sessionID, force).pipe(Effect.provideService(SessionRunCoordinator.Ownership, { live })),
         })
         return SessionExecution.Service.of({
           active: coordinator.active,

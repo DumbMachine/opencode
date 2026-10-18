@@ -139,9 +139,10 @@ const make = (options: LayerOptions) =>
           Deferred.doneUnsafe(waiting, Effect.void)
         }
       })
-    const stream: ClientInterface["stream"] = (request) =>
+    const stream: ClientInterface["stream"] = (request, streamOptions) =>
       Stream.unwrap(
-        take(request).pipe(
+        (streamOptions?.beforeDispatch ?? Effect.void).pipe(
+          Effect.andThen(() => take(request)),
           Effect.map((response) => {
             if (response instanceof CompactionResponse || response instanceof CompactionCheckpointResponse)
               return Stream.die("TestLLM generation requires an event response")
@@ -176,8 +177,8 @@ const make = (options: LayerOptions) =>
     const test = Test.of({
       compact,
       stream,
-      generate: (request) =>
-        stream(request).pipe(
+      generate: (request, streamOptions) =>
+        stream(request, streamOptions).pipe(
           Stream.runFold(LLMResponse.empty, LLMResponse.reduce),
           Effect.flatMap((state) => {
             const response = LLMResponse.complete(state)
