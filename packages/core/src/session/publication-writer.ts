@@ -35,32 +35,80 @@ export interface Unit {
   readonly publish: Effect.Effect<{ readonly inserted: boolean }>
 }
 
-// Consumes host authority, never attests a producer. The trusted caller must
-// supply the actual generating context for the chosen event. This adapter is
-// not installed for legacy/preflight-only inputs and does not establish coverage.
-export const make = Effect.fnUntraced(function* (input: {
-  readonly prepared: Effect.Success<ReturnType<typeof SessionDisclosure.prepare>>
+interface Captured {
+  readonly sessionID: ExecutionDisclosure.ContextProof["sessionID"]
+  readonly inputID: ExecutionDisclosure.ContextProof["inputID"]
   readonly revision: number
+  readonly bus: Bus.Interface
+  readonly database: Database.Interface
+  readonly live: () => boolean
+}
+
+// Capture before model hooks/preflight. The service and installation cannot be
+// substituted while callback I/O waits. Only this closure can construct a writer.
+export const capture = Effect.fnUntraced(
+  function* (
+    input: Pick<Captured, "sessionID" | "inputID" | "revision"> & {
+      readonly service: ExecutionDisclosure.Service
+    },
+  ) {
+    const service = Schema.decodeUnknownSync(ExecutionDisclosure.Service)(structuredClone(input.service))
+    const sessionID = input.sessionID,
+      inputID = input.inputID,
+      revision = input.revision
+    const bus = yield* Bus.Service
+    const database = yield* Database.Service
+    const owner = Option.getOrUndefined(yield* Effect.serviceOption(SessionRunCoordinator.Ownership))
+    if (!bus.persistent || !owner || !Number.isSafeInteger(revision) || revision <= 0)
+      return yield* Effect.die(unavailable())
+    const installed = SessionExecutionCapability.captureSelection(sessionID, inputID, revision, service)
+    const state: Captured = { sessionID, inputID, revision, bus, database, live: () => owner.live() && installed() }
+    if (!state.live()) return yield* Effect.die(unavailable())
+    const prepareContext = Effect.fnUntraced(
+      function* (request: Pick<ExecutionDisclosure.ContextRequest, "contextDigest" | "components">) {
+        const owned = structuredClone(request)
+        if (!state.live()) return yield* Effect.die(unavailable())
+        const prepared = yield* SessionDisclosure.prepare(service, { ...owned, sessionID, inputID, kind: "primary" })
+        if (!state.live()) return yield* Effect.die(unavailable())
+        const writer = yield* make({ prepared, state })
+        return { proof: structuredClone(prepared.proof), signed: structuredClone(prepared.signed), writer }
+      },
+      Effect.catchCauseIf(
+        (cause) => !Cause.hasInterrupts(cause),
+        () => Effect.die(unavailable()),
+      ),
+    )
+    return Object.freeze({ prepareContext })
+  },
+  Effect.catchCauseIf(
+    (cause) => !Cause.hasInterrupts(cause),
+    () => Effect.die(unavailable()),
+  ),
+)
+
+// Consumes host authority, never attests a producer. The actual generating
+// request must use this capture-owned preflight. Legacy inputs do not install it.
+const make = Effect.fnUntraced(function* (input: {
+  readonly prepared: Effect.Success<ReturnType<typeof SessionDisclosure.prepare>>
+  readonly state: Captured
 }) {
   const context = Schema.decodeUnknownSync(ExecutionDisclosure.ContextProof)(structuredClone(input.prepared.proof))
   const authorizer = input.prepared.publication
-  const revision = input.revision
-  const bus = yield* Bus.Service
-  const database = yield* Database.Service
-  const owner = Option.getOrUndefined(yield* Effect.serviceOption(SessionRunCoordinator.Ownership))
+  const revision = input.state.revision
+  const bus = input.state.bus
+  const database = input.state.database
+  const live = input.state.live
   if (
-    !bus.persistent ||
-    !owner ||
+    !live() ||
     !authorizer ||
     !context.publication ||
     context.kind !== "primary" ||
+    context.sessionID !== input.state.sessionID ||
+    context.inputID !== input.state.inputID ||
     context.publication.capabilityGeneration !== revision
   )
     return yield* Effect.die(unavailable())
   const descriptor = context.publication
-  const installed = SessionExecutionCapability.captureSelection(context.sessionID, context.inputID, revision)
-  const live = () => owner.live() && installed()
-  if (!live()) return yield* Effect.die(unavailable())
   let nextSequence = 0
 
   const prepare = Effect.fnUntraced(

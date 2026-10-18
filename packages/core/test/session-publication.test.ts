@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test"
-import { generateKeyPairSync, sign } from "node:crypto"
 import { Effect } from "effect"
 import { ExecutionDisclosure } from "@opencode/schema/execution-disclosure"
 import { Session } from "@opencode/schema/session"
 import { SessionMessage } from "@opencode/schema/session-message"
 import { SessionDisclosure } from "@opencode/core/session/disclosure"
+import { publicationHost } from "./fixture/publication-host"
 
 const input = {
   sessionID: Session.ID.make("ses_publication_original"),
@@ -14,101 +14,15 @@ const input = {
   components: [{ kind: "message" as const, id: "msg_original", revision: "b".repeat(64) }],
 }
 const unit = { unitID: "evt_original", unitDigest: "c".repeat(64) }
-const host = (
-  options: {
-    mutate?: (proof: ExecutionDisclosure.PublicationProof) => ExecutionDisclosure.PublicationProof
-    context?: (proof: ExecutionDisclosure.ContextProof) => ExecutionDisclosure.ContextProof
-    observe?: (request: ExecutionDisclosure.PublicationRequest, authorization: string | null) => Promise<void> | void
-    respond?: (proof: ExecutionDisclosure.SignedProof) => Response
-    wrongKey?: boolean
-  } = {},
-) => {
-  const contextKeys = generateKeyPairSync("ed25519")
-  const publicationKeys = generateKeyPairSync("ed25519")
-  const key = (id: string, pair: typeof contextKeys) => ({
-    id,
-    algorithm: "Ed25519" as const,
-    publicKey: pair.publicKey.export({ format: "der", type: "spki" }).subarray(-32).toString("base64url"),
-  })
-  const signature = (proof: unknown, id: string, pair: typeof contextKeys) => {
-    const payload = JSON.stringify(proof)
-    return { keyID: id, payload, signature: sign(null, Buffer.from(payload), pair.privateKey).toString("base64url") }
-  }
-  const server = Bun.serve({
-    hostname: "127.0.0.1",
-    port: 0,
-    async fetch(request) {
-      const now = Date.now()
-      if (new URL(request.url).pathname === "/publication") {
-        const received = (await request.json()) as ExecutionDisclosure.PublicationRequest
-        await options.observe?.(received, request.headers.get("authorization"))
-        const proof: ExecutionDisclosure.PublicationProof = {
-          ...received,
-          purpose: "thread-publication",
-          issuer: "fixture-host",
-          audience: "fixture-publication",
-          organizationID: "org-original",
-          threadID: "thread-original",
-          capabilityID: "cap-original",
-          capabilityGeneration: 7,
-          receiptReference: "d".repeat(64),
-          authorizationVersion: "original-authority",
-          manifestBinding: "e".repeat(64),
-          audienceBinding: "f".repeat(64),
-          issuedAt: now,
-          expiresAt: now + 30_000,
-        }
-        const signed = signature(
-          options.mutate?.(proof) ?? proof,
-          "publication",
-          options.wrongKey ? contextKeys : publicationKeys,
-        )
-        return options.respond?.(signed) ?? Response.json(signed)
-      }
-      const received = (await request.json()) as ExecutionDisclosure.ContextRequest
-      const proof: ExecutionDisclosure.ContextProof = {
-        ...received,
-        contextReference: "1".repeat(64),
-        issuer: "fixture-host",
-        audience: "fixture-context",
-        mode: "actor-private-unknown",
-        complete: false,
-        issuedAt: now,
-        expiresAt: now + 90_000,
-        publication: {
-          version: 1,
-          endpoint: new URL("/publication", server.url).href,
-          audience: "fixture-publication",
-          keys: [key("publication", publicationKeys)],
-          organizationID: "org-original",
-          threadID: "thread-original",
-          capabilityID: "cap-original",
-          capabilityGeneration: 7,
-        },
-      }
-      return Response.json(signature(options.context?.(proof) ?? proof, "context", contextKeys))
-    },
-  })
-  return {
-    server,
-    config: {
-      version: 1 as const,
-      endpoint: new URL("/preflight", server.url).href,
-      token: "private-original-token",
-      issuer: "fixture-host",
-      audience: "fixture-context",
-      keys: [key("context", contextKeys)],
-    },
-  }
-}
-const prepare = (fixture: ReturnType<typeof host>) =>
+const prepare = (fixture: ReturnType<typeof publicationHost>) =>
   Effect.runPromise(SessionDisclosure.prepare(fixture.config, input))
-const authorize = async (fixture: ReturnType<typeof host>) => (await prepare(fixture)).publication!.authorize(unit)
+const authorize = async (fixture: ReturnType<typeof publicationHost>) =>
+  (await prepare(fixture)).publication!.authorize(unit)
 
 describe("Exact output publication authorization", () => {
   test("retains original context, destination, input generation and token across two service instances", async () => {
     for (let n = 0; n < 2; n++) {
-      const fixture = host({
+      const fixture = publicationHost({
         observe: (request, authorization) => {
           expect(authorization).toBe("Bearer private-original-token")
           expect(request).toMatchObject({
@@ -159,7 +73,7 @@ describe("Exact output publication authorization", () => {
     ]
   for (const [name, mutate] of mutations)
     test(`refuses signed substitution of ${name}`, async () => {
-      const fixture = host({ mutate })
+      const fixture = publicationHost({ mutate })
       try {
         await expect(Effect.runPromise(await authorize(fixture))).rejects.toThrow(
           "Execution publication authorization is unavailable",
@@ -169,7 +83,7 @@ describe("Exact output publication authorization", () => {
       }
     })
   test("an older context without the signed descriptor supplies no publication authority", async () => {
-    const fixture = host({ context: (proof) => ({ ...proof, publication: undefined }) })
+    const fixture = publicationHost({ context: (proof) => ({ ...proof, publication: undefined }) })
     try {
       expect((await prepare(fixture)).publication).toBeUndefined()
     } finally {
@@ -186,7 +100,7 @@ describe("Exact output publication authorization", () => {
         return new Response()
       },
     })
-    const fixture = host({
+    const fixture = publicationHost({
       context: (proof) => ({ ...proof, publication: { ...proof.publication!, endpoint: foreign.url.href } }),
     })
     try {
@@ -200,7 +114,7 @@ describe("Exact output publication authorization", () => {
   test("captures exact unit identity before waiting; extra fields cannot replace original context", async () => {
     const arrived = Promise.withResolvers<void>(),
       release = Promise.withResolvers<void>()
-    const fixture = host({
+    const fixture = publicationHost({
       observe: async (request) => {
         expect(request.contextDigest).toBe(input.contextDigest)
         arrived.resolve()
@@ -221,7 +135,7 @@ describe("Exact output publication authorization", () => {
     }
   })
   test("uses fresh publication authority after context expiry, then rejects its own expired permit", async () => {
-    const fixture = host({
+    const fixture = publicationHost({
       context: (p) => ({ ...p, expiresAt: Date.now() + 80 }),
       mutate: (p) => ({ ...p, issuedAt: Date.now(), expiresAt: Date.now() + 80 }),
     })
@@ -257,7 +171,7 @@ describe("Exact output publication authorization", () => {
       { respond: () => new Response("x".repeat(65537)) },
       { respond: () => new Response("private-original-token response", { status: 503 }) },
     ]) {
-      const fixture = host(options)
+      const fixture = publicationHost(options)
       try {
         const result = await Effect.runPromiseExit(await authorize(fixture))
         expect(result._tag).toBe("Failure")

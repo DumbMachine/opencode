@@ -177,11 +177,20 @@ export const selectedInput = (sessionID: SessionSchema.ID) => selected.get(sessi
 // A publication callback must retain this exact installation, not merely an
 // equal input ID/revision reinstalled after cancellation or process recovery.
 // This observer never changes the selected input or exposes credentials.
-export const captureSelection = (sessionID: SessionSchema.ID, inputID: SessionMessage.ID, revision: number) => {
+export const captureSelection = (
+  sessionID: SessionSchema.ID,
+  inputID: SessionMessage.ID,
+  revision: number,
+  service?: ExecutionDisclosure.Service,
+) => {
   const installed = grants.get(sessionID)?.get(inputID)
+  const matches =
+    service === undefined ||
+    (installed !== undefined && fingerprint({ ...installed, disclosure: service }) === fingerprint(installed))
   return () => {
     const renewal = renewals.get(renewalKey(sessionID, inputID))
     return (
+      matches &&
       installed !== undefined &&
       installed.disclosure !== undefined &&
       installed.revision === revision &&

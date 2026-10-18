@@ -6,7 +6,6 @@ import { LayerNode } from "@opencode/util/effect/layer-node"
 import { Bus } from "@opencode/core/bus"
 import { Database } from "@opencode/core/database/database"
 import { SessionPublicationWriter } from "@opencode/core/session/publication-writer"
-import { SessionDisclosure } from "@opencode/core/session/disclosure"
 import { SessionExecutionCapability } from "@opencode/core/session/execution-capability"
 import { SessionRunCoordinator } from "@opencode/core/session/run-coordinator"
 import { SessionLifecycle } from "@opencode/core/session/lifecycle"
@@ -28,6 +27,7 @@ import { ProjectTable } from "@opencode/core/project/sql"
 import { testEffect } from "./lib/effect"
 import { Global } from "@opencode/util/global"
 import { tmpdir } from "./fixture/tmpdir"
+import { publicationHost } from "./fixture/publication-host"
 
 const graph = LayerNode.group([Database.node, Bus.node, SessionProjector.node, SessionStore.node, SessionInbox.node])
 const it = testEffect(AppNodeBuilder.build(graph, [Bus.node.replace(Bus.configured({ persist: true }))]))
@@ -57,95 +57,61 @@ const fixture = Effect.fnUntraced(function* () {
     started: 1,
   })
   yield* bus.publish(SessionEvent.Text.Started, { sessionID, assistantMessageID, ordinal: 0 })
-  const service: ExecutionDisclosure.Service = {
-    version: 1,
-    endpoint: "http://127.0.0.1:8123/preflight",
-    token: "private-original",
-    issuer: "fixture-host",
-    audience: "fixture-context",
-    keys: [{ id: "context", algorithm: "Ed25519", publicKey: "a".repeat(43) }],
-  }
-  const descriptor: ExecutionDisclosure.PublicationService = {
-    version: 1,
-    endpoint: "http://127.0.0.1:8123/publication",
-    audience: "fixture-publication",
-    keys: [{ id: "publication", algorithm: "Ed25519", publicKey: "b".repeat(43) }],
-    organizationID: "org-original",
-    threadID: "thread-original",
-    capabilityID: "cap-original",
-    capabilityGeneration: 7,
-  }
-  const context: ExecutionDisclosure.ContextProof = {
-    version: 1,
-    issuer: service.issuer,
-    audience: service.audience,
-    sessionID,
-    inputID,
-    kind: "primary",
-    attempt: "original-attempt",
-    contextReference: SessionDisclosure.digest([sessionID, inputID]),
-    contextDigest: "c".repeat(64),
-    componentsDigest: "d".repeat(64),
-    publication: descriptor,
-    mode: "actor-private-unknown",
-    complete: false,
-    issuedAt: Date.now(),
-    expiresAt: Date.now() + 90_000,
-  }
   const state: {
     active: boolean
     calls: Array<{ unitID: string; unitDigest: string }>
+    contexts: Array<ExecutionDisclosure.ContextRequest>
+    ttl: number
+    deadlines: Map<number, number>
     expired: Set<number>
     request?: () => Effect.Effect<void>
+    preflight?: () => Effect.Effect<void>
     mutate?: (proof: ExecutionDisclosure.PublicationProof) => ExecutionDisclosure.PublicationProof
-  } = { active: true, calls: [], expired: new Set() }
-  const signed = { keyID: "fixture", payload: "{}", signature: "x".repeat(86) }
-  const prepared = {
-    proof: context,
-    signed,
-    publication: {
-      authorize: (unit: { unitID: string; unitDigest: string }) =>
-        Effect.gen(function* () {
-          state.calls.push({ ...unit })
-          const index = state.calls.length
-          yield* state.request?.() ?? Effect.void
-          const proof: ExecutionDisclosure.PublicationProof = {
-            version: 1,
-            purpose: "thread-publication",
-            issuer: service.issuer,
-            audience: descriptor.audience,
-            organizationID: descriptor.organizationID,
-            threadID: descriptor.threadID,
-            sessionID,
-            inputID,
-            capabilityID: descriptor.capabilityID,
-            capabilityGeneration: 7,
-            contextReference: context.contextReference,
-            contextDigest: context.contextDigest,
-            componentsDigest: context.componentsDigest,
-            attempt: context.attempt,
-            kind: "model-output",
-            ...unit,
-            receiptReference: SessionDisclosure.digest(["receipt", unit.unitID]),
-            authorizationVersion: "original-version",
-            manifestBinding: "e".repeat(64),
-            audienceBinding: "f".repeat(64),
-            issuedAt: Date.now(),
-            expiresAt: Date.now() + 30_000,
-          }
-          return { proof: state.mutate?.(proof) ?? proof, signed, valid: () => !state.expired.has(index) }
-        }),
+  } = { active: true, calls: [], contexts: [], ttl: 30_000, deadlines: new Map(), expired: new Set() }
+  const host = publicationHost({
+    ttl: () => state.ttl,
+    observe: async (unit, authorization) => {
+      expect(authorization).toBe("Bearer private-original-token")
+      state.calls.push({ unitID: unit.unitID, unitDigest: unit.unitDigest })
+      await Effect.runPromise(state.request?.() ?? Effect.void)
     },
-  }
+    observeContext: async (context, authorization) => {
+      expect(authorization).toBe("Bearer private-original-token")
+      state.contexts.push(context)
+      await Effect.runPromise(state.preflight?.() ?? Effect.void)
+    },
+    mutate: (proof) => {
+      const index = state.calls.length
+      state.deadlines.set(index, proof.expiresAt)
+      if (state.expired.has(index)) return { ...proof, expiresAt: Date.now() - 1 }
+      return state.mutate?.(proof) ?? proof
+    },
+  })
+  yield* Effect.addFinalizer(() =>
+    Effect.sync(() => {
+      host.server.stop(true)
+    }),
+  )
+  const service = host.config
+  const captureInput = { sessionID, inputID, revision: 7, service }
+  const request = { contextDigest: "c".repeat(64), components: [] }
   yield* SessionExecutionCapability.set(sessionID, { inputID, disclosure: service, mcp: {}, revision: 7 })
   yield* SessionExecutionCapability.select(sessionID, inputID)
   yield* Effect.addFinalizer(() => SessionExecutionCapability.clear(sessionID))
-  const make = () =>
-    SessionPublicationWriter.make({ prepared, revision: 7 }).pipe(
+  const capture = () =>
+    SessionPublicationWriter.capture(captureInput).pipe(
       Effect.provideService(SessionRunCoordinator.Ownership, { live: () => state.active }),
       Effect.provideService(Bus.Service, bus),
       Effect.provideService(Database.Service, database),
     )
+  const prepare = () =>
+    Effect.gen(function* () {
+      const selected = yield* capture()
+      return yield* selected.prepareContext(request)
+    })
+  const make = () => prepare().pipe(Effect.map((context) => context.writer))
+  const expire = (index: number) =>
+    Effect.promise(() => Bun.sleep(Math.max(0, state.deadlines.get(index)! - Date.now() + 25)))
   const text = (value = "Original answer") => ({ sessionID, assistantMessageID, ordinal: 0, text: value })
   const delta = () => ({ sessionID, assistantMessageID, ordinal: 0, delta: "same" })
   const witnesses = () =>
@@ -173,7 +139,11 @@ const fixture = Effect.fnUntraced(function* () {
     sessionID,
     inputID,
     assistantMessageID,
-    prepared,
+    captureInput,
+    request,
+    capture,
+    prepare,
+    expire,
     service,
     state,
     make,
@@ -190,6 +160,7 @@ describe("Exact native publication writer", () => {
       for (let index = 0; index < 2; index++) {
         const f = yield* fixture(),
           writer = yield* f.make()
+        f.state.ttl = 2000
         let observed = 0
         const stop = yield* f.bus.listen((event) =>
           Effect.sync(() => {
@@ -201,7 +172,7 @@ describe("Exact native publication writer", () => {
         expect(Object.isFrozen(unit)).toBe(true)
         expect((yield* unit.publish).inserted).toBe(true)
         expect((yield* f.message())?.data).toMatchObject({ content: [{ type: "text", text: "Original answer" }] })
-        f.state.expired.add(1)
+        yield* f.expire(1)
         f.state.active = false
         yield* SessionExecutionCapability.clear(f.sessionID)
         expect((yield* unit.publish).inserted).toBe(false)
@@ -341,6 +312,7 @@ describe("Exact native publication writer", () => {
     Effect.gen(function* () {
       const f = yield* fixture(),
         writer = yield* f.make()
+      f.state.ttl = 2000
       let reject = true
       yield* f.bus.project(SessionEvent.Text.Ended, () =>
         Effect.sync(() => {
@@ -354,7 +326,7 @@ describe("Exact native publication writer", () => {
       expect(Exit.isFailure(yield* unit.publish.pipe(Effect.exit))).toBe(true)
       expect(yield* f.witnesses()).toHaveLength(0)
       expect((yield* f.message())?.data).toMatchObject({ content: [{ type: "text", text: "" }] })
-      f.state.expired.add(1)
+      yield* f.expire(1)
       expect((yield* unit.publish).inserted).toBe(true)
       expect(f.state.calls).toHaveLength(2)
       expect(f.state.calls[0]).toEqual(f.state.calls[1])
@@ -484,12 +456,10 @@ describe("Exact native publication writer", () => {
   it.effect("fails missing ownership, wrong revision, foreign sessions and unsupported events without RPC", () =>
     Effect.gen(function* () {
       const f = yield* fixture()
-      expect(
-        Exit.isFailure(yield* SessionPublicationWriter.make({ prepared: f.prepared, revision: 7 }).pipe(Effect.exit)),
-      ).toBe(true)
+      expect(Exit.isFailure(yield* SessionPublicationWriter.capture(f.captureInput).pipe(Effect.exit))).toBe(true)
       expect(
         Exit.isFailure(
-          yield* SessionPublicationWriter.make({ prepared: f.prepared, revision: 8 }).pipe(
+          yield* SessionPublicationWriter.capture({ ...f.captureInput, revision: 8 }).pipe(
             Effect.provideService(SessionRunCoordinator.Ownership, { live: () => true }),
             Effect.exit,
           ),
@@ -518,6 +488,115 @@ describe("Exact native publication writer", () => {
       expect(Exit.isFailure(yield* writer.prepare(unsupported, f.delta()).pipe(Effect.exit))).toBe(true)
       expect(f.state.calls).toHaveLength(0)
       expect(yield* f.witnesses()).toHaveLength(0)
+    }),
+  )
+
+  it.effect("rejects cancellation and equal installation replacement while preflight is waiting", () =>
+    Effect.gen(function* () {
+      for (const change of ["cancel", "replace"] as const) {
+        const f = yield* fixture(),
+          selected = yield* f.capture()
+        const arrived = yield* Deferred.make<void>(),
+          release = yield* Deferred.make<void>()
+        f.state.preflight = () => Deferred.succeed(arrived, undefined).pipe(Effect.andThen(Deferred.await(release)))
+        const pending = yield* selected.prepareContext(f.request).pipe(Effect.exit, Effect.forkScoped)
+        yield* Deferred.await(arrived)
+        if (change === "cancel") f.state.active = false
+        if (change === "replace") {
+          yield* SessionExecutionCapability.clear(f.sessionID)
+          yield* SessionExecutionCapability.set(f.sessionID, {
+            inputID: f.inputID,
+            disclosure: f.service,
+            mcp: {},
+            revision: 7,
+          })
+          yield* SessionExecutionCapability.select(f.sessionID, f.inputID)
+        }
+        yield* Deferred.succeed(release, undefined)
+        expect(Exit.isFailure(yield* Fiber.join(pending))).toBe(true)
+        expect(f.state.contexts).toHaveLength(1)
+        expect(f.state.calls).toHaveLength(0)
+        expect(yield* f.witnesses()).toHaveLength(0)
+      }
+    }),
+  )
+
+  it.effect("owns the service before preflight and isolates public proof aliases from publication", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture(),
+        other = yield* fixture(),
+        selected = yield* f.capture()
+      f.service.endpoint = other.service.endpoint
+      f.service.token = "substituted-token"
+      f.service.keys[0]!.publicKey = other.service.keys[0]!.publicKey
+      const context = yield* selected.prepareContext(f.request)
+      expect(f.state.contexts).toHaveLength(1)
+      expect(other.state.contexts).toHaveLength(0)
+      Object.assign(context.proof, {
+        sessionID: other.sessionID,
+        contextDigest: "9".repeat(64),
+        attempt: "substituted",
+      })
+      Object.assign(context.proof.publication!, { threadID: "substituted-thread", endpoint: other.service.endpoint })
+      Object.assign(context.signed, { payload: "{}", signature: "z".repeat(86) })
+      const unit = yield* context.writer.prepare(SessionEvent.Text.Ended, f.text())
+      expect((yield* unit.publish).inserted).toBe(true)
+      expect(f.state.calls).toHaveLength(1)
+      expect(other.state.calls).toHaveLength(0)
+      expect((yield* f.witnesses())[0]?.data).toMatchObject({
+        sessionID: f.sessionID,
+        inputID: f.inputID,
+        contextDigest: f.request.contextDigest,
+      })
+      expect("make" in SessionPublicationWriter).toBe(false)
+    }),
+  )
+
+  it.effect("requires the exact installed service snapshot before any preflight RPC", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture()
+      for (const service of [
+        { ...f.service, token: "other" },
+        { ...f.service, endpoint: f.service.endpoint + "/other" },
+        { ...f.service, issuer: "other" },
+        { ...f.service, audience: "other" },
+        { ...f.service, keys: [{ ...f.service.keys[0]!, publicKey: "z".repeat(43) }] },
+        { ...f.service, publicationVersion: 1 as const },
+      ]) {
+        const result = yield* SessionPublicationWriter.capture({ ...f.captureInput, service }).pipe(
+          Effect.provideService(SessionRunCoordinator.Ownership, { live: () => true }),
+          Effect.exit,
+        )
+        expect(Exit.isFailure(result)).toBe(true)
+      }
+      expect(f.state.contexts).toHaveLength(0)
+      expect(f.state.calls).toHaveLength(0)
+    }),
+  )
+
+  it.effect("keeps a capture live across unrelated input and session installations", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture(),
+        selected = yield* f.capture(),
+        other = yield* fixture()
+      yield* SessionExecutionCapability.set(f.sessionID, {
+        inputID: SessionMessage.ID.create(),
+        mcp: {},
+        disclosure: f.service,
+        revision: 7,
+      })
+      yield* SessionExecutionCapability.set(other.sessionID, {
+        inputID: other.inputID,
+        mcp: {},
+        disclosure: other.service,
+        revision: 8,
+      })
+      const context = yield* selected.prepareContext(f.request)
+      const unit = yield* context.writer.prepare(SessionEvent.Text.Ended, f.text())
+      expect((yield* unit.publish).inserted).toBe(true)
+      expect(f.state.contexts).toHaveLength(1)
+      expect(f.state.calls).toHaveLength(1)
+      expect(other.state.contexts).toHaveLength(0)
     }),
   )
 
