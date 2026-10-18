@@ -28,6 +28,7 @@ import { Cause, Effect, Exit, Schema } from "effect"
 import { ConfigMCP } from "@opencode/schema/config/mcp"
 import type { Session } from "@opencode/schema/session"
 import { McpStdio } from "./stdio.js"
+import { NativeProducer } from "../execution-producer.js"
 
 const DEFAULT_STARTUP_TIMEOUT = 30_000
 const DEFAULT_CATALOG_TIMEOUT = 30_000
@@ -274,18 +275,20 @@ export const connect = Effect.fnUntraced(function* (
           client.getPrompt({ name: input.name, arguments: input.args ?? {} }, { signal, timeout: execution }),
         ),
       callTool: (input) =>
-        request("call MCP tool", (signal) =>
-          client.callTool(
-            {
-              name: input.name,
-              arguments: input.args ?? {},
-              _meta: {
-                ...(input.meta ?? {}),
-                ...(input.sessionID === undefined ? {} : { "ai.opencode/sessionID": input.sessionID }),
+        NativeProducer.dispatchMcp({ ...input, server }, (owned) =>
+          request("call MCP tool", (signal) =>
+            client.callTool(
+              {
+                name: owned.name,
+                arguments: owned.args,
+                _meta: {
+                  ...owned.meta,
+                  ...(input.sessionID === undefined ? {} : { "ai.opencode/sessionID": input.sessionID }),
+                },
               },
-            },
-            // Requesting progress keeps long calls alive under the SDK's timeout; execution is the hard wall.
-            { signal, timeout: execution, onprogress: () => {} },
+              // Requesting progress keeps long calls alive under the SDK's timeout; execution is the hard wall.
+              { signal, timeout: execution, onprogress: () => {} },
+            ),
           ),
         ).pipe(Effect.map(toCallToolResult)),
       onClose: (callback) => {
@@ -326,8 +329,7 @@ function negotiation(protocol: ConfigMCP.Protocol | undefined): VersionNegotiati
 function statelessFetch(server: string, fetch: (input: any, init?: any) => Promise<Response>) {
   return async (input: any, init?: any) => {
     const headers = new Headers(init?.headers)
-    if (headers.has("mcp-session-id"))
-      throw new Error(`Stateless MCP server "${server}" cannot send an MCP session id`)
+    if (headers.has("mcp-session-id")) throw new Error(`Stateless MCP server "${server}" cannot send an MCP session id`)
     const response = await fetch(input, { ...init, headers })
     if (response.headers.has("mcp-session-id"))
       throw new Error(`Stateless MCP server "${server}" returned an MCP session id`)

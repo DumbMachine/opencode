@@ -73,6 +73,14 @@ export const PublicationService = Schema.Struct({
   capabilityGeneration: Schema.Int.check(Schema.isGreaterThan(0), Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER)),
 }).annotate({ identifier: "ExecutionDisclosure.PublicationService" })
 
+// Separate purpose-derived result keys, pinned by the signed model context.
+export interface ToolService extends Schema.Schema.Type<typeof ToolService> {}
+export const ToolService = Schema.Struct({
+  version: Schema.Literal(1),
+  audience: bounded(512),
+  keys: Schema.Array(VerificationKey).check(Schema.isMinLength(1), Schema.isMaxLength(8)),
+}).annotate({ identifier: "ExecutionDisclosure.ToolService" })
+
 export interface ContextProof extends Schema.Schema.Type<typeof ContextProof> {}
 export const ContextProof = Schema.Struct({
   version: Schema.Literal(1),
@@ -86,6 +94,7 @@ export const ContextProof = Schema.Struct({
   componentsDigest: Digest,
   contextReference: bounded(256),
   publication: PublicationService.pipe(optional),
+  tools: ToolService.pipe(optional),
   mode: Schema.Literals(["complete", "actor-private-unknown"]),
   complete: Schema.Boolean,
   issuedAt: Schema.Int,
@@ -132,3 +141,44 @@ export const PublicationProof = Schema.Struct({
   issuedAt: Schema.Int,
   expiresAt: Schema.Int,
 }).annotate({ identifier: "ExecutionDisclosure.PublicationProof" })
+
+// Exact host observation before any native MCP conversion or normalization.
+export interface ToolResultProof extends Schema.Schema.Type<typeof ToolResultProof> {}
+export const ToolResultProof = Schema.Struct({
+  version: Schema.Literal(1),
+  purpose: Schema.Literal("native-mcp-result"),
+  issuer: bounded(512),
+  audience: bounded(512),
+  organizationID: bounded(32),
+  threadID: bounded(64),
+  sessionID: SessionID,
+  inputID: SessionMessageID,
+  capabilityID: bounded(32),
+  capabilityGeneration: PublicationService.fields.capabilityGeneration,
+  contextReference: Digest,
+  contextProofRevision: Digest,
+  attempt: bounded(128),
+  invocationID: bounded(128),
+  messageID: SessionMessageID,
+  toolCallID: bounded(256),
+  server: bounded(256),
+  tool: bounded(256),
+  argumentsRevision: Digest,
+  responseRevision: Digest,
+  receiptReference: Digest,
+  authorizationVersion: bounded(256),
+  manifestBinding: Digest,
+  audienceBinding: Digest,
+  mode: Schema.Literals(["complete", "actor-private-unknown"]),
+  complete: Schema.Boolean,
+  issuedAt: Schema.Int,
+  expiresAt: Schema.Int,
+}).annotate({ identifier: "ExecutionDisclosure.ToolResultProof" })
+
+export interface ToolResultCarrier extends Schema.Schema.Type<typeof ToolResultCarrier> {}
+export const ToolResultCarrier = Schema.Struct({
+  version: Schema.Literal(1),
+  // The receiving boundary enforces canonical base64 and the decoded 4 MiB limit.
+  snapshot: bounded(4 * Math.ceil((4 * 1024 * 1024) / 3)),
+  proof: SignedProof,
+}).annotate({ identifier: "ExecutionDisclosure.ToolResultCarrier" })

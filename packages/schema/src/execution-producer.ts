@@ -169,3 +169,24 @@ export const InlineRequestOnlyComposition = Schema.Struct({
   contract: Schema.Literal("model-request-only-inline-v1"),
 }).annotate({ identifier: "ExecutionProducer.InlineRequestOnlyComposition" })
 export interface InlineRequestOnlyComposition extends Schema.Schema.Type<typeof InlineRequestOnlyComposition> {}
+
+// Known separately from the contracts returned by production enrollment.
+export interface McpInvocation extends Schema.Schema.Type<typeof McpInvocation> {}
+export const McpInvocation = Schema.Struct({
+  version: Schema.Literal(1),
+  purpose: Schema.Literal("native-mcp-invocation"),
+  contract: Schema.Literal("mcp-invocation-v1"),
+  producerEpoch: bounded(128),
+  sessionID: SessionID,
+  inputID: SessionMessageID,
+  attempt: bounded(128),
+  invocationID: bounded(128),
+  messageID: SessionMessageID,
+  toolCallID: bounded(256),
+  server: bounded(256),
+  tool: bounded(256),
+  argumentsRevision: Digest,
+  contextReference: Digest,
+  contextProofRevision: Digest,
+  issuedAt: Schema.Int,
+}).annotate({ identifier: "ExecutionProducer.McpInvocation" })

@@ -1,7 +1,7 @@
 export * as NativeProducer from "./execution-producer.js"
 
 import { generateKeyPairSync, randomUUID, sign } from "node:crypto"
-import { Cause, Effect, Schema } from "effect"
+import { Cause, Context, Effect, Option, Schema } from "effect"
 import { ExecutionProducer } from "@opencode/schema/execution-producer"
 import { SessionInbox } from "@opencode/schema/session-inbox"
 import { SessionID } from "@opencode/schema/session-id"
@@ -15,6 +15,7 @@ import { toLLMMessages } from "./session/runner/to-llm-message.js"
 import { Hash } from "@opencode/util/hash"
 import { SessionDisclosure } from "./session/disclosure.js"
 import { SessionInlineIdentity } from "./session/inline-identity.js"
+import { McpProvenance } from "./mcp/provenance.js"
 
 // Only the nonsecret durable execution selection and required contract markers.
 // Instructions and metadata have independent source bindings.
@@ -78,6 +79,18 @@ const create = () => {
         ),
       ),
     }),
+    mcpInvocation: (
+      input: Omit<ExecutionProducer.McpInvocation, "version" | "purpose" | "producerEpoch" | "contract">,
+    ) => {
+      const invocation = Schema.decodeUnknownSync(ExecutionProducer.McpInvocation)({
+        ...input,
+        version: 1,
+        purpose: "native-mcp-invocation",
+        contract: "mcp-invocation-v1",
+        producerEpoch: epoch,
+      })
+      return { invocation, signed: signed(JSON.stringify(invocation)) }
+    },
     composed: (input: ExecutionDisclosure.ContextRequest) =>
       signed(
         JSON.stringify(
@@ -532,3 +545,120 @@ function preparedIdentity(
     fact.preparedPayloadRevision === SessionDisclosure.digest(payload)
   )
 }
+
+// This service never leaves the capture closure. Tool arguments, hooks and MCP
+// metadata cannot install it or obtain a general-purpose signing handle.
+class ToolCapture extends Context.Service<
+  ToolCapture,
+  {
+    readonly capture: McpProvenance.Capture
+    readonly messageID: typeof SessionMessageID.Type
+    readonly toolCallID: string
+    readonly valid: () => boolean
+    readonly reserve: () => void
+    readonly observe: (observation: McpProvenance.Observation) => void
+  }
+>()("@opencode/NativeProducer/ToolCapture") {}
+
+// Dormant until a separately negotiated tool-capable model attempt supplies a
+// verified host proof. Existing policy/composition selection remains unchanged.
+export const captureTools = (input: {
+  readonly service: ExecutionDisclosure.Service
+  readonly signed: ExecutionDisclosure.SignedProof
+  readonly current: () => boolean
+}) =>
+  Effect.sync(() => {
+    const capture = McpProvenance.capture(input.service, input.signed)
+    const current = input.current
+    return {
+      run: <A, E, R>(
+        identity: {
+          readonly messageID: typeof SessionMessageID.Type
+          readonly toolCallID: string
+        },
+        effect: Effect.Effect<A, E, R>,
+      ) =>
+        Effect.suspend(() => {
+          let active = true
+          let calls = 0
+          let bytes = 0
+          const observations: McpProvenance.Observation[] = []
+          const valid = () => active && current()
+          return effect.pipe(
+            Effect.provideService(ToolCapture, {
+              capture,
+              ...identity,
+              valid,
+              reserve: () => {
+                if (!valid() || ++calls > 128) throw new Error("MCP provenance authorization is unavailable")
+              },
+              observe: (observation) => {
+                bytes += Buffer.byteLength(observation.snapshot)
+                if (!valid() || bytes > 32 * 1024 * 1024) throw new Error("MCP provenance authorization is unavailable")
+                observations.push(Object.freeze(observation))
+              },
+            }),
+            Effect.map((value) => ({ value, observations: Object.freeze([...observations]) })),
+            Effect.onExit(() =>
+              Effect.sync(() => {
+                active = false
+              }),
+            ),
+          )
+        }),
+    }
+  })
+
+// Called only around the actual SDK dispatch, after mutable tool hooks and
+// validation. Own and measure exactly the arguments subsequently serialized.
+export const dispatchMcp = <A, E, R>(
+  input: {
+    readonly server: string
+    readonly name: string
+    readonly args?: Record<string, unknown>
+    readonly meta?: Readonly<Record<string, unknown>>
+    readonly sessionID?: string
+  },
+  transport: (request: {
+    readonly name: string
+    readonly args: Record<string, unknown>
+    readonly meta: Readonly<Record<string, unknown>>
+  }) => Effect.Effect<A, E, R>,
+) =>
+  Effect.gen(function* () {
+    const scope = Option.getOrUndefined(yield* Effect.serviceOption(ToolCapture))
+    if (!scope) return yield* transport({ name: input.name, args: input.args ?? {}, meta: input.meta ?? {} })
+    scope.reserve()
+    if (
+      input.sessionID !== scope.capture.context.sessionID ||
+      Object.hasOwn(input.meta ?? {}, McpProvenance.RequestKey)
+    )
+      return yield* Effect.die(new Error("MCP provenance authorization is unavailable"))
+    const args = McpProvenance.own(input.args ?? {}) as Record<string, unknown>
+    const serialized = JSON.stringify(args)
+    if (Buffer.byteLength(serialized) > McpProvenance.MaximumSnapshot)
+      return yield* Effect.die(new Error("MCP provenance authorization is unavailable"))
+    const { invocation, signed } = processSigner().mcpInvocation({
+      sessionID: scope.capture.context.sessionID,
+      inputID: scope.capture.context.inputID,
+      attempt: scope.capture.context.attempt,
+      invocationID: randomUUID(),
+      messageID: scope.messageID,
+      toolCallID: scope.toolCallID,
+      server: input.server,
+      tool: input.name,
+      argumentsRevision: Hash.sha256(serialized),
+      contextReference: scope.capture.context.contextReference,
+      contextProofRevision: Hash.sha256(scope.capture.signed.payload),
+      issuedAt: Date.now(),
+    })
+    const meta = McpProvenance.own({
+      ...(input.meta ?? {}),
+      [McpProvenance.RequestKey]: { version: 1, context: scope.capture.signed, invocation: signed },
+    }) as Readonly<Record<string, unknown>>
+    if (!scope.valid()) return yield* Effect.die(new Error("MCP provenance authorization is unavailable"))
+    const raw = yield* transport({ name: input.name, args, meta })
+    const verified = McpProvenance.result(scope.capture, invocation, raw)
+    scope.observe({ invocation: signed, proof: verified.proof, signed: verified.signed, snapshot: verified.snapshot })
+    return verified.result
+  })
