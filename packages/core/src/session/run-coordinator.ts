@@ -1,7 +1,12 @@
 export * as SessionRunCoordinator from "./run-coordinator.js"
 
-import { Deferred, Effect, Exit, Fiber, FiberSet, Scope } from "effect"
+import { Context, Deferred, Effect, Exit, Fiber, FiberSet, Scope } from "effect"
 import type { Promotable } from "./inbox.js"
+
+/** Execution-specific ownership inherited by the drain and its child fibers. */
+export class Ownership extends Context.Service<Ownership, { readonly live: () => boolean }>()(
+  "@opencode/SessionRunCoordinator/Ownership",
+) {}
 
 /** Serializes execution for each key while allowing different keys to run concurrently. */
 export interface Coordinator<Key, E, Reason = never> {
@@ -62,7 +67,7 @@ type Execution<E, Reason> = {
  * ```
  */
 export const make = <Key, E, Reason = never>(options: {
-  readonly drain: (key: Key, force: boolean, scope: Promotable) => Effect.Effect<void, E>
+  readonly drain: (key: Key, force: boolean, scope: Promotable, live: () => boolean) => Effect.Effect<void, E>
   /** Runs once when a process-local busy period begins, before its first drain. */
   readonly started?: (key: Key) => Effect.Effect<void>
   /**
@@ -74,9 +79,24 @@ export const make = <Key, E, Reason = never>(options: {
   Effect.gen(function* () {
     const executions = new Map<Key, Execution<E, Reason>>()
     const fork = yield* FiberSet.makeRuntime<never, void, never>()
+    let closed = false
+    // Registered after FiberSet so ownership is revoked before its asynchronous
+    // interruption/finalizers can wait on an uninterruptible publication RPC.
+    yield* Effect.addFinalizer(() =>
+      Effect.sync(() => {
+        closed = true
+      }),
+    )
 
     const loop = (key: Key, execution: Execution<E, Reason>, force: boolean): Effect.Effect<void, E> =>
-      Effect.suspend(() => options.drain(key, force, execution.scope)).pipe(
+      Effect.suspend(() =>
+        options.drain(
+          key,
+          force,
+          execution.scope,
+          () => !closed && executions.get(key) === execution && !execution.stopping && execution.owner !== undefined,
+        ),
+      ).pipe(
         Effect.andThen(
           Effect.suspend(() => {
             if (execution.stopping || execution.pendingWake === undefined) return Effect.void

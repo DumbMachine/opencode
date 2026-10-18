@@ -126,7 +126,10 @@ export const layer = Layer.effect(
           sessionID,
           bus.publish(SessionEvent.Execution.Started, { sessionID }, claimOnCommit(sessionID)),
         ),
-      drain: (sessionID, force, promotable) => drain(sessionID, force, undefined, promotable),
+      drain: (sessionID, force, promotable, live) =>
+        drain(sessionID, force, undefined, promotable).pipe(
+          Effect.provideService(SessionRunCoordinator.Ownership, { live }),
+        ),
       // One terminal observation per busy period, covering every coalesced drain.
       settled: (sessionID, exit, reason) =>
         reportLifecycle(

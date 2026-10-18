@@ -14,6 +14,7 @@ import { ProjectTable } from "@opencode/core/project/sql"
 import { AbsolutePath } from "@opencode/core/schema"
 import { Session } from "@opencode/core/session"
 import { SessionExecution } from "@opencode/core/session/execution"
+import { SessionRunCoordinator } from "@opencode/core/session/run-coordinator"
 import { SessionExecutionCapability } from "@opencode/core/session/execution-capability"
 import { SessionRestart } from "@opencode/core/session/execution/restart"
 import { UserInterruptedError } from "@opencode/core/session/error"
@@ -23,7 +24,7 @@ import { SessionMessage } from "@opencode/core/session/message"
 import { SessionRunner } from "@opencode/core/session/runner/index"
 import { SessionInboxTable, SessionTable } from "@opencode/core/session/sql"
 import { SessionStore } from "@opencode/core/session/store"
-import { Cause, Context, Deferred, Effect, Exit, Fiber, Layer, LayerMap, Scope } from "effect"
+import { Cause, Context, Deferred, Effect, Exit, Fiber, Layer, LayerMap, Option, Scope } from "effect"
 import { eq, sql } from "drizzle-orm"
 import { testEffect } from "./lib/effect"
 
@@ -34,6 +35,41 @@ const it = testEffect(
 )
 
 describe("SessionExecution lifecycle", () => {
+  it.effect("provides captured ownership at runner invocation and into its child fibers", () =>
+    Effect.gen(function* () {
+      const database = yield* Database.Service
+      const sessionID = Session.ID.create()
+      yield* seedSessions(database, [sessionID])
+      const entered = yield* Deferred.make<void>(),
+        release = yield* Deferred.make<void>()
+      const scope = yield* Scope.make()
+      yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void))
+      let live = () => false
+      const context = yield* buildExecution(scope, () =>
+        Effect.uninterruptible(
+          Effect.gen(function* () {
+            const ownership = Option.getOrThrow(yield* Effect.serviceOption(SessionRunCoordinator.Ownership))
+            live = ownership.live
+            const child = yield* Effect.serviceOption(SessionRunCoordinator.Ownership).pipe(Effect.forkChild)
+            expect(Option.getOrThrow(yield* Fiber.join(child)).live).toBe(live)
+            expect(live()).toBe(true)
+            yield* Deferred.succeed(entered, undefined)
+            yield* Deferred.await(release)
+          }),
+        ),
+      )
+      const execution = Context.get(context, SessionExecution.Service)
+      yield* execution.wake(sessionID)
+      yield* Deferred.await(entered)
+      expect(live()).toBe(true)
+      expect(yield* execution.interrupt(sessionID)).toBe(true)
+      expect(live()).toBe(false)
+      yield* Deferred.succeed(release, undefined)
+      yield* execution.awaitIdle(sessionID)
+      expect(live()).toBe(false)
+    }),
+  )
+
   it.live("settlement waits for the inbox boundary before retaining pending credentials", () =>
     Effect.gen(function* () {
       const database = yield* Database.Service

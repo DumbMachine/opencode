@@ -171,6 +171,24 @@ export const get = (sessionID: SessionSchema.ID, inputID: SessionMessage.ID | un
 // delivery it is unknown until the durable user message commits.
 export const selectedInput = (sessionID: SessionSchema.ID) => selected.get(sessionID)
 
+// A publication callback must retain this exact installation, not merely an
+// equal input ID/revision reinstalled after cancellation or process recovery.
+// This observer never changes the selected input or exposes credentials.
+export const captureSelection = (sessionID: SessionSchema.ID, inputID: SessionMessage.ID, revision: number) => {
+  const installed = grants.get(sessionID)?.get(inputID)
+  return () => {
+    const renewal = renewals.get(renewalKey(sessionID, inputID))
+    return (
+      installed !== undefined &&
+      installed.disclosure !== undefined &&
+      installed.revision === revision &&
+      grants.get(sessionID)?.get(inputID) === installed &&
+      selected.get(sessionID) === inputID &&
+      (!renewal || renewal.committed !== undefined)
+    )
+  }
+}
+
 export const clearSelection = (sessionID: SessionSchema.ID) =>
   Effect.sync(() => {
     selected.delete(sessionID)

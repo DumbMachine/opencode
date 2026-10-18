@@ -202,3 +202,54 @@ it.effect("queued disclosure configuration cannot replace the captured active in
     yield* SessionExecutionCapability.clear(sessionID)
   }),
 )
+
+it.effect("captures the exact selected installation without changing input selection or reviving replaced grants", () =>
+  Effect.gen(function* () {
+    const sessionID = Session.ID.create(),
+      inputID = SessionMessage.ID.create(),
+      queued = SessionMessage.ID.create()
+    const service = {
+      version: 1 as const,
+      endpoint: "http://127.0.0.1:8123/preflight",
+      token: "private-original",
+      issuer: "fixture",
+      audience: "fixture-context",
+      keys: [{ id: "fixture", algorithm: "Ed25519" as const, publicKey: "a".repeat(43) }],
+    }
+    const grant = { inputID, disclosure: service, mcp: {}, revision: 7 }
+    const missing = SessionExecutionCapability.captureSelection(sessionID, inputID, 7)
+    expect(missing()).toBe(false)
+    try {
+      expect(yield* SessionExecutionCapability.set(sessionID, grant)).toBe(true)
+      yield* SessionExecutionCapability.select(sessionID, inputID)
+      const original = SessionExecutionCapability.captureSelection(sessionID, inputID, 7)
+      expect(original()).toBe(true)
+      expect(SessionExecutionCapability.captureSelection(sessionID, inputID, 8)()).toBe(false)
+      expect(yield* SessionExecutionCapability.set(sessionID, structuredClone(grant))).toBe(true)
+      expect(original()).toBe(true)
+      yield* SessionExecutionCapability.set(sessionID, { ...grant, inputID: queued })
+      yield* SessionExecutionCapability.select(sessionID, queued)
+      expect(original()).toBe(false)
+      expect(SessionExecutionCapability.selectedInput(sessionID)).toBe(queued)
+      yield* SessionExecutionCapability.select(sessionID, inputID)
+      expect(original()).toBe(true)
+      yield* SessionExecutionCapability.clear(sessionID)
+      yield* SessionExecutionCapability.set(sessionID, grant)
+      yield* SessionExecutionCapability.select(sessionID, inputID)
+      expect(original()).toBe(false)
+      expect(missing()).toBe(false)
+      const replaced = SessionExecutionCapability.captureSelection(sessionID, inputID, 7)
+      expect(replaced()).toBe(true)
+      expect(yield* SessionExecutionCapability.beginRenewal(sessionID, inputID, "replacement-claim")).toBeDefined()
+      expect(replaced()).toBe(false)
+      expect(
+        yield* SessionExecutionCapability.commitRenewal(sessionID, { ...grant, revision: 8 }, "replacement-claim"),
+      ).toBe(true)
+      yield* SessionExecutionCapability.select(sessionID, inputID)
+      expect(replaced()).toBe(false)
+      expect(SessionExecutionCapability.captureSelection(sessionID, inputID, 8)()).toBe(true)
+    } finally {
+      yield* SessionExecutionCapability.clear(sessionID)
+    }
+  }),
+)

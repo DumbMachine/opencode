@@ -1,5 +1,5 @@
 import { describe, expect } from "bun:test"
-import { Cause, Deferred, Effect, Exit, Fiber, Layer } from "effect"
+import { Cause, Deferred, Effect, Exit, Fiber, Layer, Scope } from "effect"
 import { SessionInbox } from "@opencode/core/session/inbox"
 import { SessionRunCoordinator } from "@opencode/core/session/run-coordinator"
 import { testEffect } from "./lib/effect"
@@ -7,6 +7,99 @@ import { testEffect } from "./lib/effect"
 const it = testEffect(Layer.empty)
 
 describe("SessionRunCoordinator", () => {
+  it.effect("revokes only the interrupted execution's captured publication ownership before cleanup", () =>
+    Effect.gen(function* () {
+      const firstStarted = yield* Deferred.make<void>(),
+        secondStarted = yield* Deferred.make<void>()
+      const firstGate = yield* Deferred.make<void>(),
+        secondGate = yield* Deferred.make<void>()
+      const leases = new Map<string, () => boolean>()
+      const coordinator = yield* SessionRunCoordinator.make<string, never>({
+        drain: (key, _force, _scope, live) =>
+          Effect.uninterruptible(
+            Effect.gen(function* () {
+              leases.set(key, live)
+              yield* Deferred.succeed(key === "first" ? firstStarted : secondStarted, undefined)
+              yield* Deferred.await(key === "first" ? firstGate : secondGate)
+            }),
+          ),
+      })
+      yield* coordinator.wake("first")
+      yield* coordinator.wake("second")
+      yield* Deferred.await(firstStarted)
+      yield* Deferred.await(secondStarted)
+      const old = leases.get("first")!
+      expect(old()).toBe(true)
+      expect(leases.get("second")!()).toBe(true)
+      expect(yield* coordinator.interrupt("first", undefined, { when: () => false })).toBe(false)
+      expect(old()).toBe(true)
+      expect(yield* coordinator.interrupt("first")).toBe(true)
+      expect(old()).toBe(false)
+      expect(yield* coordinator.isActive("first")).toBe(true)
+      expect(leases.get("second")!()).toBe(true)
+      yield* Deferred.succeed(firstGate, undefined)
+      yield* coordinator.awaitIdle("first")
+      expect(old()).toBe(false)
+      yield* Deferred.succeed(secondGate, undefined)
+      yield* coordinator.awaitIdle("second")
+      expect(leases.get("second")!()).toBe(false)
+      yield* coordinator.run("first")
+      expect(old()).toBe(false)
+    }),
+  )
+
+  it.effect("ends publication ownership before the settlement hook releases the busy period", () =>
+    Effect.gen(function* () {
+      const entered = yield* Deferred.make<void>(),
+        release = yield* Deferred.make<void>()
+      let live = () => false
+      const coordinator = yield* SessionRunCoordinator.make({
+        drain: (_key: string, _force, _scope, captured) =>
+          Effect.sync(() => {
+            live = captured
+            expect(live()).toBe(true)
+          }),
+        settled: () => Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release))),
+      })
+      yield* coordinator.wake("session")
+      yield* Deferred.await(entered)
+      expect(yield* coordinator.isActive("session")).toBe(true)
+      expect(live()).toBe(false)
+      yield* Deferred.succeed(release, undefined)
+      yield* coordinator.awaitIdle("session")
+      expect(live()).toBe(false)
+    }),
+  )
+
+  it.effect("revokes publication ownership before scope shutdown waits for an uninterruptible callback", () =>
+    Effect.gen(function* () {
+      const scope = yield* Scope.make()
+      const entered = yield* Deferred.make<void>(),
+        release = yield* Deferred.make<void>()
+      let live = () => false
+      const coordinator = yield* SessionRunCoordinator.make({
+        drain: (_key: string, _force, _scope, captured) =>
+          Effect.uninterruptible(
+            Effect.gen(function* () {
+              live = captured
+              yield* Deferred.succeed(entered, undefined)
+              yield* Deferred.await(release)
+            }),
+          ),
+      }).pipe(Effect.provideService(Scope.Scope, scope))
+      yield* coordinator.wake("session")
+      yield* Deferred.await(entered)
+      expect(live()).toBe(true)
+      const closing = yield* Scope.close(scope, Exit.succeed(undefined)).pipe(Effect.forkChild)
+      yield* Effect.yieldNow
+      expect(live()).toBe(false)
+      expect(yield* coordinator.isActive("session")).toBe(true)
+      yield* Deferred.succeed(release, undefined)
+      yield* Fiber.join(closing)
+      expect(live()).toBe(false)
+    }),
+  )
+
   it.effect("joins concurrent resumes for one key", () =>
     Effect.gen(function* () {
       const gate = yield* Deferred.make<void>()
