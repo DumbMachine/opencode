@@ -35,6 +35,9 @@ export const ServerHandler = HttpApiBuilder.group(Api, "server.server", (handler
               headers: {
                 "x-opencode-input-config": "1",
                 "x-opencode-context-preflight": "1",
+                "x-opencode-context-policy": "1",
+                "x-opencode-context-composition": "2",
+                "x-opencode-context-publication": "1",
                 "x-opencode-session-retirement": "1",
                 "x-opencode-inbox-capability-renewal": "2",
                 "x-opencode-input-capability-resume": "1",

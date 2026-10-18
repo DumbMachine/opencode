@@ -2,7 +2,9 @@ import { expect } from "bun:test"
 import { createPublicKey, verify } from "node:crypto"
 import { Effect, Schema } from "effect"
 import { ExecutionProducer } from "@opencode/schema/execution-producer"
+import { Session } from "@opencode/schema/session"
 import { it } from "../../core/test/lib/effect"
+import { tmpdirScoped } from "../../core/test/fixture/tmpdir"
 import { ServerFetch } from "../src/fetch"
 
 const options = {
@@ -65,7 +67,9 @@ it.live("producer enrollment requires configured and authenticated native server
       ),
     )
     expect(info.status).toBe(200)
-    expect(info.headers.get("x-opencode-context-publication")).toBeNull()
+    expect(info.headers.get("x-opencode-context-policy")).toBe("1")
+    expect(info.headers.get("x-opencode-context-composition")).toBe("2")
+    expect(info.headers.get("x-opencode-context-publication")).toBe("1")
   }).pipe(Effect.scoped),
 )
 
@@ -76,5 +80,95 @@ it.live("an unauthenticated embedded native server cannot offer enrollment", () 
     expect(info.status).toBe(200)
     const response = yield* Effect.promise(() => handler(request()))
     expect(response.status).toBe(401)
+  }).pipe(Effect.scoped),
+)
+
+const SessionResponse = Schema.Struct({ data: Schema.toEncoded(Session.Info) })
+const sessionRequest = (path: string, payload?: unknown) =>
+  new Request(`http://opencode.local/api/session${path}`, {
+    method: payload === undefined ? "GET" : "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Basic ${btoa("opencode:fixture-native-password")}`,
+    },
+    body: payload === undefined ? undefined : JSON.stringify(payload),
+  })
+
+it.live("persistent native HTTP sessions acknowledge protected birth and retain their reserved identities", () =>
+  Effect.gen(function* () {
+    const tmp = yield* tmpdirScoped()
+    const handler = yield* ServerFetch.make({
+      ...options,
+      password: "fixture-native-password",
+      events: { persist: true },
+    })
+    for (const id of ["ses_protected_original_one", "ses_protected_original_two"]) {
+      const payload = { id, location: { directory: tmp.path }, contextPolicy: { version: 1 } }
+      const response = yield* Effect.promise(() => handler(sessionRequest("", payload)))
+      expect(response.status).toBe(200)
+      const created = Schema.decodeUnknownSync(SessionResponse)(yield* Effect.promise(() => response.json()))
+      expect(created.data.id).toBe(id)
+      expect(created.data.contextPolicy).toEqual({ version: 1 })
+      expect(created.data.parentID).toBeUndefined()
+      expect(created.data.location.directory).toBe(tmp.path)
+
+      for (const contextPolicy of [{ version: 1 }, undefined]) {
+        const repeated = yield* Effect.promise(() => handler(sessionRequest("", { ...payload, contextPolicy })))
+        expect(repeated.status).toBe(200)
+        expect(Schema.decodeUnknownSync(SessionResponse)(yield* Effect.promise(() => repeated.json()))).toEqual(created)
+      }
+      const read = yield* Effect.promise(() => handler(sessionRequest(`/${id}`)))
+      expect(read.status).toBe(200)
+      expect(Schema.decodeUnknownSync(SessionResponse)(yield* Effect.promise(() => read.json()))).toEqual(created)
+    }
+  }).pipe(Effect.scoped),
+)
+
+it.live("native HTTP creation cannot upgrade a legacy session to protected context", () =>
+  Effect.gen(function* () {
+    const tmp = yield* tmpdirScoped()
+    const handler = yield* ServerFetch.make({
+      ...options,
+      password: "fixture-native-password",
+      events: { persist: true },
+    })
+    const payload = { id: "ses_legacy_birth", location: { directory: tmp.path } }
+    const response = yield* Effect.promise(() => handler(sessionRequest("", payload)))
+    expect(response.status).toBe(200)
+    const created = Schema.decodeUnknownSync(SessionResponse)(yield* Effect.promise(() => response.json()))
+    expect(created.data.id).toBe(payload.id)
+    expect(created.data.contextPolicy).toBeUndefined()
+
+    const upgrade = yield* Effect.promise(() =>
+      handler(sessionRequest("", { ...payload, contextPolicy: { version: 1 } })),
+    )
+    expect(upgrade.status).toBe(500)
+    const read = yield* Effect.promise(() => handler(sessionRequest(`/${payload.id}`)))
+    expect(read.status).toBe(200)
+    expect(Schema.decodeUnknownSync(SessionResponse)(yield* Effect.promise(() => read.json()))).toEqual(created)
+  }).pipe(Effect.scoped),
+)
+
+it.live("native HTTP protected birth requires event persistence and leaves no session on rejection", () =>
+  Effect.gen(function* () {
+    const tmp = yield* tmpdirScoped()
+    const handler = yield* ServerFetch.make({
+      ...options,
+      password: "fixture-native-password",
+      events: { persist: false },
+    })
+    const payload = {
+      id: "ses_protected_without_persistence",
+      location: { directory: tmp.path },
+      contextPolicy: { version: 1 },
+    }
+    const response = yield* Effect.promise(() => handler(sessionRequest("", payload)))
+    expect(response.status).toBe(500)
+    const read = yield* Effect.promise(() => handler(sessionRequest(`/${payload.id}`)))
+    expect(read.status).toBe(404)
+    expect(yield* Effect.promise(() => read.json())).toMatchObject({
+      _tag: "SessionNotFoundError",
+      sessionID: payload.id,
+    })
   }).pipe(Effect.scoped),
 )

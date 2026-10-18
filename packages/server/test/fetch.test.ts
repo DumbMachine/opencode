@@ -112,7 +112,7 @@ it.live("serves the HttpApi and enforces Basic auth like the Node server", () =>
     expect(response.headers.get("x-opencode-session-retirement")).toBe("1")
     expect(response.headers.get("x-opencode-inbox-capability-renewal")).toBe("2")
     expect(response.headers.get("x-opencode-context-preflight")).toBe("1")
-    expect(response.headers.get("x-opencode-context-publication")).toBeNull()
+    expect(response.headers.get("x-opencode-context-publication")).toBe("1")
     expect(response.headers.get("x-opencode-input-capability-resume")).toBe("1")
     expect(response.headers.get("x-opencode-model-budget")).toBe(
       process.env.OPENCODE_MODEL_BUDGET_ENDPOINT && process.env.OPENCODE_MODEL_BUDGET_TOKEN ? "4" : null,
