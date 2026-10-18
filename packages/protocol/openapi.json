@@ -14404,6 +14404,10 @@
             "type": "number",
             "enum": [1]
           },
+          "compositionVersion": {
+            "type": "number",
+            "enum": [1]
+          },
           "issuer": {
             "type": "string",
             "minLength": 1,
@@ -14474,6 +14478,15 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 512
+          },
+          "contracts": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": ["human-plaintext-identity-v1", "model-plaintext-projection-v1"]
+            },
+            "minItems": 1,
+            "maxItems": 2
           }
         },
         "required": ["version", "challenge", "audience"],

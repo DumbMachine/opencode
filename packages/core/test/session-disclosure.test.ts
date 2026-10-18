@@ -145,3 +145,37 @@ test("does not request preflight for a recognized but unsupported publication se
     host.server.stop(true)
   }
 })
+
+test("posts the exact owned attempt after optional producer signing and rejects digest substitution", async () => {
+  const arrived = Promise.withResolvers<void>()
+  const release = Promise.withResolvers<void>()
+  let contacted = 0
+  const host = disclosureHost({
+    unknown: true,
+    observe: async () => {
+      contacted++
+      arrived.resolve()
+      await release.promise
+    },
+  })
+  try {
+    const original = request()
+    const owned = SessionDisclosure.makeRequest(original)
+    const attempt = owned.attempt
+    const pending = Effect.runPromise(SessionDisclosure.prepareRequest(host.config, owned))
+    await arrived.promise
+    original.components[0]!.revision = "c".repeat(64)
+    release.resolve()
+    const result = await pending
+    expect(result.proof.attempt).toBe(attempt)
+    expect(result.proof.componentsDigest).toBe(owned.componentsDigest)
+    expect(result.proof.complete).toBeFalse()
+    await expect(
+      Effect.runPromise(SessionDisclosure.prepareRequest(host.config, { ...owned, componentsDigest: "f".repeat(64) })),
+    ).rejects.toThrow("Execution context authorization is unavailable")
+    expect(contacted).toBe(1)
+  } finally {
+    release.resolve()
+    host.server.stop(true)
+  }
+})

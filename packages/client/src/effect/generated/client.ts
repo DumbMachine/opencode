@@ -298,7 +298,12 @@ const preserveStream =
 const EndpointServerEnrollProducer = (raw: RawClient["server.server"]) => (input: ServerEnrollProducerInput) =>
   preserveEffect<ServerEnrollProducerOutput>()(
     raw["server.enrollProducer"]({
-      payload: { version: input["version"], challenge: input["challenge"], audience: input["audience"] },
+      payload: {
+        version: input["version"],
+        challenge: input["challenge"],
+        audience: input["audience"],
+        contracts: input["contracts"],
+      },
     }).pipe(Effect.mapError(mapClientError)),
   )
 

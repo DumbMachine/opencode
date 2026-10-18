@@ -433,7 +433,12 @@ export function make(options: ClientOptions) {
           {
             method: "POST",
             path: `/api/producer/enrollment`,
-            body: { version: input["version"], challenge: input["challenge"], audience: input["audience"] },
+            body: {
+              version: input["version"],
+              challenge: input["challenge"],
+              audience: input["audience"],
+              contracts: input["contracts"],
+            },
             successStatus: 200,
             declaredStatuses: [400, 401],
             empty: false,

@@ -11,7 +11,8 @@ import {
   Message,
   SystemPart,
 } from "@opencode/ai"
-import type { StreamOptions } from "@opencode/ai/route"
+import { LLMClient, type StreamOptions } from "@opencode/ai/route"
+import { LayerNodePlatform } from "../effect/app-node-platform.js"
 import type {
   SessionCompaction,
   SessionContext,
@@ -43,6 +44,7 @@ import { SessionInputRequirements } from "./input-requirements.js"
 import { SessionDisclosure } from "./disclosure.js"
 import { SessionExecutionCapability } from "./execution-capability.js"
 import { SessionRunCoordinator } from "./run-coordinator.js"
+import { NativeProducer } from "../execution-producer.js"
 
 const IMAGE_BYTES_TRIGGER = 25 * 1024 * 1024 // 25 MiB
 const IMAGE_BYTES_TARGET = 15 * 1024 * 1024 // 15 MiB
@@ -71,6 +73,7 @@ export interface Input {
   readonly disclosureRevision?: number
   readonly disclosureCurrent?: () => boolean
   readonly disclosureComponents?: readonly ExecutionDisclosure.Component[]
+  readonly disclosureMessages?: readonly SessionMessage.Info[]
   readonly session: SessionSchema.Info
   readonly agent: Agent.ID
   readonly inputID?: SessionMessage.ID
@@ -221,7 +224,14 @@ export const layer = Layer.effect(
     const app = yield* App.Metadata
     const prepare = Effect.fn("SessionModelRequest.prepare")(function* <
       S extends SessionRequest & { tools?: Definitions },
-    >(kind: SessionRequestKind, input: Input, shape: (draft: SessionRequest, tools: Definitions) => Effect.Effect<S>) {
+    >(
+      kind: SessionRequestKind,
+      input: Input,
+      shape: (
+        draft: SessionRequest,
+        tools: Definitions,
+      ) => Effect.Effect<{ readonly event: S; readonly invoked: number }>,
+    ) {
       const service = input.disclosure === undefined ? undefined : structuredClone(input.disclosure)
       if (!SessionInputRequirements.serviceSupported(service))
         return yield* Effect.die(new Error("Execution publication authorization is unavailable"))
@@ -229,6 +239,19 @@ export const layer = Layer.effect(
       const session = input.session
       const sessionID = session.id
       const model = input.model
+      // Own canonical history and its rendered positions before the first wait,
+      // including waits for ownership, hooks and the host callback.
+      const producer =
+        service?.compositionVersion === 1 && kind === "primary" && inputID !== undefined && input.disclosureMessages
+          ? NativeProducer.captureContext({
+              sessionID,
+              inputID,
+              model: model.ref,
+              providerMetadataKey: model.model.route.providerMetadataKey ?? model.model.provider,
+              messages: input.disclosureMessages,
+              components: input.disclosureComponents ?? [],
+            })
+          : undefined
       const revision = input.disclosureRevision
       const earlier = input.disclosureCurrent
       const owner =
@@ -259,10 +282,11 @@ export const layer = Layer.effect(
       const given = new Map(
         tools.definitions.map((t) => [{ description: t.description, input: { ...t.inputSchema } }, t] as const),
       )
-      const shaped = yield* shape(
+      const shapedObservation = yield* shape(
         { sessionID, model: model.ref, system: input.system, messages: input.messages, options: {} },
         Object.fromEntries(Array.from(given, ([d, t]) => [t.name, d])),
       )
+      const shaped = shapedObservation.event
       // Match by identity first, then by key. Entries matching neither were invented by a
       // hook and are dropped. `t.name` stays the real name so execution can map renames back.
       const byName = new Map(tools.definitions.map((t) => [t.name, t]))
@@ -300,11 +324,12 @@ export const layer = Layer.effect(
       })
 
       const baseURL = base.model.route.endpoint.baseURL
-      const modelHook = yield* hooks.trigger("session", "model.request", {
+      const modelObservation = yield* hooks.triggerObserved("session", "model.request", {
         ...scope,
         baseURL: typeof baseURL === "string" ? baseURL : undefined,
         headers: { ...base.http?.headers },
       })
+      const modelHook = modelObservation.event
       const route =
         modelHook.baseURL !== undefined && modelHook.baseURL !== baseURL
           ? base.model.route.with({ endpoint: { baseURL: modelHook.baseURL } })
@@ -325,11 +350,13 @@ export const layer = Layer.effect(
           query: base.http?.query,
         }),
       })
+      const client = Option.getOrUndefined(yield* Effect.serviceOption(LLMClient.Service))
+      const bounded = client?.prepareRequest ? yield* client.prepareRequest(routed).pipe(Effect.orDie) : routed
       const request =
         service === undefined
-          ? routed
+          ? bounded
           : yield* Effect.try({
-              try: () => SessionDisclosure.snapshot(routed),
+              try: () => SessionDisclosure.snapshot(bounded),
               catch: () => new Error("Execution context authorization is unavailable"),
             }).pipe(Effect.orDie)
       // History selects native windows against the catalog route before hooks run. A newly installed
@@ -392,26 +419,73 @@ export const layer = Layer.effect(
           : yield* Effect.gen(function* () {
               const contextDigest = SessionDisclosure.digest(SessionDisclosure.logicalContext(request))
               yield* current
-              const prepared = yield* SessionDisclosure.prepare(service!, {
-                sessionID,
-                inputID: inputID!,
-                kind,
-                contextDigest,
-                components: [
-                  ...(input.disclosureComponents ?? []),
-                  { kind: "tools", id: "advertised-definitions", revision: SessionDisclosure.digest(request.tools) },
-                  { kind: "prepared-context", id: "logical-request", revision: contextDigest },
-                ],
-              })
+              const extra = [
+                {
+                  kind: "tools" as const,
+                  id: "advertised-definitions",
+                  revision: SessionDisclosure.digest(request.tools),
+                },
+                { kind: "prepared-context" as const, id: "logical-request", revision: contextDigest },
+              ]
+              const observed = producer
+                ? yield* producer.observe(request, shapedObservation.invoked + modelObservation.invoked, extra)
+                : undefined
+              const prepared = yield* SessionDisclosure.prepareRequest(
+                service!,
+                observed ??
+                  SessionDisclosure.makeRequest({
+                    sessionID,
+                    inputID: inputID!,
+                    kind,
+                    contextDigest,
+                    components: [...(input.disclosureComponents ?? []), ...extra],
+                  }),
+              )
               yield* current
               return prepared
             })
-      // Capture primitive deadlines independently of the returned proof object.
+      const transportNames = [
+        "http.request",
+        "http.response",
+        "experimental.ws.handshake",
+        "experimental.ws.send",
+        "experimental.ws.receive",
+      ] as const
+      const transportCurrent = Effect.gen(function* () {
+        for (const name of transportNames)
+          if (yield* hooks.has("session", name, model.ref.providerID))
+            return yield* Effect.die(new Error("Execution context authorization is unavailable"))
+      })
+      const protectedTransport = <A>(name: (typeof transportNames)[number], value: A) =>
+        hooks
+          .has("session", name, model.ref.providerID)
+          .pipe(
+            Effect.flatMap((present) =>
+              present ? Effect.die(new Error("Execution context authorization is unavailable")) : Effect.succeed(value),
+            ),
+          )
+      // Capture primitive bindings independently of the returned proof object.
+      const assertedDigest =
+        disclosure === undefined ? undefined : SessionDisclosure.digest(SessionDisclosure.logicalContext(request))
+      const assertRequest =
+        assertedDigest === undefined
+          ? undefined
+          : (actual: LLMRequest) =>
+              Effect.sync(() => {
+                if (
+                  actual.http?.body ||
+                  actual.model.defaults?.http?.body ||
+                  actual.model.route.defaults.http?.body ||
+                  SessionDisclosure.digest(SessionDisclosure.logicalContext(actual)) !== assertedDigest
+                )
+                  throw new Error("Execution context authorization is unavailable")
+              })
       const expiresAt = disclosure?.proof.expiresAt
       const assertCurrent =
         expiresAt === undefined
           ? undefined
           : current.pipe(
+              Effect.andThen(transportCurrent),
               Effect.andThen(
                 Effect.sync(() => {
                   if (Date.now() >= expiresAt) throw new Error("Execution context authorization is unavailable")
@@ -426,21 +500,27 @@ export const layer = Layer.effect(
               session.id,
               {
                 handshake: (connect) =>
-                  hooks
-                    .trigger("session", "experimental.ws.handshake", {
-                      ...scope,
-                      url: connect.url,
-                      headers: connect.headers,
-                    })
-                    .pipe(Effect.map((event) => ({ url: event.url, headers: event.headers }))),
+                  service !== undefined
+                    ? protectedTransport("experimental.ws.handshake", connect)
+                    : hooks
+                        .trigger("session", "experimental.ws.handshake", {
+                          ...scope,
+                          url: connect.url,
+                          headers: connect.headers,
+                        })
+                        .pipe(Effect.map((event) => ({ url: event.url, headers: event.headers }))),
                 send: (frame) =>
-                  hooks
-                    .trigger("session", "experimental.ws.send", { ...scope, frame })
-                    .pipe(Effect.map((event) => event.frame)),
+                  service !== undefined
+                    ? protectedTransport("experimental.ws.send", frame)
+                    : hooks
+                        .trigger("session", "experimental.ws.send", { ...scope, frame })
+                        .pipe(Effect.map((event) => event.frame)),
                 receive: (frame) =>
-                  hooks
-                    .trigger("session", "experimental.ws.receive", { ...scope, frame })
-                    .pipe(Effect.map((event) => event.frame)),
+                  service !== undefined
+                    ? protectedTransport("experimental.ws.receive", frame)
+                    : hooks
+                        .trigger("session", "experimental.ws.receive", { ...scope, frame })
+                        .pipe(Effect.map((event) => event.frame)),
               },
               model.chunkTimeout,
             )
@@ -453,6 +533,7 @@ export const layer = Layer.effect(
         request,
         options: {
           ...(assertCurrent ? { beforeDispatch: assertCurrent } : {}),
+          ...(assertRequest ? { assertRequest } : {}),
           ...(http ? { http } : {}),
           ...(webSocket ? { webSocket } : {}),
         },
@@ -481,13 +562,13 @@ export const layer = Layer.effect(
 
     const agentHook =
       (name: "context" | "compaction" | "generate", agent: Agent.ID) => (draft: SessionRequest, tools: Definitions) =>
-        hooks.trigger("session", name, { ...draft, agent, tools })
+        hooks.triggerObserved("session", name, { ...draft, agent, tools })
 
     return Service.of({
       primary: (input) => prepare("primary", input, agentHook("context", input.agent)),
       compaction: (input) => prepare("compaction", input, agentHook("compaction", input.agent)),
       generate: (input) => prepare("generate", input, agentHook("generate", input.agent)),
-      title: (input) => prepare("title", input, (draft) => hooks.trigger("session", "title", draft)),
+      title: (input) => prepare("title", input, (draft) => hooks.triggerObserved("session", "title", draft)),
     })
   }),
 )
@@ -495,5 +576,5 @@ export const layer = Layer.effect(
 export const node = makeLocationNode({
   service: Service,
   layer,
-  deps: [PluginHooks.node, SessionModelTransport.node, App.node],
+  deps: [PluginHooks.node, SessionModelTransport.node, App.node, LayerNodePlatform.llmClient],
 })

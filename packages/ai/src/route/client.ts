@@ -175,12 +175,17 @@ export const generationOptions = (input: GenerationOptions.Input | undefined) =>
   input === undefined ? undefined : GenerationOptions.make(input)
 
 export interface Interface {
+  /** Apply deterministic logical shaping before a caller binds request identity.
+   * Wrappers must make this idempotent and preserve that identity at dispatch. */
+  readonly prepareRequest?: (request: LLMRequest) => Effect.Effect<LLMRequest, AIError>
   readonly compact: CompactMethod
   readonly stream: StreamMethod
   readonly generate: GenerateMethod
 }
 
 export interface StreamOptions {
+  /** Validate the final normalized logical request before protocol lowering. */
+  readonly assertRequest?: (request: LLMRequest) => Effect.Effect<void>
   /** Nonserialized admission check, run at every physical HTTP/WS send after preparation and waits. */
   readonly beforeDispatch?: Effect.Effect<void>
   /** A successful dispatch check was followed by a definitively unsent physical attempt. */
@@ -578,6 +583,7 @@ const prepareRequest = (request: LLMRequest) => {
 
 const compile = Effect.fn("LLM.compile")(function* (request: LLMRequest, options?: StreamOptions) {
   const resolved = prepareRequest(request)
+  if (options?.assertRequest) yield* options.assertRequest(resolved)
   const route = resolved.model.route
 
   const body = yield* route.body
@@ -677,13 +683,22 @@ export const layer: Layer.Layer<Service, never, RequestExecutor.Service> = Layer
     function compact(request: LLMRequest, options?: EndpointCompactOptions | TriggerCompactOptions) {
       return Effect.suspend((): Effect.Effect<CompactionResponse | CompactionCheckpointResponse, AIError> => {
         if (options?.mechanism === "trigger" && canCompact(request, options))
-          return request.model.route.compact.trigger(prepareRequest(request), executor, options)
+          return Effect.gen(function* () {
+            const resolved = prepareRequest(request)
+            if (options.assertRequest) yield* options.assertRequest(resolved)
+            return yield* request.model.route.compact.trigger(resolved, executor, options)
+          })
         if ((options?.mechanism === undefined || options.mechanism === "endpoint") && canCompact(request))
           return request.model.route.compact.endpoint(prepareRequest(request), executor, options)
         return unsupportedCompaction(request, options?.mechanism)
       })
     }
     return Service.of({
+      prepareRequest: (request) =>
+        Effect.try({
+          try: () => prepareRequest(request),
+          catch: () => ProviderShared.invalidRequest("Model request preparation is unavailable"),
+        }),
       stream,
       generate: generateWith(stream),
       compact,

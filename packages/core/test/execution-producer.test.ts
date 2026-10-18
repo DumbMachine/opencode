@@ -1,6 +1,12 @@
 import { expect } from "bun:test"
 import { createPublicKey, verify } from "node:crypto"
-import { Effect, Schema } from "effect"
+import { DateTime, Effect, Schema } from "effect"
+import { LLM, Message } from "@opencode/ai"
+import { OpenAIChat } from "@opencode/ai/protocols"
+import { SessionMessage } from "@opencode/schema/session-message"
+import { Model } from "@opencode/schema/model"
+import { Provider } from "@opencode/schema/provider"
+import { toLLMMessages } from "@opencode/core/session/runner/to-llm-message"
 import { ExecutionProducer } from "@opencode/schema/execution-producer"
 import { SessionInbox } from "@opencode/schema/session-inbox"
 import { SessionID } from "@opencode/schema/session-id"
@@ -44,6 +50,16 @@ it.effect("signs bounded challenges with one process identity and no publication
     expect(next.challenge).toBe("d".repeat(43))
     expect(next.audience).toBe("other-host")
     expect(proof.contracts).toEqual(["human-plaintext-identity-v1"])
+    const negotiated = yield* NativeProducer.enroll({
+      version: 1,
+      challenge: "e".repeat(43),
+      audience: "new-host",
+      contracts: ["human-plaintext-identity-v1", "model-plaintext-projection-v1"],
+    })
+    expect(
+      Schema.decodeUnknownSync(ExecutionProducer.EnrollmentProof)(JSON.parse(negotiated.signed.payload)).contracts,
+    ).toEqual(["human-plaintext-identity-v1", "model-plaintext-projection-v1"])
+    expect(negotiated.key).toEqual(first.key)
     expect(JSON.stringify(first)).not.toContain("privateKey")
     expect(valid({ ...first.signed, payload: second.signed.payload }, first.key)).toBeFalse()
     expect(valid({ ...first.signed, payload: "publication\0" + first.signed.payload }, first.key)).toBeFalse()
@@ -136,5 +152,102 @@ it.live("pins the launch nonce before mutable runtime environment and rotates id
     expect(next.bootNonce).toBe(proof.bootNonce)
     expect(next.producerEpoch).not.toBe(proof.producerEpoch)
     expect(second.key).not.toEqual(first.key)
+  }),
+)
+
+it.effect("observes exact owned human projections and binds every logical field to one attempt", () =>
+  Effect.gen(function* () {
+    const { key } = yield* enrollment()
+    const scope = {
+      ...prepare("Original human"),
+      payload: SessionInbox.UserPayload.make({ text: "Original human", metadata: { source: "unclassified" } }),
+    }
+    const payload = yield* NativeProducer.prepareInput(scope)
+    if (!payload?.preparedInput) throw new Error("Expected preparation")
+    const message = Schema.decodeUnknownSync(SessionMessage.User)(
+      Schema.encodeSync(SessionMessage.User)(
+        SessionMessage.User.make({
+          id: scope.inputID,
+          type: "user",
+          time: { created: DateTime.makeUnsafe(0) },
+          ...payload,
+        }),
+      ),
+    )
+    const model = OpenAIChat.route.model({ id: "fixture-model", provider: "fixture-provider" })
+    const ref = Model.Ref.make({
+      id: Model.ID.make("fixture-model"),
+      providerID: Provider.ID.make("fixture-provider"),
+      variant: Model.VariantID.make("default"),
+    })
+    const projected = toLLMMessages([message], ref, "fixture-provider")
+    const components = [{ kind: "message" as const, id: message.id, revision: Hash.sha256(JSON.stringify(message)) }]
+    const captured = NativeProducer.captureContext({
+      sessionID: scope.sessionID,
+      inputID: scope.inputID,
+      model: ref,
+      providerMetadataKey: "fixture-provider",
+      messages: [message],
+      components,
+    })
+    if (!captured) throw new Error("Expected owned capture")
+    const request = SessionDisclosure.snapshot(
+      LLM.request({ model, system: [], messages: projected, generation: { maxTokens: 100 } }),
+    )
+    components[0].revision = "f".repeat(64)
+    const observed = yield* captured.observe(request, 0, [])
+    if (!observed?.composition || !observed.components[0]?.proof) throw new Error("Expected partial observation")
+    const composition = Schema.decodeUnknownSync(ExecutionProducer.ModelComposition)(
+      JSON.parse(observed.composition.payload),
+    )
+    const projection = Schema.decodeUnknownSync(ExecutionProducer.HumanProjection)(
+      JSON.parse(observed.components[0].proof),
+    )
+    expect(valid(observed.composition, key)).toBeTrue()
+    expect(composition.complete).toBeFalse()
+    expect(composition.attempt).toBe(observed.attempt)
+    expect(composition.contextDigest).toBe(SessionDisclosure.digest(SessionDisclosure.logicalContext(request)))
+    expect(composition.componentsDigest).toBe(SessionDisclosure.digest(observed.components))
+    expect(projection.complete).toBeFalse()
+    expect(projection.index).toBe(0)
+    expect(projection.preparedInput).toEqual(payload.preparedInput)
+    expect(projection.projectionRevision).toBe(SessionDisclosure.digest(request.messages[0]))
+    expect(observed.components[0].revision).not.toBe(components[0].revision)
+    expect(yield* captured.observe(request, 1, [])).toBeUndefined()
+    const duplicated = SessionDisclosure.snapshot(
+      LLM.request({ model, system: [], messages: [...projected, ...projected] }),
+    )
+    const duplicate = yield* captured.observe(duplicated, 0, [])
+    expect(duplicate?.components[0].proof).toBeUndefined()
+    const changed = SessionDisclosure.snapshot(
+      LLM.request({
+        model,
+        system: [],
+        messages: [Message.make({ id: message.id, role: "user", content: "Changed" })],
+      }),
+    )
+    expect((yield* captured.observe(changed, 0, []))?.components[0].proof).toBeUndefined()
+    const reordered = SessionDisclosure.snapshot(
+      LLM.request({ model, system: [], messages: [Message.assistant("Earlier"), ...projected] }),
+    )
+    expect((yield* captured.observe(reordered, 0, []))?.components[0].proof).toBeUndefined()
+    const transplanted = NativeProducer.captureContext({
+      sessionID: scope.sessionID,
+      inputID: scope.inputID,
+      model: ref,
+      providerMetadataKey: "fixture-provider",
+      messages: [message],
+      components: [
+        { kind: "message", id: message.id, revision: "a".repeat(64), proof: observed.components[0].proof },
+        { kind: "message", id: "msg_unmatched", revision: "b".repeat(64), proof: observed.components[0].proof },
+      ],
+    })
+    if (!transplanted) throw new Error("Expected capture")
+    const stripped = yield* transplanted.observe(changed, 0, [
+      { kind: "prepared-context", id: "unmatched", revision: "c".repeat(64), proof: observed.components[0].proof },
+    ])
+    expect(stripped?.components).toHaveLength(3)
+    expect(stripped?.components.every((component) => component.proof === undefined)).toBeTrue()
+    expect(stripped?.componentsDigest).toBe(SessionDisclosure.digest(stripped?.components))
   }),
 )

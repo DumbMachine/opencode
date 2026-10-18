@@ -312,3 +312,33 @@ testEffect(fixedResponse("must not use HTTP")).effect(
       expect(completed).toBe(0)
     }),
 )
+
+testEffect(fixedResponse("must not use HTTP")).effect(
+  "trigger compaction honors the final normalized-request assertion",
+  () =>
+    Effect.gen(function* () {
+      let checked = 0
+      let dispatched = 0
+      const result = yield* Effect.exit(
+        LLMClient.compact(request, {
+          mechanism: "trigger",
+          assertRequest: (resolved) =>
+            Effect.sync(() => {
+              checked++
+              expect(resolved.generation).toBeDefined()
+              throw new Error("Logical request refused")
+            }),
+          webSocket: {
+            execute: () =>
+              Effect.sync(() => {
+                dispatched++
+                throw new Error("Must not dispatch")
+              }),
+          },
+        }),
+      )
+      expect(result._tag).toBe("Failure")
+      expect(checked).toBe(1)
+      expect(dispatched).toBe(0)
+    }),
+)

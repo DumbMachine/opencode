@@ -41,7 +41,12 @@ import type { Vcs } from "@opencode/schema/vcs"
 import type { WebSearch } from "@opencode/schema/websearch"
 import type { Config } from "@opencode/schema/config"
 
-export type ServerEnrollProducerInput = { readonly version: 1; readonly challenge: string; readonly audience: string }
+export type ServerEnrollProducerInput = {
+  readonly version: 1
+  readonly challenge: string
+  readonly audience: string
+  readonly contracts?: ReadonlyArray<"human-plaintext-identity-v1" | "model-plaintext-projection-v1"> | undefined
+}
 export type ServerEnrollProducerOutput = ExecutionProducer.Enrollment
 export type ServerEnrollProducerOperation<E = never> = (
   input: ServerEnrollProducerInput,

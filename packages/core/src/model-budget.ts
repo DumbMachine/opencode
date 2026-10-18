@@ -116,6 +116,45 @@ export const inputEstimate = (request: LLMRequest, bound = inputBound(request)) 
 }
 
 export const make = (client: LLMClientShape, endpoint: string, token: string, kv: KV.Interface, outputLimit = 8192) => {
+  const outputBounds = (request: LLMRequest) => {
+    const acceptsOutputCap = request.model.compatibility?.supportsMaxOutputTokens !== false
+    if (
+      request.model.outputLimit !== undefined &&
+      (!Number.isSafeInteger(request.model.outputLimit) || request.model.outputLimit < 1)
+    )
+      throw failure("Model has an invalid output limit for billing")
+    const outputEstimate = Math.min(
+      outputLimit,
+      request.generation?.maxTokens ?? outputLimit,
+      request.model.outputLimit ?? outputLimit,
+    )
+    const maxTokens = acceptsOutputCap ? outputEstimate : request.model.outputLimit
+    if (maxTokens === undefined || !Number.isSafeInteger(maxTokens) || maxTokens < 1)
+      throw failure("Model has no enforceable output limit for billing")
+    if (!Number.isSafeInteger(outputEstimate) || outputEstimate < 1)
+      throw failure("Model has an invalid output estimate for billing")
+    return { acceptsOutputCap, outputEstimate, maxTokens }
+  }
+  const prepareRequest = (request: LLMRequest) =>
+    Effect.gen(function* () {
+      const session = request.http?.headers?.["x-opencode-session"]
+      const inputID = request.http?.headers?.["x-opencode-input"]
+      const shaped = client.prepareRequest ? yield* client.prepareRequest(request) : request
+      if (
+        shaped.http?.headers?.["x-opencode-session"] !== session ||
+        shaped.http?.headers?.["x-opencode-input"] !== inputID
+      )
+        return yield* failure("Model request billing identity changed during preparation")
+      return yield* Effect.try({
+        try: () => {
+          const { acceptsOutputCap, maxTokens } = outputBounds(shaped)
+          return acceptsOutputCap && shaped.generation?.maxTokens !== maxTokens
+            ? LLMRequest.update(shaped, { generation: GenerationOptions.make({ ...shaped.generation, maxTokens }) })
+            : shaped
+        },
+        catch: (error) => (error instanceof AIError ? error : failure("Model output cannot be bounded")),
+      })
+    })
   const replaying = Semaphore.makeUnsafe(1)
   let cursor: string | undefined
   const send = (path: string, body: unknown, tries = path === "/reserve" ? 1 : 3) =>
@@ -206,33 +245,27 @@ export const make = (client: LLMClientShape, endpoint: string, token: string, kv
       cursor = page.next
     }),
   )
-  const stream: LLMClientShape["stream"] = (request, options) =>
+  const stream: LLMClientShape["stream"] = (unprepared, options) =>
     Stream.unwrap(
       Effect.gen(function* () {
         // Capture both identities before replay or admission can await host responses.
-        const session = request.http?.headers?.["x-opencode-session"]
-        const inputID = request.http?.headers?.["x-opencode-input"]
+        const session = unprepared.http?.headers?.["x-opencode-session"]
+        const inputID = unprepared.http?.headers?.["x-opencode-input"]
         if (!session) return yield* failure("Model request has no billing session")
+        const request = yield* prepareRequest(unprepared)
+        if (
+          request.http?.headers?.["x-opencode-session"] !== session ||
+          request.http?.headers?.["x-opencode-input"] !== inputID
+        )
+          return yield* failure("Model request billing identity changed during preparation")
         if (request.tools.some((tool) => "native" in tool && tool.native !== undefined))
           return yield* failure("Provider-hosted tools require a separately priced budget")
         if (request.http?.body || request.model.defaults?.http?.body || request.model.route.defaults.http?.body)
           return yield* failure("Raw model body overrides are unavailable with enforced budgets")
-        const acceptsOutputCap = request.model.compatibility?.supportsMaxOutputTokens !== false
-        if (
-          request.model.outputLimit !== undefined &&
-          (!Number.isSafeInteger(request.model.outputLimit) || request.model.outputLimit < 1)
-        )
-          return yield* failure("Model has an invalid output limit for billing")
-        const outputEstimate = Math.min(
-          outputLimit,
-          request.generation?.maxTokens ?? outputLimit,
-          request.model.outputLimit ?? outputLimit,
-        )
-        const maxTokens = acceptsOutputCap ? outputEstimate : request.model.outputLimit
-        if (maxTokens === undefined || !Number.isSafeInteger(maxTokens) || maxTokens < 1)
-          return yield* failure("Model has no enforceable output limit for billing")
-        if (!Number.isSafeInteger(outputEstimate) || outputEstimate < 1)
-          return yield* failure("Model has an invalid output estimate for billing")
+        const { outputEstimate, maxTokens } = yield* Effect.try({
+          try: () => outputBounds(request),
+          catch: (error) => (error instanceof AIError ? error : failure("Model output cannot be bounded")),
+        })
         const input = yield* Effect.try({
           try: () => inputBound(request),
           catch: () => failure("Model input cannot be bounded"),
@@ -278,11 +311,9 @@ export const make = (client: LLMClientShape, endpoint: string, token: string, kv
             }),
           ),
         )
-        // An endpoint that rejects the cap remains bounded by its model window.
-        // Its smaller admission estimate is never sent as a provider hard cap.
-        const bounded = acceptsOutputCap
-          ? LLMRequest.update(request, { generation: GenerationOptions.make({ ...request.generation, maxTokens }) })
-          : request
+        // Idempotent with the preflight shaping operation. A prepared request
+        // reaches the provider with the same logical generation options.
+        const bounded = request
         let completed = false
         let observed = false
         const complete = (usage: (typeof completion.Type)["usage"]) =>
@@ -377,6 +408,7 @@ export const make = (client: LLMClientShape, endpoint: string, token: string, kv
       }),
     )
   return {
+    prepareRequest,
     stream,
     generate,
     compact,

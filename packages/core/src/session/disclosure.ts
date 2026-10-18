@@ -24,13 +24,32 @@ export const digest = (value: unknown): string => {
   return Hash.sha256(JSON.stringify(canonical(value)))
 }
 
-// Called after the logical request is shaped and before any provider I/O.
-// Configuration is captured with one selected input; neither plugins nor tools
-// receive it. This proof is evidence of preflight, never a publication permit.
-export const prepare = (
-  service: ExecutionDisclosure.Service,
-  request: Omit<ExecutionDisclosure.ContextRequest, "version" | "attempt" | "componentsDigest">,
-) =>
+type ContextInput = Omit<ExecutionDisclosure.ContextRequest, "version" | "attempt" | "componentsDigest" | "composition">
+
+// Fix one owned attempt before any producer signs its identity. Composition
+// remains outside the components digest, so neither signature hashes itself.
+export const makeRequest = (request: ContextInput): ExecutionDisclosure.ContextRequest => {
+  try {
+    const owned = structuredClone(request)
+    return Schema.decodeUnknownSync(ExecutionDisclosure.ContextRequest)({
+      ...owned,
+      version: 1,
+      attempt: randomUUID(),
+      componentsDigest: digest(owned.components),
+    })
+  } catch {
+    throw new Error("Execution context authorization is unavailable")
+  }
+}
+
+// Convenience for unobserved/legacy context. Each execution keeps the original
+// behavior of generating its own attempt rather than reusing an Effect value.
+export const prepare = (service: ExecutionDisclosure.Service, request: ContextInput) =>
+  Effect.suspend(() => prepareRequest(service, makeRequest(request)))
+
+// Called after shaping and optional producer observation. Post this exact
+// owned attempt; do not generate another attempt after its signature.
+export const prepareRequest = (service: ExecutionDisclosure.Service, request: ExecutionDisclosure.ContextRequest) =>
   Effect.tryPromise({
     try: async (signal) => {
       const config = Schema.decodeUnknownSync(ExecutionDisclosure.Service)(structuredClone(service))
@@ -46,12 +65,8 @@ export const prepare = (
       )
         throw new Error()
       if (new Set(config.keys.map((key) => key.id)).size !== config.keys.length) throw new Error()
-      const input = Schema.decodeUnknownSync(ExecutionDisclosure.ContextRequest)({
-        ...structuredClone(request),
-        version: 1,
-        attempt: randomUUID(),
-        componentsDigest: digest(request.components),
-      })
+      const input = Schema.decodeUnknownSync(ExecutionDisclosure.ContextRequest)(structuredClone(request))
+      if (input.componentsDigest !== digest(input.components)) throw new Error()
       const body = JSON.stringify(input)
       if (Buffer.byteLength(body) > 512 * 1024) throw new Error()
       const response = await fetch(endpoint, {

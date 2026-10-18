@@ -1,19 +1,15 @@
 export * as ExecutionDisclosure from "./execution-disclosure.js"
 
 import { Schema } from "effect"
+import { ExecutionProducer } from "./execution-producer.js"
+import { VerificationKey } from "./execution-verification-key.js"
+export { VerificationKey } from "./execution-verification-key.js"
 import { optional } from "./schema.js"
 import { SessionID } from "./session-id.js"
 import { SessionMessageID } from "./session-message-id.js"
 
 const bounded = (maximum: number) => Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(maximum))
 const Digest = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/))
-
-export interface VerificationKey extends Schema.Schema.Type<typeof VerificationKey> {}
-export const VerificationKey = Schema.Struct({
-  id: bounded(128),
-  algorithm: Schema.Literal("Ed25519"),
-  publicKey: Schema.String.check(Schema.isPattern(/^[A-Za-z0-9_-]{43}$/)),
-}).annotate({ identifier: "ExecutionDisclosure.VerificationKey" })
 
 // Host-selected and process-local. Never include this in an admitted payload,
 // history, event, tool definition, plugin event or public response.
@@ -24,6 +20,9 @@ export const Service = Schema.Struct({
   token: bounded(16384),
   // Recognized requirement; admission/execution support is negotiated separately.
   publicationVersion: Schema.Literal(1).pipe(optional),
+  // The installed host callback explicitly accepts partial producer evidence.
+  // Absence preserves the original request shape for older installations.
+  compositionVersion: Schema.Literal(1).pipe(optional),
   issuer: bounded(512),
   audience: bounded(512),
   keys: Schema.Array(VerificationKey).check(Schema.isMinLength(1), Schema.isMaxLength(8)),
@@ -57,6 +56,8 @@ export const ContextRequest = Schema.Struct({
   contextDigest: Digest,
   componentsDigest: Digest,
   components: Schema.Array(Component).check(Schema.isMaxLength(2048)),
+  // Kept outside the component digest to avoid a circular signature binding.
+  composition: ExecutionProducer.SignedFact.pipe(optional),
 }).annotate({ identifier: "ExecutionDisclosure.ContextRequest" })
 
 // Signed inside ContextProof; never trusted from an unsigned response field.

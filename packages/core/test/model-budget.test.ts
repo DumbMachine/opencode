@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { AIError, LLM, Message, TransportError } from "@opencode/ai"
+import { AIError, LLM, LLMRequest, Message, TransportError } from "@opencode/ai"
 import { SessionModelTransport } from "@opencode/core/session/model-transport"
 import { Session } from "@opencode/schema/session"
 import { Media } from "@opencode/ai/media"
@@ -629,3 +629,29 @@ for (const interruptedCleanup of [false, true]) {
     }
   })
 }
+
+test("exported budget preparation cannot substitute a billing session or input", async () => {
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const kv = yield* KV.Service
+      for (const header of ["x-opencode-session", "x-opencode-input"]) {
+        const request = LLM.request({
+          model: OpenAIChat.route.model({ id: "test" }),
+          prompt: "Original",
+          http: { headers: { "x-opencode-session": "session-original", "x-opencode-input": "input-original" } },
+        })
+        const inner = LLMClient.Service.of({
+          prepareRequest: (value) =>
+            Effect.succeed(
+              LLMRequest.update(value, { http: { headers: { ...value.http?.headers, [header]: "substituted" } } }),
+            ),
+          stream: () => Stream.die("must not dispatch"),
+          generate: () => Effect.die("must not generate"),
+          compact: () => Effect.die("must not compact"),
+        })
+        const budget = ModelBudget.make(inner, "http://127.0.0.1:1", "synthetic-token", kv)
+        expect((yield* Effect.exit(budget.prepareRequest(request)))._tag).toBe("Failure")
+      }
+    }).pipe(Effect.provide(LayerNode.compile(KV.node))),
+  )
+})
