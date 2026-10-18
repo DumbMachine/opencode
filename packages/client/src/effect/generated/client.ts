@@ -79,6 +79,8 @@ import type {
   SessionInboxBeginCapabilityRenewalOutput,
   SessionInboxRenewCapabilityInput,
   SessionInboxRenewCapabilityOutput,
+  SessionInboxResumeCapabilityInput,
+  SessionInboxResumeCapabilityOutput,
   SessionInboxCancelInput,
   SessionInboxCancelOutput,
   SessionInboxUpdateInput,
@@ -661,6 +663,15 @@ const EndpointSessionInboxRenewCapability =
       }).pipe(Effect.mapError(mapClientError)),
     )
 
+const EndpointSessionInboxResumeCapability =
+  (raw: RawClient["server.session"]) => (input: SessionInboxResumeCapabilityInput) =>
+    preserveEffect<SessionInboxResumeCapabilityOutput>()(
+      raw["session.inbox.resumeCapability"]({
+        params: { sessionID: input["sessionID"], inboxID: input["inboxID"] },
+        payload: { claim: input["claim"], revision: input["revision"] },
+      }).pipe(Effect.mapError(mapClientError)),
+    )
+
 const EndpointSessionInboxCancel = (raw: RawClient["server.session"]) => (input: SessionInboxCancelInput) =>
   preserveEffect<SessionInboxCancelOutput>()(
     raw["session.inbox.cancel"]({ params: { sessionID: input["sessionID"], inboxID: input["inboxID"] } }).pipe(
@@ -846,6 +857,7 @@ const adaptGroupSession = (raw: RawClient["server.session"]) => ({
     list: EndpointSessionInboxList(raw),
     beginCapabilityRenewal: EndpointSessionInboxBeginCapabilityRenewal(raw),
     renewCapability: EndpointSessionInboxRenewCapability(raw),
+    resumeCapability: EndpointSessionInboxResumeCapability(raw),
     cancel: EndpointSessionInboxCancel(raw),
     update: EndpointSessionInboxUpdate(raw),
   },

@@ -169,6 +169,9 @@ export interface Interface {
       readonly claim?: string
     },
   ) => Effect.Effect<void, NotFoundError | InboxConflictError>
+  readonly resumeInboxCapability: (
+    input: InboxItemRef & { readonly claim: string; readonly revision: number },
+  ) => Effect.Effect<void, NotFoundError | InboxConflictError>
   readonly cancelInbox: (input: InboxItemRef) => Effect.Effect<void, NotFoundError | InboxConflictError>
   readonly steerInbox: (input: InboxItemRef) => Effect.Effect<void, NotFoundError | InboxConflictError>
   readonly queueInbox: (input: InboxItemRef) => Effect.Effect<void, NotFoundError | InboxConflictError>
@@ -433,6 +436,7 @@ const layer = Layer.effect(
       beginInboxCapabilityRenewal: (input) =>
         sessions.forSession(input.sessionID).beginInboxCapabilityRenewal(input.inboxID, input.claim),
       renewInboxCapability: (input) => sessions.forSession(input.sessionID).renewInboxCapability(input.inboxID, input),
+      resumeInboxCapability: (input) => sessions.forSession(input.sessionID).resumeInboxCapability(input.inboxID, input),
       cancelInbox: (input) => sessions.forSession(input.sessionID).cancelInbox(input.inboxID),
       steerInbox: (input) => sessions.forSession(input.sessionID).steerInbox(input.inboxID),
       queueInbox: (input) => sessions.forSession(input.sessionID).queueInbox(input.inboxID),

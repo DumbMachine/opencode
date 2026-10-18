@@ -410,6 +410,17 @@ export type SessionInboxRenewCapabilityOperation<E = never> = (
   input: SessionInboxRenewCapabilityInput,
 ) => Effect.Effect<SessionInboxRenewCapabilityOutput, E>
 
+export type SessionInboxResumeCapabilityInput = {
+  readonly sessionID: Session.ID
+  readonly inboxID: SessionMessage.ID
+  readonly claim: Mcp.RequestClaim
+  readonly revision: Mcp.RequestRevision
+}
+export type SessionInboxResumeCapabilityOutput = void
+export type SessionInboxResumeCapabilityOperation<E = never> = (
+  input: SessionInboxResumeCapabilityInput,
+) => Effect.Effect<SessionInboxResumeCapabilityOutput, E>
+
 export type SessionInboxCancelInput = { readonly sessionID: Session.ID; readonly inboxID: SessionMessage.ID }
 export type SessionInboxCancelOutput = void
 export type SessionInboxCancelOperation<E = never> = (
@@ -1490,6 +1501,7 @@ export interface SessionApi<E = never> {
     readonly list: SessionInboxListOperation<E>
     readonly beginCapabilityRenewal: SessionInboxBeginCapabilityRenewalOperation<E>
     readonly renewCapability: SessionInboxRenewCapabilityOperation<E>
+    readonly resumeCapability: SessionInboxResumeCapabilityOperation<E>
     readonly cancel: SessionInboxCancelOperation<E>
     readonly update: SessionInboxUpdateOperation<E>
   }

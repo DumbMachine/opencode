@@ -23,6 +23,7 @@ import { SessionProjector } from "@opencode/core/session/projector"
 import { SessionExecution } from "@opencode/core/session/execution"
 import { SessionExecutionCapability } from "@opencode/core/session/execution-capability"
 import { SessionInbox } from "@opencode/core/session/inbox"
+import { SessionLifecycle } from "@opencode/core/session/lifecycle"
 import { SessionInboxTable, SessionMessageTable, SessionTable } from "@opencode/core/session/sql"
 import { SessionStore } from "@opencode/core/session/store"
 import { LocationServiceMap } from "@opencode/core/location-service-map"
@@ -1233,6 +1234,72 @@ describe("Session.inbox", () => {
       expect(wakeCalls).toEqual([])
       expect(yield* eventCount(Bus.versionedType(SessionEvent.InboxDeliveryChanged.type, 1))).toBe(2)
       expect(yield* eventCount(Bus.versionedType(SessionEvent.InboxCancelled.type, 1))).toBe(1)
+    }),
+  )
+})
+
+describe("Repaired input resumption", () => {
+  it.effect("refuses a retired identity while its pending input and installation still exist", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* Session.Service
+      const { db } = yield* Database.Service
+      const input = yield* session.prompt({ sessionID, text: "Retired original", mcp: {}, mcpRevision: 1, resume: false })
+      const claim = "retiring-repair"
+      yield* session.beginInboxCapabilityRenewal({ sessionID, inboxID: input.id, claim })
+      yield* session.renewInboxCapability({ sessionID, inboxID: input.id, claim, mcp: {}, revision: 2 })
+      yield* SessionLifecycle.retire(db, sessionID)
+      wakeCalls.length = 0
+      const error = yield* session.resumeInboxCapability({ sessionID, inboxID: input.id, claim, revision: 2 }).pipe(Effect.flip)
+      expect(error._tag).toBe("Session.NotFoundError")
+      expect(wakeCalls).toEqual([])
+      expect(yield* admitted(input.id)).toBeDefined()
+    }),
+  )
+  it.effect("wakes only an exact committed pending installation without changing its input", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* Session.Service
+      const { db } = yield* Database.Service
+      const bus = yield* Bus.Service
+      for (const mode of ["mcp", "disclosure"]) {
+        const config = mode === "disclosure"
+          ? {
+              version: 1 as const,
+              endpoint: "https://host.example.test/context",
+              token: "synthetic-private-token",
+              issuer: "host",
+              audience: "native",
+              keys: [{ id: "key", algorithm: "Ed25519" as const, publicKey: "a".repeat(43) }],
+            }
+          : undefined
+        const input = yield* session.prompt({
+          sessionID, text: "Keep the exact original", delivery: "queue", mcp: {},
+          disclosure: config, mcpRevision: 1, resume: false,
+        })
+        const original = yield* admitted(input.id)
+        wakeCalls.length = 0
+        const resume = (claim: string, revision: number) =>
+          session.resumeInboxCapability({ sessionID, inboxID: input.id, claim, revision })
+        expect((yield* Effect.exit(resume("unclaimed", 1)))._tag).toBe("Failure")
+        const claim = "repair-" + mode
+        yield* session.beginInboxCapabilityRenewal({ sessionID, inboxID: input.id, claim })
+        expect((yield* Effect.exit(resume(claim, 1)))._tag).toBe("Failure")
+        yield* session.renewInboxCapability({ sessionID, inboxID: input.id, claim, mcp: {}, disclosure: config, revision: 2 })
+        expect(wakeCalls).toEqual([])
+        expect((yield* Effect.exit(resume("stale", 2)))._tag).toBe("Failure")
+        expect((yield* Effect.exit(resume(claim, 1)))._tag).toBe("Failure")
+        expect(wakeCalls).toEqual([])
+        yield* resume(claim, 2)
+        yield* resume(claim, 2) // Coalesced retries never append another input.
+        expect(wakeCalls).toEqual([sessionID, sessionID])
+        expect(yield* admitted(input.id)).toEqual(original)
+        wakeCalls.length = 0
+        if (mode === "mcp") yield* session.cancelInbox({ sessionID, inboxID: input.id })
+        if (mode === "disclosure") yield* SessionInbox.promote(db, bus, sessionID, "input")
+        expect((yield* Effect.exit(resume(claim, 2)))._tag).toBe("Failure")
+        expect(wakeCalls).toEqual([])
+      }
     }),
   )
 })

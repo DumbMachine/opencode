@@ -592,6 +592,19 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
         }),
       )
       .handle(
+        "session.inbox.resumeCapability",
+        Effect.fn(function* (ctx) {
+          return yield* pendingMutation(
+            session.resumeInboxCapability({
+              sessionID: ctx.params.sessionID,
+              inboxID: ctx.params.inboxID,
+              ...ctx.payload,
+            }),
+            "Pending input cannot resume its capability",
+          )
+        }),
+      )
+      .handle(
         "session.inbox.cancel",
         Effect.fn(function* (ctx) {
           yield* session.cancelInbox({ sessionID: ctx.params.sessionID, inboxID: ctx.params.inboxID }).pipe(

@@ -26,6 +26,7 @@ import { SessionEvent } from "./event.js"
 import { SessionExecutionCapability } from "./execution-capability.js"
 import { SessionExecution } from "./execution.js"
 import { SessionInbox } from "./inbox.js"
+import { SessionLifecycle } from "./lifecycle.js"
 import { SessionMessage } from "./message.js"
 import { SessionPrompt } from "./prompt.js"
 import { SessionRevert } from "./revert.js"
@@ -155,6 +156,34 @@ export const make = Effect.fn("Session.make")(function* () {
     yield* admission
       .renewCapability({ sessionID, id: inboxID, ...input })
       .pipe(Effect.catchTag("SessionInbox.LifecycleConflict", () => new InboxConflictError({ sessionID, inboxID })))
+  })
+  const resumeInboxCapability = Effect.fn("Session.resumeInboxCapability")(function* (
+    sessionID: SessionSchema.ID,
+    inboxID: SessionMessage.ID,
+    input: { readonly claim: string; readonly revision: number },
+  ) {
+    yield* get(sessionID)
+    yield* SessionInbox.serialized(
+      sessionID,
+      Effect.gen(function* () {
+        yield* SessionLifecycle.check(database.db, sessionID)
+        const pending = (yield* admission.list(sessionID)).find((item) => item.id === inboxID)
+        if (
+          pending?.type !== "user" ||
+          !(yield* SessionExecutionCapability.resumableRenewal(
+            sessionID,
+            inboxID,
+            input.claim,
+            input.revision,
+            pending.payload.capabilities ?? [],
+          ))
+        )
+          return yield* new InboxConflictError({ sessionID, inboxID })
+        // Only ring the native doorbell. Keep original bytes, execution choices,
+        // queue ordering and delivery mode; never admit replacement work.
+        yield* execution.wake(sessionID)
+      }),
+    )
   })
   const cancelInbox = Effect.fn("Session.cancelInbox")(
     (sessionID: SessionSchema.ID, inboxID: SessionMessage.ID) => mutatePending(sessionID, inboxID, admission.cancel),
@@ -421,6 +450,7 @@ export const make = Effect.fn("Session.make")(function* () {
     inbox,
     beginInboxCapabilityRenewal,
     renewInboxCapability,
+    resumeInboxCapability,
     prompt,
     synthetic,
     shell,
@@ -447,6 +477,7 @@ export const make = Effect.fn("Session.make")(function* () {
     const inbox = operations.inbox.bind(undefined, sessionID)
     const beginInboxCapabilityRenewal = operations.beginInboxCapabilityRenewal.bind(undefined, sessionID)
     const renewInboxCapability = operations.renewInboxCapability.bind(undefined, sessionID)
+    const resumeInboxCapability = operations.resumeInboxCapability.bind(undefined, sessionID)
     const prompt = operations.prompt.bind(undefined, sessionID)
     const synthetic = operations.synthetic.bind(undefined, sessionID)
     const shell = operations.shell.bind(undefined, sessionID)
@@ -476,6 +507,7 @@ export const make = Effect.fn("Session.make")(function* () {
       inbox,
       beginInboxCapabilityRenewal,
       renewInboxCapability,
+      resumeInboxCapability,
       prompt,
       synthetic,
       shell,

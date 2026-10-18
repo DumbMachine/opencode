@@ -5211,6 +5211,15 @@ export type SessionInboxRenewCapabilityInput = {
 
 export type SessionInboxRenewCapabilityOutput = void
 
+export type SessionInboxResumeCapabilityInput = {
+  readonly sessionID: { readonly sessionID: string; readonly inboxID: string }["sessionID"]
+  readonly inboxID: { readonly sessionID: string; readonly inboxID: string }["inboxID"]
+  readonly claim: { readonly claim: string; readonly revision: number }["claim"]
+  readonly revision: { readonly claim: string; readonly revision: number }["revision"]
+}
+
+export type SessionInboxResumeCapabilityOutput = void
+
 export type SessionInboxCancelInput = {
   readonly sessionID: { readonly sessionID: string; readonly inboxID: string }["sessionID"]
   readonly inboxID: { readonly sessionID: string; readonly inboxID: string }["inboxID"]

@@ -73,6 +73,8 @@ import type {
   SessionInboxBeginCapabilityRenewalOutput,
   SessionInboxRenewCapabilityInput,
   SessionInboxRenewCapabilityOutput,
+  SessionInboxResumeCapabilityInput,
+  SessionInboxResumeCapabilityOutput,
   SessionInboxCancelInput,
   SessionInboxCancelOutput,
   SessionInboxUpdateInput,
@@ -932,6 +934,18 @@ export function make(options: ClientOptions) {
                 revision: input["revision"],
                 claim: input["claim"],
               },
+              successStatus: 204,
+              declaredStatuses: [400, 401, 404, 409],
+              empty: true,
+            },
+            requestOptions,
+          ),
+        resumeCapability: (input: SessionInboxResumeCapabilityInput, requestOptions?: RequestOptions) =>
+          request<SessionInboxResumeCapabilityOutput>(
+            {
+              method: "POST",
+              path: `/api/session/${encodeURIComponent(input.sessionID)}/inbox/${encodeURIComponent(input.inboxID)}/capability/resume`,
+              body: { claim: input["claim"], revision: input["revision"] },
               successStatus: 204,
               declaredStatuses: [400, 401, 404, 409],
               empty: true,

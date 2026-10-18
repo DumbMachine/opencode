@@ -668,6 +668,25 @@ export const makeSessionGroup = <I extends HttpApiMiddleware.AnyId, S, FormI ext
       ),
     )
     .add(
+      HttpApiEndpoint.post(
+        "session.inbox.resumeCapability",
+        "/api/session/:sessionID/inbox/:inboxID/capability/resume",
+        {
+          params: { sessionID: Session.ID, inboxID: SessionMessage.ID },
+          payload: Schema.Struct({ claim: Mcp.RequestClaim, revision: Mcp.RequestRevision }),
+          success: HttpApiSchema.NoContent,
+          error: [ConflictError, SessionNotFoundError],
+        },
+      ).annotateMerge(
+        OpenApi.annotations({
+          identifier: "session.inbox.resumeCapability",
+          summary: "Resume a repaired pending input",
+          description:
+            "Wake the native queue only while this exact user input remains pending with the acknowledged claim, revision and complete required component set. Preserve original bytes, execution configuration, delivery mode and ordering. Never admits work or changes credentials; stale, canceled or delivered targets conflict without waking another input.",
+        }),
+      ),
+    )
+    .add(
       HttpApiEndpoint.delete("session.inbox.cancel", "/api/session/:sessionID/inbox/:inboxID", {
         params: { sessionID: Session.ID, inboxID: SessionMessage.ID },
         success: HttpApiSchema.NoContent,

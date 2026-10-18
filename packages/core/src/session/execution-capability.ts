@@ -118,6 +118,21 @@ export const commitRenewal = (sessionID: SessionSchema.ID, grant: Grant, claim: 
     return true
   })
 
+// Called under the inbox mutex before waking an exact repaired input. An old
+// claim cannot wake work after another installation, cancellation or restart.
+export const resumableRenewal = (
+  sessionID: SessionSchema.ID,
+  inputID: SessionMessage.ID,
+  claim: string,
+  revision: number,
+  required: readonly string[],
+) =>
+  Effect.gen(function* () {
+    const grant = grants.get(sessionID)?.get(inputID)
+    if (!grant || grant.revision !== revision || !(yield* committedRenewal(sessionID, grant, claim))) return false
+    return yield* ready(sessionID, inputID, required)
+  })
+
 export const ready = (sessionID: SessionSchema.ID, inputID: SessionMessage.ID, required: readonly string[] = []) =>
   Effect.sync(() => {
     const renewal = renewals.get(renewalKey(sessionID, inputID))

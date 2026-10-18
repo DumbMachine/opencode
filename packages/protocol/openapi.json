@@ -3735,6 +3735,100 @@
         }
       }
     },
+    "/api/session/{sessionID}/inbox/{inboxID}/capability/resume": {
+      "post": {
+        "tags": ["session"],
+        "operationId": "session.inbox.resumeCapability",
+        "parameters": [
+          {
+            "name": "sessionID",
+            "in": "path",
+            "schema": {
+              "type": "string",
+              "pattern": "^ses"
+            },
+            "required": true
+          },
+          {
+            "name": "inboxID",
+            "in": "path",
+            "schema": {
+              "type": "string",
+              "pattern": "^msg_"
+            },
+            "required": true
+          }
+        ],
+        "security": [],
+        "responses": {
+          "204": {
+            "description": "<No Content>"
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "SessionNotFoundError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionNotFoundErrorEncoded"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "ConflictError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConflictErrorEncoded"
+                }
+              }
+            }
+          }
+        },
+        "description": "Wake the native queue only while this exact user input remains pending with the acknowledged claim, revision and complete required component set. Preserve original bytes, execution configuration, delivery mode and ordering. Never admits work or changes credentials; stale, canceled or delivered targets conflict without waking another input.",
+        "summary": "Resume a repaired pending input",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "claim": {
+                    "$ref": "#/components/schemas/Mcp.RequestClaim"
+                  },
+                  "revision": {
+                    "$ref": "#/components/schemas/Mcp.RequestRevision"
+                  }
+                },
+                "required": ["claim", "revision"],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": true
+        }
+      }
+    },
     "/api/session/{sessionID}/inbox/{inboxID}": {
       "delete": {
         "tags": ["session"],

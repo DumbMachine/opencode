@@ -112,6 +112,7 @@ it.live("serves the HttpApi and enforces Basic auth like the Node server", () =>
     expect(response.headers.get("x-opencode-session-retirement")).toBe("1")
     expect(response.headers.get("x-opencode-inbox-capability-renewal")).toBe("2")
     expect(response.headers.get("x-opencode-context-preflight")).toBe("1")
+    expect(response.headers.get("x-opencode-input-capability-resume")).toBe("1")
     expect(response.headers.get("x-opencode-model-budget")).toBe(
       process.env.OPENCODE_MODEL_BUDGET_ENDPOINT && process.env.OPENCODE_MODEL_BUDGET_TOKEN ? "4" : null,
     )
@@ -557,6 +558,13 @@ it.live("renews only pending MCP inputs through the authenticated API without re
       ).toBe(401)
       expect((yield* request(path, "PUT", { mcp: {}, revision: Number.MAX_SAFE_INTEGER + 1 })).status).toBe(400)
       const claim = "claim_" + id
+      expect((yield* request(path + "/resume", "POST", { claim, revision: 2 })).status).toBe(409)
+      expect((yield* request(path + "/resume", "POST", { claim, revision: 0 })).status).toBe(400)
+      expect(
+        (yield* Effect.promise(() => handler(new Request(`http://opencode.local${path}/resume`, {
+          method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ claim, revision: 2 }),
+        })))).status,
+      ).toBe(401)
       const claimed = yield* request(path + "/claim", "POST", { claim })
       expect(claimed.status).toBe(200)
       const receipt = (yield* Effect.promise(() => claimed.json())) as { data: { claim: string; expiresAt: number } }
@@ -586,10 +594,12 @@ it.live("renews only pending MCP inputs through the authenticated API without re
       ).toBe(200)
       expect((yield* request(`${base}/inbox/${input}`, "DELETE")).status).toBe(204)
       expect((yield* request(path, "PUT", { mcp: {}, revision: 4 })).status).toBe(409)
+      expect((yield* request(path + "/resume", "POST", { claim, revision: 2 })).status).toBe(409)
       const inbox = yield* request(`${base}/inbox`, "GET")
       expect(yield* Effect.promise(() => inbox.json())).toEqual({ data: [] })
       expect((yield* request(`${base}/retire`, "POST")).status).toBe(204)
       expect((yield* request(path, "PUT", { mcp: {}, revision: 4 })).status).toBe(404)
+      expect((yield* request(path + "/resume", "POST", { claim, revision: 2 })).status).toBe(404)
     }
   }),
 )
