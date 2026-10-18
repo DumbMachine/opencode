@@ -254,8 +254,8 @@ it.effect("captures the exact selected installation without changing input selec
   }),
 )
 
-describe("Unsupported publication requirements", () => {
-  it.effect("never treats unknown or future publication markers as an executable grant", () =>
+describe("Exact publication requirements", () => {
+  it.effect("requires the exact declared publication component and rejects unknown or future markers", () =>
     Effect.gen(function* () {
       for (let index = 0; index < 2; index++) {
         const session = Session.ID.create(),
@@ -284,8 +284,14 @@ describe("Unsupported publication requirements", () => {
           audience: "context",
           keys: [{ id: "key", algorithm: "Ed25519" as const, publicKey: "a".repeat(43) }],
         }
-        expect(yield* SessionExecutionCapability.set(session, { ...grant, disclosure, revision: 2 })).toBe(false)
-        expect(yield* SessionExecutionCapability.get(session, input)).toEqual(grant)
+        expect(yield* SessionExecutionCapability.set(session, { ...grant, disclosure, revision: 2 })).toBe(true)
+        expect(yield* SessionExecutionCapability.get(session, input)).toEqual({ ...grant, disclosure, revision: 2 })
+        expect(yield* SessionExecutionCapability.ready(session, input, ["mcp", "disclosure", "publication-v1"])).toBe(
+          true,
+        )
+        expect(yield* SessionExecutionCapability.ready(session, input, ["mcp", "disclosure", "publication-v2"])).toBe(
+          false,
+        )
         expect(
           (yield* SessionRunnerLLM.executionGrant(
             session,

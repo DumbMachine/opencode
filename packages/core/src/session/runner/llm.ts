@@ -284,6 +284,11 @@ const layer = Layer.effect(
         disclosureRevision: grant.revision,
         disclosureCurrent: captured.current,
       }
+      if (preview.session.contextPolicy) {
+        if (grant.mcp !== undefined && Object.keys(grant.mcp).length !== 0)
+          return yield* Effect.die(new Error("Session context policy requires empty tools"))
+        return { ...preview, ...disclosure }
+      }
       if (grant.mcp === undefined) return { ...preview, ...disclosure }
       const executionMcp = yield* mcp.request(grant.mcp)
       const next = yield* context.select(sessionID, executionMcp, {
@@ -514,13 +519,7 @@ export const executionGrant = Effect.fn("SessionRunner.executionGrant")(function
   const latest = [...messages].toReversed().find((message) => message.type === "user")
   const required = latest?.capabilities ?? []
   if (required.length === 0) return undefined
-  if (
-    !grant ||
-    latest?.id !== grant.inputID ||
-    (required.includes("mcp") && grant.mcp === undefined) ||
-    (required.includes("disclosure") && grant.disclosure === undefined) ||
-    !SessionInputRequirements.serviceSupported(grant.disclosure)
-  )
+  if (!grant || latest?.id !== grant.inputID || !SessionInputRequirements.matches(required, grant))
     return yield* new ExecutionCapabilityUnavailableError({ sessionID, inputID: latest!.id })
   return grant
 })

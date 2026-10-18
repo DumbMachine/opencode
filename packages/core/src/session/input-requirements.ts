@@ -3,17 +3,19 @@ export * as SessionInputRequirements from "./input-requirements.js"
 import type { ExecutionDisclosure } from "@opencode/schema/execution-disclosure"
 import type { Mcp } from "@opencode/schema/mcp"
 
-// Recognizing a schema is not support for its execution contract. Publication
-// remains unavailable until every required producer and publisher is connected.
-// Unknown durable markers must park work, never silently become ready.
+// Markers describe required execution contracts, not completeness of context.
+// The original Session policy and actual publishers enforce publication-v1;
+// unknown or malformed durable requirements must park work.
 export const supported = (required: readonly string[] = []) =>
-  new Set(required).size === required.length && required.every((value) => value === "mcp" || value === "disclosure")
+  new Set(required).size === required.length &&
+  required.every((value) => value === "mcp" || value === "disclosure" || value === "publication-v1") &&
+  (!required.includes("publication-v1") || required.includes("disclosure"))
 
 export const auxiliaryBlocked = (required: readonly string[] = []) =>
   !supported(required) || required.includes("disclosure")
 
 export const serviceSupported = (service: ExecutionDisclosure.Service | undefined) =>
-  service?.publicationVersion === undefined
+  service?.publicationVersion === undefined || service.publicationVersion === 1
 
 export const matches = (
   required: readonly string[],
@@ -21,5 +23,6 @@ export const matches = (
 ) =>
   supported(required) &&
   serviceSupported(input.disclosure) &&
+  (input.disclosure?.publicationVersion === 1) === required.includes("publication-v1") &&
   (input.mcp !== undefined) === required.includes("mcp") &&
   (input.disclosure !== undefined) === required.includes("disclosure")

@@ -139,12 +139,9 @@ export const ready = (sessionID: SessionSchema.ID, inputID: SessionMessage.ID, r
     const renewal = renewals.get(renewalKey(sessionID, inputID))
     const grant = grants.get(sessionID)?.get(inputID)
     return (
-      SessionInputRequirements.supported(required) &&
-      SessionInputRequirements.serviceSupported(grant?.disclosure) &&
       (!renewal || renewal.committed !== undefined) &&
       grant !== undefined &&
-      (!required.includes("mcp") || grant.mcp !== undefined) &&
-      (!required.includes("disclosure") || grant.disclosure !== undefined)
+      SessionInputRequirements.matches(required, grant)
     )
   })
 
@@ -196,7 +193,7 @@ export const getWithSelection = (sessionID: SessionSchema.ID, inputID: SessionMe
 // A publication callback must retain this exact installation, not merely an
 // equal input ID/revision reinstalled after cancellation or process recovery.
 // This observer never changes the selected input or exposes credentials.
-export const captureSelection = (
+export const captureInstallation = (
   sessionID: SessionSchema.ID,
   inputID: SessionMessage.ID,
   revision: number,
@@ -214,10 +211,27 @@ export const captureSelection = (
       installed.disclosure !== undefined &&
       installed.revision === revision &&
       grants.get(sessionID)?.get(inputID) === installed &&
-      selected.get(sessionID) === inputID &&
       (!renewal || renewal.committed !== undefined)
     )
   }
+}
+
+// Input publication observes its own installation without changing active
+// execution/control ownership while the inbox is being admitted or delivered.
+export const getInstalled = (sessionID: SessionSchema.ID, inputID: SessionMessage.ID) =>
+  Effect.sync(() => {
+    const installed = grants.get(sessionID)?.get(inputID)
+    return installed === undefined ? undefined : structuredClone(installed)
+  })
+
+export const captureSelection = (
+  sessionID: SessionSchema.ID,
+  inputID: SessionMessage.ID,
+  revision: number,
+  service?: ExecutionDisclosure.Service,
+) => {
+  const installed = captureInstallation(sessionID, inputID, revision, service)
+  return () => installed() && selected.get(sessionID) === inputID
 }
 
 export const clearSelection = (sessionID: SessionSchema.ID) =>

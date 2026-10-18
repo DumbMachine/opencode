@@ -241,7 +241,10 @@ export const layer = Layer.effect(
       ) => Effect.Effect<{ readonly event: S; readonly invoked: number }>,
     ) {
       const service = input.disclosure === undefined ? undefined : structuredClone(input.disclosure)
-      if (input.session.contextPolicy && (kind !== "primary" || service?.publicationVersion !== 1))
+      if (
+        (input.session.contextPolicy && (kind !== "primary" || service?.publicationVersion !== 1)) ||
+        (!input.session.contextPolicy && service?.publicationVersion === 1)
+      )
         return yield* Effect.die(new Error("Execution publication authorization is unavailable"))
       if (!SessionInputRequirements.serviceSupported(service))
         return yield* Effect.die(new Error("Execution publication authorization is unavailable"))
@@ -464,7 +467,7 @@ export const layer = Layer.effect(
               yield* current
               return prepared
             })
-      if (input.session.contextPolicy && (!disclosure?.proof.complete || !disclosure.writer))
+      if (input.session.contextPolicy && !disclosure?.writer)
         return yield* Effect.die(new Error("Execution publication authorization is unavailable"))
       const transportNames = [
         "http.request",

@@ -52,7 +52,7 @@ export const make = (
             contextDigest: captured.contextDigest,
             componentsDigest: captured.componentsDigest,
             attempt: captured.attempt,
-            kind: "model-output",
+            kind: captured.kind === "input" ? "human-input" : "model-output",
             unitID: unit.unitID,
             unitDigest: unit.unitDigest,
           })

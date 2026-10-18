@@ -27,8 +27,9 @@ import { SessionExecutionCapability } from "./execution-capability.js"
 import { SessionSchema } from "./schema.js"
 import { SessionInputRequirements } from "./input-requirements.js"
 import { SessionLifecycle } from "./lifecycle.js"
+import { SessionPublicationWriter } from "./publication-writer.js"
 import { NotFoundError } from "./error.js"
-import { SessionInboxTable, SessionMessageTable } from "./sql.js"
+import { SessionInboxTable, SessionMessageTable, SessionTable } from "./sql.js"
 
 type DatabaseService = Database.Interface["db"]
 
@@ -74,6 +75,19 @@ export class LifecycleConflict extends Schema.TaggedError<LifecycleConflict>()("
 
 const supportedItem = (item: Item | Info) =>
   item.type !== "user" || SessionInputRequirements.supported(item.payload.capabilities)
+
+const requirePublicationPolicy = Effect.fnUntraced(function* (db: DatabaseService, entry: Info | (Item & PendingRef)) {
+  if (entry.type !== "user") return
+  const session = yield* db
+    .select({ policy: SessionTable.context_policy })
+    .from(SessionTable)
+    .where(eq(SessionTable.id, entry.sessionID))
+    .get()
+    .pipe(Effect.orDie)
+  if (!session) return yield* new NotFoundError({ sessionID: entry.sessionID })
+  if (!!session.policy !== !!entry.payload.capabilities?.includes("publication-v1"))
+    return yield* new LifecycleConflict({ id: entry.id })
+})
 
 function matches<Type extends Item["type"]>(
   stored: Info,
@@ -180,37 +194,49 @@ export const make = Effect.fn("SessionInbox.make")(function* () {
     readonly id: SessionMessage.ID
     readonly sessionID: SessionSchema.ID
     readonly item: Item & { readonly type: Type }
+    readonly publication?: SessionPublicationWriter.Writer
   }) {
     const existing = yield* reconcile({ ...request, type: request.item.type, delivery: request.item.delivery })
     if (existing !== undefined) {
       if (!supportedItem(existing)) return yield* new LifecycleConflict({ id: request.id })
+      yield* requirePublicationPolicy(db, existing)
       return existing
     }
-    if (!supportedItem(request.item)) return yield* new LifecycleConflict({ id: request.id })
-    const admitted = yield* bus
-      .publish(SessionEvent.InboxEnqueued, {
-        inboxID: request.id,
-        sessionID: request.sessionID,
-        item: request.item,
-      })
-      .pipe(
-        Effect.map((event) =>
-          Info.make({
-            id: request.id,
-            sessionID: request.sessionID,
-            time: { created: DateTime.makeUnsafe(event.created) },
-            ...request.item,
-          }),
-        ),
-        Effect.catchDefect((defect): Effect.Effect<Info, NotFoundError | LifecycleConflict> => {
-          if (defect instanceof NotFoundError) return Effect.fail(defect)
-          return defect instanceof LifecycleConflict
-            ? find(db, request.id).pipe(
-                Effect.flatMap((stored) => (stored === undefined ? Effect.fail(defect) : Effect.succeed(stored))),
-              )
-            : Effect.die(defect)
+    const item: Item = request.item
+    if (
+      !supportedItem(item) ||
+      (item.type === "user" &&
+        item.payload.capabilities?.includes("publication-v1") &&
+        request.publication === undefined)
+    )
+      return yield* new LifecycleConflict({ id: request.id })
+    yield* requirePublicationPolicy(db, { ...request.item, id: request.id, sessionID: request.sessionID })
+    const data = { inboxID: request.id, sessionID: request.sessionID, item: request.item }
+    const published: Effect.Effect<{ readonly created: number }> = request.publication
+      ? Effect.gen(function* () {
+          const unit = yield* request.publication!.prepare(SessionEvent.InboxEnqueued, data)
+          yield* unit.publish
+          return { created: unit.created }
+        })
+      : bus.publish(SessionEvent.InboxEnqueued, data)
+    const admitted = yield* published.pipe(
+      Effect.map((event) =>
+        Info.make({
+          id: request.id,
+          sessionID: request.sessionID,
+          time: { created: DateTime.makeUnsafe(event.created) },
+          ...request.item,
         }),
-      )
+      ),
+      Effect.catchDefect((defect): Effect.Effect<Info, NotFoundError | LifecycleConflict> => {
+        if (defect instanceof NotFoundError) return Effect.fail(defect)
+        return defect instanceof LifecycleConflict
+          ? find(db, request.id).pipe(
+              Effect.flatMap((stored) => (stored === undefined ? Effect.fail(defect) : Effect.succeed(stored))),
+            )
+          : Effect.die(defect)
+      }),
+    )
     if (!matches(admitted, { ...request, type: request.item.type }) || !supportedItem(admitted))
       return yield* new LifecycleConflict({ id: request.id })
     return admitted
@@ -256,6 +282,7 @@ export const make = Effect.fn("SessionInbox.make")(function* () {
             !SessionInputRequirements.supported(pending.payload.capabilities)
           )
             return yield* new LifecycleConflict({ id: input.id })
+          yield* requirePublicationPolicy(db, pending)
           const renewal = yield* SessionExecutionCapability.beginRenewal(input.sessionID, input.id, input.claim)
           if (!renewal) return yield* new LifecycleConflict({ id: input.id })
           return renewal
@@ -279,6 +306,17 @@ export const make = Effect.fn("SessionInbox.make")(function* () {
         Effect.gen(function* () {
           yield* SessionLifecycle.check(db, input.sessionID)
           if (!SessionInputRequirements.serviceSupported(input.disclosure))
+            return yield* new LifecycleConflict({ id: input.id })
+          const session = yield* db
+            .select({ policy: SessionTable.context_policy })
+            .from(SessionTable)
+            .where(eq(SessionTable.id, input.sessionID))
+            .get()
+            .pipe(Effect.orDie)
+          if (
+            !!session?.policy !== (input.disclosure?.publicationVersion === 1) ||
+            (session?.policy && input.mcp !== undefined && Object.keys(input.mcp).length !== 0)
+          )
             return yield* new LifecycleConflict({ id: input.id })
           const grant = { inputID: input.id, mcp: input.mcp, disclosure: input.disclosure, revision: input.revision }
           if (input.claim && (yield* SessionExecutionCapability.committedRenewal(input.sessionID, grant, input.claim)))
@@ -365,6 +403,9 @@ export const projectAdmitted = Effect.fn("SessionInbox.projectAdmitted")(functio
     readonly timeCreated: number
   },
 ) {
+  yield* requirePublicationPolicy(db, { ...request.item, id: request.id, sessionID: request.sessionID }).pipe(
+    Effect.orDie,
+  )
   const message = yield* db
     .select({ id: SessionMessageTable.id })
     .from(SessionMessageTable)
@@ -547,29 +588,43 @@ const publish = Effect.fn("SessionInbox.publish")(function* (
     (row) =>
       Effect.gen(function* () {
         const entry = fromRow(row)
+        yield* requirePublicationPolicy(db, entry).pipe(Effect.orDie)
         if (entry.type === "compaction") return yield* Effect.die(new LifecycleConflict({ id: entry.id }))
         // Deny conditional controls during delivery instead of exposing the
         // previous input while a new user message is committing. This also
         // fails closed if publication aborts before context is reloaded.
         if (entry.type === "user") yield* SessionExecutionCapability.clearSelection(sessionID)
-        return yield* bus
-          .publish(SessionEvent.InboxDelivered, {
-            sessionID,
-            inboxID: entry.id,
-          })
-          .pipe(
-            Effect.tap(() =>
-              entry.type === "user" ? SessionExecutionCapability.select(sessionID, entry.id) : Effect.void,
-            ),
-            Effect.catchDefect((defect) =>
-              defect instanceof LifecycleConflict
-                ? promotedFromMessage(db, sessionID, entry.id, entry.delivery).pipe(
-                    Effect.flatMap((stored) => (stored !== undefined ? Effect.void : Effect.die(defect))),
-                    Effect.orDie,
-                  )
-                : Effect.die(defect),
-            ),
-          )
+        const data = { sessionID, inboxID: entry.id }
+        const published: Effect.Effect<void> =
+          entry.type === "user" && entry.payload.capabilities?.includes("publication-v1")
+            ? Effect.gen(function* () {
+                const grant = yield* SessionExecutionCapability.getInstalled(sessionID, entry.id)
+                if (!grant?.disclosure || grant.revision === undefined || grant.disclosure.publicationVersion !== 1)
+                  return yield* Effect.die(new Error("Execution publication authorization is unavailable"))
+                const capture = yield* SessionPublicationWriter.captureInput({
+                  sessionID,
+                  inputID: entry.id,
+                  revision: grant.revision,
+                  service: grant.disclosure,
+                }).pipe(Effect.provideService(Bus.Service, bus), Effect.provideService(Database.Service, { db }))
+                const publication = yield* capture.prepareInput(entry.payload)
+                const unit = yield* publication.prepare(SessionEvent.InboxDelivered, data)
+                yield* unit.publish
+              })
+            : bus.publish(SessionEvent.InboxDelivered, data).pipe(Effect.asVoid)
+        return yield* published.pipe(
+          Effect.tap(() =>
+            entry.type === "user" ? SessionExecutionCapability.select(sessionID, entry.id) : Effect.void,
+          ),
+          Effect.catchDefect((defect) =>
+            defect instanceof LifecycleConflict
+              ? promotedFromMessage(db, sessionID, entry.id, entry.delivery).pipe(
+                  Effect.flatMap((stored) => (stored !== undefined ? Effect.void : Effect.die(defect))),
+                  Effect.orDie,
+                )
+              : Effect.die(defect),
+          ),
+        )
       }),
     { discard: true },
   )

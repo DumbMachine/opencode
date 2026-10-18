@@ -48,6 +48,8 @@ export const prepare = Effect.fn("SessionPrompt.prepare")(function* (request: {
     agents: request.input.agents,
     skills: request.input.skills,
   })
+  if (request.session.contextPolicy && (original.files?.length || original.agents?.length || original.skills?.length))
+    return yield* Effect.die(new Error("Session context policy does not support attachments"))
   const tracked = request.input.disclosure !== undefined
   const fs = yield* FSUtil.Service
   const instances = yield* Instance.Service
@@ -62,6 +64,8 @@ export const prepare = Effect.fn("SessionPrompt.prepare")(function* (request: {
       metadata: structuredClone(request.input.metadata),
       delivery: request.input.delivery ?? "steer",
     })
+    if (request.session.contextPolicy && observed.invoked !== 0)
+      return yield* Effect.die(new Error("Session context policy does not support prompt transformations"))
     const event = observed.event
     const input = event.prompt
     const files = input.files

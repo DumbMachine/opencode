@@ -46,6 +46,7 @@ import { SessionInbox } from "@opencode/core/session/inbox"
 import { SessionMessage } from "@opencode/core/session/message"
 import { SessionModelTransport } from "@opencode/core/session/model-transport"
 import { SessionProviderContext } from "@opencode/core/session/provider-context"
+import { SessionPublicationWriter } from "@opencode/core/session/publication-writer"
 import { Money } from "@opencode/schema/money"
 import { SessionProjector } from "@opencode/core/session/projector"
 import { SessionExecution } from "@opencode/core/session/execution"
@@ -1033,6 +1034,377 @@ const watchRename = Effect.fnUntraced(function* (sessionID: Session.ID) {
 })
 
 describe("SessionRunnerLLM", () => {
+  scenario("publishes two real policy turns on each original through the same inbox and transcript", function* (s) {
+    for (let instance = 0; instance < 2; instance++) {
+      const original = yield* s.session.create({
+        location: Location.Ref.make({ directory: AbsolutePath.make("/project") }),
+        contextPolicy: { version: 1 },
+      })
+      const contexts: ExecutionDisclosure.ContextRequest[] = []
+      const publications: ExecutionDisclosure.PublicationRequest[] = []
+      const host = publicationHost({
+        observeContext: (request) => {
+          contexts.push(request)
+        },
+        observe: (request) => {
+          publications.push(request)
+        },
+      })
+      try {
+        const ids: SessionMessage.ID[] = []
+        for (let turn = 0; turn < 2; turn++) {
+          const input = yield* s.session.prompt({
+            sessionID: original.id,
+            text: `Human ${instance}/${turn}`,
+            metadata: { original: instance, turn },
+            execution: {
+              model: { providerID: Provider.ID.make("fake"), id: Model.ID.make("fake-model") },
+              agent: Agent.ID.make("build"),
+              instructions: "Reply once.",
+            },
+            disclosure: { ...host.config, compositionVersion: 1, publicationVersion: 1 },
+            mcpRevision: 7,
+            resume: false,
+          })
+          ids.push(input.id)
+          const pendingRetry = yield* s.session.prompt({
+            sessionID: original.id,
+            id: input.id,
+            text: "Receipt-only retry",
+            resume: false,
+          })
+          expect(pendingRetry.payload.text).toBe(input.payload.text)
+          expect((yield* s.session.inbox(original.id)).map((item) => item.id)).toEqual([input.id])
+          yield* s.llm.push(TestLLM.text(`Answer ${instance}/${turn}`, `policy-${instance}-${turn}`))
+          yield* s.session.resume(original.id)
+          const deliveredRetry = yield* s.session.prompt({
+            sessionID: original.id,
+            id: input.id,
+            text: "Delivered receipt-only retry",
+            resume: false,
+          })
+          expect(deliveredRetry.payload.text).toBe(input.payload.text)
+          expect(yield* s.session.inbox(original.id)).toEqual([])
+        }
+        expect(contexts.map((context) => context.kind)).toEqual([
+          "input",
+          "input",
+          "primary",
+          "input",
+          "input",
+          "primary",
+        ])
+        expect(publications.map((unit) => unit.kind)).toEqual(
+          Array.from({ length: 2 }, () => [
+            "human-input" as const,
+            "human-input" as const,
+            ...Array<ExecutionDisclosure.PublicationRequest["kind"]>(6).fill("model-output"),
+          ]).flat(),
+        )
+        expect(new Set(publications.map((unit) => unit.unitID)).size).toBe(16)
+        for (const context of contexts) expect(context.sessionID).toBe(original.id)
+        const history = yield* s.session.context(original.id)
+        expect(history.map((message) => message.type)).toEqual(["user", "assistant", "user", "assistant"])
+        expect(history.filter((message) => message.type === "user").map((message) => message.id)).toEqual(ids)
+        expect(JSON.stringify(history)).toContain(`Answer ${instance}/1`)
+        expect(JSON.stringify(history)).not.toContain(host.config.token)
+        const rows = yield* s.db
+          .select()
+          .from(EventTable)
+          .where(eq(EventTable.aggregate_id, original.id))
+          .all()
+          .pipe(Effect.orDie)
+        expect(
+          rows.filter((row) => row.type === Bus.versionedType(SessionEvent.PublicationCommitted.type, 1)),
+        ).toHaveLength(16)
+      } finally {
+        host.server.stop(true)
+      }
+    }
+  })
+  scenario("rejects denied human admission without retaining input or its staged grant", function* (s) {
+    for (const substitution of ["kind", "input"]) {
+      const original = yield* s.session.create({
+        location: Location.Ref.make({ directory: AbsolutePath.make("/project") }),
+        contextPolicy: { version: 1 },
+      })
+      let deny = true
+      const host = publicationHost({
+        mutate: (proof) =>
+          !deny
+            ? proof
+            : substitution === "kind"
+              ? { ...proof, kind: "model-output" }
+              : { ...proof, inputID: SessionMessage.ID.create() },
+      })
+      try {
+        const id = SessionMessage.ID.create()
+        const request = {
+          sessionID: original.id,
+          id,
+          text: "Authorize this original human input",
+          disclosure: { ...host.config, compositionVersion: 1 as const, publicationVersion: 1 as const },
+          mcpRevision: 7,
+          resume: false,
+        }
+        expect(Exit.isFailure(yield* s.session.prompt(request).pipe(Effect.exit))).toBe(true)
+        expect(yield* s.session.inbox(original.id)).toEqual([])
+        expect(yield* s.session.context(original.id)).toEqual([])
+        expect(yield* SessionExecutionCapability.getInstalled(original.id, id)).toBeUndefined()
+        const rows = yield* s.db
+          .select()
+          .from(EventTable)
+          .where(eq(EventTable.aggregate_id, original.id))
+          .all()
+          .pipe(Effect.orDie)
+        expect(rows.filter((row) => row.type === Bus.versionedType(SessionEvent.InboxEnqueued.type, 1))).toEqual([])
+        expect(rows.filter((row) => row.type === Bus.versionedType(SessionEvent.PublicationCommitted.type, 1))).toEqual(
+          [],
+        )
+        deny = false
+        expect((yield* s.session.prompt(request)).id).toBe(id)
+        expect((yield* s.session.inbox(original.id)).map((item) => item.id)).toEqual([id])
+        yield* s.session.cancelInbox({ sessionID: original.id, inboxID: id })
+      } finally {
+        host.server.stop(true)
+      }
+    }
+  })
+  scenario("keeps denied human delivery pending and retries the same original once authorized", function* (s) {
+    const original = yield* s.session.create({
+      location: Location.Ref.make({ directory: AbsolutePath.make("/project") }),
+      contextPolicy: { version: 1 },
+    })
+    let humanCalls = 0
+    let deny = true
+    const host = publicationHost({
+      observe: (request) => {
+        if (request.kind === "human-input") humanCalls++
+      },
+      mutate: (proof) => (deny && humanCalls === 2 ? { ...proof, kind: "model-output" } : proof),
+    })
+    try {
+      const input = yield* s.session.prompt({
+        sessionID: original.id,
+        text: "Keep this pending on denial",
+        execution: {
+          model: { providerID: Provider.ID.make("fake"), id: Model.ID.make("fake-model") },
+          agent: Agent.ID.make("build"),
+          instructions: "Reply once.",
+        },
+        disclosure: { ...host.config, compositionVersion: 1, publicationVersion: 1 },
+        mcpRevision: 7,
+        resume: false,
+      })
+      expect(Exit.isFailure(yield* s.session.resume(original.id).pipe(Effect.exit))).toBe(true)
+      expect(s.requests).toHaveLength(0)
+      expect((yield* s.session.inbox(original.id)).map((item) => item.id)).toEqual([input.id])
+      expect(yield* s.session.context(original.id)).toEqual([])
+      const before = yield* s.db
+        .select()
+        .from(EventTable)
+        .where(eq(EventTable.aggregate_id, original.id))
+        .all()
+        .pipe(Effect.orDie)
+      expect(before.filter((row) => row.type === Bus.versionedType(SessionEvent.InboxDelivered.type, 1))).toEqual([])
+      expect(
+        before.filter((row) => row.type === Bus.versionedType(SessionEvent.PublicationCommitted.type, 1)),
+      ).toHaveLength(1)
+      deny = false
+      yield* s.llm.push(TestLLM.text("Authorized retry answer", "retry-after-denial"))
+      yield* s.session.resume(original.id)
+      expect(s.requests).toHaveLength(1)
+      expect(yield* s.session.inbox(original.id)).toEqual([])
+      const history = yield* s.session.context(original.id)
+      expect(history.filter((message) => message.type === "user").map((message) => message.id)).toEqual([input.id])
+      expect(JSON.stringify(history)).toContain("Authorized retry answer")
+      const after = yield* s.db
+        .select()
+        .from(EventTable)
+        .where(eq(EventTable.aggregate_id, original.id))
+        .all()
+        .pipe(Effect.orDie)
+      expect(after.filter((row) => row.type === Bus.versionedType(SessionEvent.InboxEnqueued.type, 1))).toHaveLength(1)
+      expect(after.filter((row) => row.type === Bus.versionedType(SessionEvent.InboxDelivered.type, 1))).toHaveLength(1)
+    } finally {
+      host.server.stop(true)
+    }
+  })
+  scenario("rejects policy-incompatible renewal before replacing the pending original grant", function* (s) {
+    const original = yield* s.session.create({
+      location: Location.Ref.make({ directory: AbsolutePath.make("/project") }),
+      contextPolicy: { version: 1 },
+    })
+    const host = publicationHost()
+    try {
+      const disclosure = { ...host.config, compositionVersion: 1 as const, publicationVersion: 1 as const }
+      const input = yield* s.session.prompt({
+        sessionID: original.id,
+        text: "Renew without broadening authority",
+        execution: {
+          model: { providerID: Provider.ID.make("fake"), id: Model.ID.make("fake-model") },
+          agent: Agent.ID.make("build"),
+          instructions: "Reply once.",
+        },
+        disclosure,
+        mcpRevision: 7,
+        resume: false,
+      })
+      const before = yield* SessionExecutionCapability.getInstalled(original.id, input.id)
+      const claim = "policy-renewal"
+      yield* s.session.beginInboxCapabilityRenewal({ sessionID: original.id, inboxID: input.id, claim })
+      for (const change of [
+        { disclosure, mcp: { remote: { type: "remote" as const, url: "https://unavailable.example.test" } } },
+        { disclosure: host.config },
+      ]) {
+        expect(
+          Exit.isFailure(
+            yield* s.session
+              .renewInboxCapability({
+                sessionID: original.id,
+                inboxID: input.id,
+                claim,
+                revision: 8,
+                ...change,
+              })
+              .pipe(Effect.exit),
+          ),
+        ).toBe(true)
+        // Beginning renewal deliberately suspends and removes the old grant.
+        expect(yield* SessionExecutionCapability.getInstalled(original.id, input.id)).toBeUndefined()
+        expect((yield* s.session.inbox(original.id)).map((item) => item.id)).toEqual([input.id])
+      }
+      yield* s.session.renewInboxCapability({
+        sessionID: original.id,
+        inboxID: input.id,
+        claim,
+        revision: 7,
+        disclosure,
+      })
+      expect(yield* SessionExecutionCapability.getInstalled(original.id, input.id)).toEqual(before)
+      yield* s.llm.push(TestLLM.text("Unchanged authority works", "renewal-answer"))
+      yield* s.session.resume(original.id)
+      expect(s.requests).toHaveLength(1)
+      expect(yield* s.session.inbox(original.id)).toEqual([])
+    } finally {
+      host.server.stop(true)
+    }
+  })
+  scenario("bounds private failures from human capture and deferred payload preparation", function* (s) {
+    const original = yield* s.session.create({
+      location: Location.Ref.make({ directory: AbsolutePath.make("/project") }),
+      contextPolicy: { version: 1 },
+    })
+    const host = publicationHost()
+    try {
+      const service = { ...host.config, compositionVersion: 1 as const, publicationVersion: 1 as const }
+      const input = yield* s.session.prompt({
+        sessionID: original.id,
+        text: "Safe original",
+        disclosure: service,
+        mcpRevision: 7,
+        resume: false,
+      })
+      const options = { sessionID: original.id, inputID: input.id, revision: 7, service }
+      const captured = yield* SessionPublicationWriter.captureInput(options)
+      const sensitive = "private-human-boundary-value"
+      const malformedService = {
+        ...service,
+        get token(): string {
+          throw new Error(sensitive)
+        },
+      }
+      const malformedPayload = {
+        text: "Safe",
+        metadata: {
+          get value(): string {
+            throw new Error(sensitive)
+          },
+        },
+      }
+      for (const result of [
+        yield* SessionPublicationWriter.captureInput({ ...options, service: malformedService }).pipe(
+          Effect.asVoid,
+          Effect.exit,
+        ),
+        yield* captured.prepareInput(malformedPayload).pipe(Effect.asVoid, Effect.exit),
+      ]) {
+        expect(Exit.isFailure(result)).toBe(true)
+        if (Exit.isFailure(result)) {
+          expect(Cause.pretty(result.cause)).toContain("Execution publication authorization is unavailable")
+          expect(Cause.pretty(result.cause)).not.toContain(sensitive)
+        }
+      }
+      expect((yield* s.session.inbox(original.id)).map((item) => item.id)).toEqual([input.id])
+      expect(yield* s.session.context(original.id)).toEqual([])
+      yield* s.session.cancelInbox({ sessionID: original.id, inboxID: input.id })
+    } finally {
+      host.server.stop(true)
+    }
+  })
+  scenario("invalidates a held human preflight on cancellation or renewal", function* (s) {
+    for (const control of ["cancel", "renew"]) {
+      const original = yield* s.session.create({
+        location: Location.Ref.make({ directory: AbsolutePath.make("/project") }),
+        contextPolicy: { version: 1 },
+      })
+      const arrived = yield* Deferred.make<void>()
+      const release = yield* Deferred.make<void>()
+      let hold = false
+      const host = publicationHost({
+        observeContext: async () => {
+          if (!hold) return
+          Effect.runSync(Deferred.succeed(arrived, undefined))
+          await Effect.runPromise(Deferred.await(release))
+        },
+      })
+      try {
+        const disclosure = { ...host.config, compositionVersion: 1 as const, publicationVersion: 1 as const }
+        const input = yield* s.session.prompt({
+          sessionID: original.id,
+          text: "Original held context",
+          disclosure,
+          mcpRevision: 7,
+          resume: false,
+        })
+        const captured = yield* SessionPublicationWriter.captureInput({
+          sessionID: original.id,
+          inputID: input.id,
+          revision: 7,
+          service: disclosure,
+        })
+        hold = true
+        const prepared = yield* captured.prepareInput(input.payload).pipe(Effect.exit, Effect.forkChild)
+        yield* Deferred.await(arrived)
+        if (control === "cancel") yield* s.session.cancelInbox({ sessionID: original.id, inboxID: input.id })
+        else
+          yield* s.session.beginInboxCapabilityRenewal({
+            sessionID: original.id,
+            inboxID: input.id,
+            claim: "held-context",
+          })
+        yield* Deferred.succeed(release, undefined)
+        expect(Exit.isFailure(yield* Fiber.join(prepared))).toBe(true)
+        expect(s.requests).toHaveLength(0)
+        expect(yield* s.session.context(original.id)).toEqual([])
+        expect((yield* s.session.inbox(original.id)).map((item) => item.id)).toEqual(
+          control === "cancel" ? [] : [input.id],
+        )
+        const rows = yield* s.db
+          .select()
+          .from(EventTable)
+          .where(eq(EventTable.aggregate_id, original.id))
+          .all()
+          .pipe(Effect.orDie)
+        expect(
+          rows.filter((row) => row.type === Bus.versionedType(SessionEvent.PublicationCommitted.type, 1)),
+        ).toHaveLength(1)
+        if (control === "renew") yield* s.session.cancelInbox({ sessionID: original.id, inboxID: input.id })
+      } finally {
+        host.server.stop(true)
+      }
+    }
+  })
   scenario("checks disclosure with the captured original input before the provider starts", function* (s) {
     let checked = 0
     const host = disclosureHost({
@@ -7415,9 +7787,23 @@ for (const capabilities of [["publication-v1"], ["unknown"], ["mcp", "mcp"]])
       yield* s.bus.publish(SessionEvent.InboxEnqueued, {
         sessionID: original,
         inboxID: marked,
-        item: { type: "user", payload: { text: "Unsupported retained dependency", capabilities }, delivery: "steer" },
+        item: { type: "user", payload: { text: "Unsupported retained dependency" }, delivery: "steer" },
       })
       yield* s.bus.publish(SessionEvent.InboxDelivered, { sessionID: original, inboxID: marked })
+      // Model a row retained by an older runtime. New admission cannot create it.
+      const retained = yield* s.db
+        .select()
+        .from(SessionMessageTable)
+        .where(eq(SessionMessageTable.id, marked))
+        .get()
+        .pipe(Effect.orDie)
+      if (!retained) return yield* Effect.die(new Error("Missing retained message"))
+      yield* s.db
+        .update(SessionMessageTable)
+        .set({ data: { ...retained.data, capabilities } })
+        .where(eq(SessionMessageTable.id, marked))
+        .run()
+        .pipe(Effect.orDie)
       yield* s.session.prompt({ sessionID: original, text: "New ordinary input", resume: false })
       yield* s.session.resume(original).pipe(Effect.exit)
       expect(s.requests).toHaveLength(0)

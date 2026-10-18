@@ -8,15 +8,16 @@ import { Event } from "@opencode/schema/event"
 import { AbsolutePath } from "@opencode/schema/schema"
 import { ExecutionDisclosure } from "@opencode/schema/execution-disclosure"
 import { SessionEvent } from "@opencode/schema/session-event"
+import { SessionInbox } from "@opencode/schema/session-inbox"
 import { SessionDisclosure } from "./disclosure.js"
 import { SessionPublication } from "./publication.js"
 import { SessionRunCoordinator } from "./run-coordinator.js"
 import { SessionExecutionCapability } from "./execution-capability.js"
 import { SessionLifecycle } from "./lifecycle.js"
-import { SessionTable } from "./sql.js"
+import { SessionInboxTable, SessionTable } from "./sql.js"
 import { SessionPublicationAdmission } from "./publication-admission.js"
 
-const definitions = new Map<string, Event.Definition>(
+const modelDefinitions = new Map<string, Event.Definition>(
   [
     SessionEvent.Step.Started,
     SessionEvent.Step.Streamed,
@@ -30,12 +31,16 @@ const definitions = new Map<string, Event.Definition>(
     SessionEvent.Reasoning.Ended,
   ].map((definition) => [definition.type, definition]),
 )
+const inputDefinitions = new Map<string, Event.Definition>(
+  [SessionEvent.InboxEnqueued, SessionEvent.InboxDelivered].map((definition) => [definition.type, definition]),
+)
 const unavailable = () => new Error("Execution publication authorization is unavailable")
 class AdmissionDenied extends Error {}
 
 export interface Unit {
   readonly id: Event.ID
   readonly digest: string
+  readonly created: number
   /** Reusing this effect retains the exact unit, witness, sequence and envelope. */
   readonly publish: Effect.Effect<{ readonly inserted: boolean }>
 }
@@ -96,6 +101,68 @@ export const capturePreflight = Effect.fnUntraced(
   ),
 )
 
+// Only the actual admission/promotion path consumes this capture. Input
+// publication does not select an active input or borrow another turn's owner.
+export const captureInput = Effect.fnUntraced(
+  function* (input: CaptureInput) {
+    const service = Schema.decodeUnknownSync(ExecutionDisclosure.Service)(structuredClone(input.service))
+    const sessionID = input.sessionID,
+      inputID = input.inputID,
+      revision = input.revision
+    const installed = SessionExecutionCapability.captureInstallation(sessionID, inputID, revision, service)
+    const bus = yield* Bus.Service
+    const database = yield* Database.Service
+    const grant = yield* SessionExecutionCapability.getInstalled(sessionID, inputID)
+    const session = yield* database.db
+      .select({ policy: SessionTable.context_policy })
+      .from(SessionTable)
+      .where(eq(SessionTable.id, sessionID))
+      .get()
+      .pipe(Effect.orDie)
+    if (!session?.policy || (grant?.mcp !== undefined && Object.keys(grant.mcp).length !== 0))
+      return yield* Effect.die(unavailable())
+    const owner = Option.getOrUndefined(yield* Effect.serviceOption(SessionRunCoordinator.Ownership))
+    const live = () => installed() && (owner === undefined || owner.live())
+    if (
+      service.publicationVersion !== 1 ||
+      !bus.persistent ||
+      !live() ||
+      !Number.isSafeInteger(revision) ||
+      revision <= 0
+    )
+      return yield* Effect.die(unavailable())
+    const prepareInput = Effect.fnUntraced(
+      function* (payload: SessionInbox.UserPayload) {
+        const owned = Schema.decodeUnknownSync(SessionInbox.UserPayload)(
+          JSON.parse(JSON.stringify(Schema.encodeUnknownSync(SessionInbox.UserPayload)(payload))),
+        )
+        if (owned.files?.length || owned.agents?.length || owned.skills?.length) return yield* Effect.die(unavailable())
+        const contextDigest = SessionDisclosure.digest({ kind: "native-human-input-v1", payload: owned })
+        const request = SessionDisclosure.makeRequest({
+          sessionID,
+          inputID,
+          kind: "input",
+          contextDigest,
+          components: [{ kind: "message", id: inputID, revision: SessionDisclosure.digest(owned) }],
+        })
+        if (!live()) return yield* Effect.die(unavailable())
+        const prepared = yield* SessionDisclosure.prepareRequest(service, request)
+        if (!live() || !prepared.publication) return yield* Effect.die(unavailable())
+        return yield* make({ prepared, state: { sessionID, inputID, revision, bus, database, live } })
+      },
+      Effect.catchCauseIf(
+        (cause) => !Cause.hasInterrupts(cause),
+        () => Effect.die(unavailable()),
+      ),
+    )
+    return Object.freeze({ prepareInput })
+  },
+  Effect.catchCauseIf(
+    (cause) => !Cause.hasInterrupts(cause),
+    () => Effect.die(unavailable()),
+  ),
+)
+
 // Strict writer capture preserves its original fail-before-I/O behavior.
 export const capture = Effect.fnUntraced(function* (input: CaptureInput) {
   const sessionID = input.sessionID,
@@ -137,13 +204,15 @@ const make = Effect.fnUntraced(function* (input: {
     !live() ||
     !authorizer ||
     !context.publication ||
-    context.kind !== "primary" ||
+    (context.kind !== "primary" && context.kind !== "input") ||
     context.sessionID !== input.state.sessionID ||
     context.inputID !== input.state.inputID ||
     context.publication.capabilityGeneration !== revision
   )
     return yield* Effect.die(unavailable())
   const descriptor = context.publication
+  const kind = context.kind === "input" ? "human-input" : "model-output"
+  const definitions = context.kind === "input" ? inputDefinitions : modelDefinitions
   let nextSequence = 0
 
   const prepare = Effect.fnUntraced(
@@ -165,6 +234,17 @@ const make = Effect.fnUntraced(function* (input: {
         unknown
       >
       if (encoded.sessionID !== context.sessionID) return yield* Effect.die(unavailable())
+      if (context.kind === "input") {
+        if (encoded.inboxID !== context.inputID) return yield* Effect.die(unavailable())
+        if (definition.type === SessionEvent.InboxEnqueued.type) {
+          const item = Schema.decodeUnknownSync(SessionInbox.Item)(encoded.item)
+          if (
+            item.type !== "user" ||
+            SessionDisclosure.digest({ kind: "native-human-input-v1", payload: item.payload }) !== context.contextDigest
+          )
+            return yield* Effect.die(unavailable())
+        }
+      }
       const metadata =
         options?.metadata === undefined
           ? undefined
@@ -200,7 +280,7 @@ const make = Effect.fnUntraced(function* (input: {
       }
       const digest = SessionDisclosure.digest({
         version: 1,
-        kind: "model-output",
+        kind,
         sessionID: context.sessionID,
         inputID: context.inputID,
         contextReference: context.contextReference,
@@ -253,6 +333,24 @@ const make = Effect.fnUntraced(function* (input: {
                 .get()
                 .pipe(Effect.orDie)
               if (!present) return yield* Effect.die(new AdmissionDenied())
+              if (context.kind === "input" && definition.type === SessionEvent.InboxDelivered.type) {
+                const pending = yield* database.db
+                  .select()
+                  .from(SessionInboxTable)
+                  .where(eq(SessionInboxTable.id, context.inputID))
+                  .get()
+                  .pipe(Effect.orDie)
+                if (
+                  !pending ||
+                  pending.session_id !== context.sessionID ||
+                  pending.type !== "user" ||
+                  SessionDisclosure.digest({
+                    kind: "native-human-input-v1",
+                    payload: Schema.decodeUnknownSync(SessionInbox.UserPayload)(pending.payload),
+                  }) !== context.contextDigest
+                )
+                  return yield* Effect.die(new AdmissionDenied())
+              }
               yield* check(permit)
             })
           const witnessOptions = { id: witnessID, created, location, commit: firstCommit }
@@ -314,7 +412,7 @@ const make = Effect.fnUntraced(function* (input: {
         const expected = {
           version: 1,
           purpose: "thread-publication",
-          kind: "model-output",
+          kind,
           issuer: context.issuer,
           audience: descriptor.audience,
           organizationID: descriptor.organizationID,
@@ -345,7 +443,7 @@ const make = Effect.fnUntraced(function* (input: {
           () => Effect.die(unavailable()),
         ),
       )
-      return Object.freeze({ id, digest, publish })
+      return Object.freeze({ id, digest, created, publish })
     },
     Effect.catchCauseIf(
       (cause) => !Cause.hasInterrupts(cause),
