@@ -90,6 +90,8 @@ export const ephemeral = Event.ephemeral
 
 export interface PublishOptions {
   readonly id?: Event.ID
+  /** Required only by publishAllOnce; ordinary publication allocates its own timestamp. */
+  readonly created?: number
   readonly metadata?: Record<string, unknown>
   readonly location?: Location.Ref
   readonly global?: boolean
@@ -101,6 +103,12 @@ export type PublishInput<D extends Event.DurableDefinition = Event.DurableDefini
   definition: D,
   data: Event.Data<D>,
   options?: PublishOptions,
+]
+
+export type PublishOnceInput<D extends Event.DurableDefinition = Event.DurableDefinition> = readonly [
+  definition: D,
+  data: Event.Data<D>,
+  options: PublishOptions & { readonly id: Event.ID; readonly created: number },
 ]
 
 export type PublishResult<I extends readonly PublishInput[]> = {
@@ -145,6 +153,16 @@ export interface Interface {
   readonly publishAll: <const I extends readonly [PublishInput, ...PublishInput[]]>(
     events: I,
   ) => Effect.Effect<PublishResult<I>>
+  /**
+   * Opt-in retry of an immutable ordered durable batch. Requires persisted events
+   * and fixed IDs/timestamps. An existing matching contiguous sequence is
+   * acknowledged without projections, hooks or notifications. This matches the
+   * durable wire data, not nonpersisted metadata/location or original batch
+   * membership; callers needing those identities bind them in durable data.
+   */
+  readonly publishAllOnce: <const I extends readonly [PublishOnceInput, ...PublishOnceInput[]]>(
+    events: I,
+  ) => Effect.Effect<{ readonly inserted: boolean; readonly events: PublishResult<I> }>
   readonly subscribe: Subscribe
   /**
    * Durable, ordered per-aggregate log read. Forked aggregates may reserve an
@@ -528,10 +546,48 @@ export function configured(options?: Options) {
           })
         }
 
-        function publishAll<const I extends readonly [PublishInput, ...PublishInput[]]>(events: I) {
+        function publishBatch<const I extends readonly [PublishInput, ...PublishInput[]]>(events: I, once = false) {
           return Effect.gen(function* () {
+            if (
+              once &&
+              (!persist ||
+                events.some(([, , options]) => options?.id === undefined || !Number.isSafeInteger(options.created)))
+            )
+              return yield* Effect.die(
+                new InvalidDurableEventError({
+                  type: events[0][0].type,
+                  message: "Once publication requires persistence and explicit IDs/timestamps",
+                }),
+              )
+            if (once && new Set(events.map(([, , options]) => options!.id)).size !== events.length)
+              return yield* Effect.die(
+                new InvalidDurableEventError({
+                  type: events[0][0].type,
+                  message: "Once publication requires unique event IDs",
+                }),
+              )
+            // Detach every batch member before any routing/database wait. Caller
+            // aliases must not change the transaction after a receipt is checked.
+            const owned = once
+              ? events.map(
+                  ([definition, data, options]) =>
+                    [
+                      definition,
+                      Schema.decodeUnknownSync(definition.data)(
+                        JSON.parse(JSON.stringify(Schema.encodeUnknownSync(definition.data)(data))),
+                      ),
+                      options === undefined
+                        ? undefined
+                        : {
+                            ...options,
+                            ...(options.metadata ? { metadata: structuredClone(options.metadata) } : {}),
+                            ...(options.location ? { location: structuredClone(options.location) } : {}),
+                          },
+                    ] as const,
+                )
+              : events
             const serviceLocation = Option.getOrUndefined(yield* Effect.serviceOption(Location.Service))
-            const payloads = yield* Effect.forEach(events, ([definition, data, options]) =>
+            const payloads = yield* Effect.forEach(owned, ([definition, data, options]) =>
               Effect.gen(function* () {
                 const aggregateID = (data as Record<string, unknown>)[definition.durable.aggregate]
                 if (typeof aggregateID !== "string") {
@@ -554,7 +610,7 @@ export function configured(options?: Options) {
                   commit: options?.commit,
                   event: {
                     id: options?.id ?? Event.ID.create(),
-                    created: yield* Clock.currentTimeMillis,
+                    created: once ? options!.created! : yield* Clock.currentTimeMillis,
                     ...(options?.metadata ? { metadata: options.metadata } : {}),
                     type: definition.type,
                     ...(location ? { location } : {}),
@@ -579,6 +635,50 @@ export function configured(options?: Options) {
                     .transaction(
                       () =>
                         Effect.gen(function* () {
+                          if (once) {
+                            const stored = yield* Effect.forEach(payloads, (item) =>
+                              db
+                                .select()
+                                .from(EventTable)
+                                .where(eq(EventTable.id, item.event.id))
+                                .get()
+                                .pipe(Effect.orDie),
+                            )
+                            if (stored.some((row) => row !== undefined)) {
+                              const first = stored[0]
+                              const matching =
+                                first !== undefined &&
+                                stored.every((row, index) => {
+                                  const item = payloads[index]!
+                                  return (
+                                    row !== undefined &&
+                                    row.aggregate_id === aggregateID &&
+                                    row.seq === first.seq + index &&
+                                    row.created === item.event.created &&
+                                    row.type === versionedType(item.definition.type, item.definition.durable.version) &&
+                                    isDeepStrictEqual(
+                                      row.data,
+                                      Schema.encodeUnknownSync(item.definition.data)(item.event.data),
+                                    )
+                                  )
+                                })
+                              if (!matching)
+                                return yield* Effect.die(
+                                  new InvalidDurableEventError({
+                                    type: payloads[0].definition.type,
+                                    message: "Once publication conflicts with stored durable events",
+                                  }),
+                                )
+                              return {
+                                inserted: false,
+                                events: payloads.map((item, index) => ({
+                                  ...item.event,
+                                  durable: envelope(aggregateID, first!.seq + index, item.definition.durable.version),
+                                })),
+                                route: () => {},
+                              }
+                            }
+                          }
                           const row = yield* db
                             .select({ seq: EventSequenceTable.seq })
                             .from(EventSequenceTable)
@@ -647,11 +747,16 @@ export function configured(options?: Options) {
                             .run()
                             .pipe(Effect.orDie)
                           if (persist) yield* db.insert(EventTable).values(rows).run().pipe(Effect.orDie)
-                          return { events: queued, route }
+                          return { inserted: true, events: queued, route }
                         }),
                       { behavior: "immediate" },
                     )
                     .pipe(Effect.orDie)
+                  if (!committed.inserted)
+                    return {
+                      inserted: false,
+                      events: committed.events as PublishResult<I>,
+                    }
                   committed.route()
                   yield* Effect.forEach(
                     pubsub.durable.get(aggregateID) ?? [],
@@ -661,11 +766,19 @@ export function configured(options?: Options) {
                     },
                   )
                   yield* Effect.forEach(committed.events, (event) => notify(event, true), { discard: true })
-                  return committed.events as PublishResult<I>
+                  return { inserted: true, events: committed.events as PublishResult<I> }
                 }),
               ),
             )
           })
+        }
+
+        function publishAll<const I extends readonly [PublishInput, ...PublishInput[]]>(events: I) {
+          return publishBatch(events).pipe(Effect.map((result) => result.events))
+        }
+
+        function publishAllOnce<const I extends readonly [PublishOnceInput, ...PublishOnceInput[]]>(events: I) {
+          return publishBatch(events, true)
         }
 
         function replay(
@@ -892,6 +1005,7 @@ export function configured(options?: Options) {
         return Service.of({
           publish,
           publishAll,
+          publishAllOnce,
           subscribe,
           log,
           listen,

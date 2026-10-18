@@ -55,6 +55,7 @@ const numericPgFields = new Set([
   "admitted_seq",
   "baseline_seq",
   "count",
+  "created",
   "position",
   "revision",
   "seq",

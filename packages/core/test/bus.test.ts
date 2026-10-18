@@ -3,6 +3,7 @@ import { Cause, Deferred, Effect, Exit, Fiber, Layer, Ref, Schema, Stream } from
 import { Bus } from "@opencode/core/bus"
 import { Event } from "@opencode/schema/event"
 import { Session } from "@opencode/schema/session"
+import { SessionMessage } from "@opencode/schema/session-message"
 import { SessionEvent } from "@opencode/schema/session-event"
 import { Database } from "@opencode/core/database/database"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
@@ -513,6 +514,244 @@ describe("Bus", () => {
           (row) => row.seq,
         ),
       ).toEqual([0, 1])
+    }),
+  )
+
+  it.effect("commits concurrent once batches once and acknowledges exact retries without observers", () =>
+    Effect.gen(function* () {
+      const bus = yield* Bus.Service
+      const { db } = yield* Database.Service
+      for (let n = 0; n < 2; n++) {
+        const id = Event.ID.create()
+        let projected = 0,
+          checked = 0,
+          notified = 0
+        const unlisten = yield* bus.listen((event) =>
+          Effect.sync(() => {
+            if ((event.data as { id?: string }).id === id) notified++
+          }),
+        )
+        yield* bus.project(SyncMessage, (event) =>
+          Effect.sync(() => {
+            if (event.data.id === id) projected++
+          }),
+        )
+        const events = [
+          [
+            SyncMessage,
+            { id, text: "witness" },
+            {
+              id: Event.ID.create(),
+              created: 101,
+              commit: () =>
+                Effect.sync(() => {
+                  checked++
+                }),
+            },
+          ],
+          [SyncMessage, { id, text: "content" }, { id: Event.ID.create(), created: 102 }],
+        ] as const
+        const results = yield* Effect.forEach(Array.from({ length: 8 }), () => bus.publishAllOnce(events), {
+          concurrency: "unbounded",
+        })
+        expect(results.filter((result) => result.inserted)).toHaveLength(1)
+        expect(projected).toBe(2)
+        expect(checked).toBe(1)
+        expect(notified).toBe(2)
+        expect(results.every((result) => result.events[1].durable.seq === Event.Seq.make(1))).toBe(true)
+        yield* bus.publish(SyncMessage, { id, text: "later" })
+        expect((yield* bus.publishAllOnce(events)).inserted).toBe(false)
+        expect(projected).toBe(3)
+        expect(checked).toBe(1)
+        expect(notified).toBe(3)
+        expect(yield* db.select().from(EventTable).where(eq(EventTable.aggregate_id, id)).all()).toHaveLength(3)
+        // Ordinary publishAll retains its existing duplicate failure behavior.
+        expect(Exit.isFailure(yield* bus.publishAll(events).pipe(Effect.exit))).toBe(true)
+        yield* unlisten
+      }
+    }),
+  )
+
+  it.effect("rejects changed, partial and reordered once batches before projections or notifications", () =>
+    Effect.gen(function* () {
+      const bus = yield* Bus.Service
+      const { db } = yield* Database.Service
+      const id = Event.ID.create()
+      const first = { id: Event.ID.create(), created: 501 },
+        second = { id: Event.ID.create(), created: 502 }
+      const original = [
+        [SyncMessage, { id, text: "one" }, first],
+        [SyncMessage, { id, text: "two" }, second],
+      ] as const
+      yield* bus.publishAllOnce(original)
+      let observed = 0
+      yield* bus.project(SyncMessage, () =>
+        Effect.sync(() => {
+          observed++
+        }),
+      )
+      yield* bus.listen(() =>
+        Effect.sync(() => {
+          observed++
+        }),
+      )
+      const candidates = [
+        [[SyncMessage, { id, text: "changed" }, first], original[1]],
+        [[SyncMessage, { id, text: "one" }, { ...first, created: 503 }], original[1]],
+        [original[0], [SyncMessage, { id, text: "new" }, { id: Event.ID.create(), created: 504 }]],
+        [original[1], original[0]],
+        [[SyncMessage, { id: "foreign-aggregate", text: "one" }, first]],
+      ] as const
+      for (const candidate of candidates)
+        expect(Exit.isFailure(yield* bus.publishAllOnce(candidate).pipe(Effect.exit))).toBe(true)
+      expect(observed).toBe(0)
+      expect(yield* db.select().from(EventTable).where(eq(EventTable.aggregate_id, id)).all()).toHaveLength(2)
+      // Contiguity is an acknowledgment of stored rows, not original batch membership.
+      expect((yield* bus.publishAllOnce([original[1]])).inserted).toBe(false)
+      expect(observed).toBe(0)
+    }),
+  )
+
+  it.effect("normalizes provider-state JSON before first projection and exact once retry", () =>
+    Effect.gen(function* () {
+      const bus = yield* Bus.Service
+      const data = {
+        sessionID: Session.ID.create(),
+        assistantMessageID: SessionMessage.ID.create(),
+        ordinal: 0,
+        text: "Original model text",
+        state: {
+          optional: undefined,
+          nested: { missing: undefined, value: "kept" },
+          values: [undefined, NaN],
+          timestamp: new Date("2026-10-18T00:00:00Z"),
+        },
+      }
+      const options = { id: Event.ID.create(), created: 601 }
+      const first = yield* bus.publishAllOnce([[SessionEvent.Text.Ended, data, options]])
+      expect(first.inserted).toBe(true)
+      expect(first.events[0].data.state).toEqual({
+        nested: { value: "kept" },
+        values: [null, null],
+        timestamp: "2026-10-18T00:00:00.000Z",
+      })
+      const retry = yield* bus.publishAllOnce([[SessionEvent.Text.Ended, data, options]])
+      expect(retry.inserted).toBe(false)
+      expect(retry.events[0].data).toEqual(first.events[0].data)
+    }),
+  )
+
+  it.effect("rolls back once witnesses and projections when the final local check refuses publication", () =>
+    Effect.gen(function* () {
+      const bus = yield* Bus.Service
+      const { db } = yield* Database.Service
+      const id = Event.ID.create()
+      yield* db.run("CREATE TABLE IF NOT EXISTS event_once_probe (value text NOT NULL)")
+      yield* db.run("DELETE FROM event_once_probe")
+      yield* bus.project(SyncMessage, () =>
+        db.run("INSERT INTO event_once_probe (value) VALUES ('projected')").pipe(Effect.orDie, Effect.asVoid),
+      )
+      let allowed = false,
+        notified = 0
+      yield* bus.listen(() =>
+        Effect.sync(() => {
+          notified++
+        }),
+      )
+      const events = [
+        [SyncMessage, { id, text: "witness" }, { id: Event.ID.create(), created: 701 }],
+        [
+          SyncMessage,
+          { id, text: "content" },
+          {
+            id: Event.ID.create(),
+            created: 702,
+            commit: () => Effect.suspend(() => (allowed ? Effect.void : Effect.die("publication stopped"))),
+          },
+        ],
+      ] as const
+      expect(Exit.isFailure(yield* bus.publishAllOnce(events).pipe(Effect.exit))).toBe(true)
+      expect(yield* db.all("SELECT value FROM event_once_probe")).toEqual([])
+      expect(yield* db.select().from(EventTable).where(eq(EventTable.aggregate_id, id)).all()).toEqual([])
+      expect(yield* db.select().from(EventSequenceTable).where(eq(EventSequenceTable.aggregate_id, id)).all()).toEqual(
+        [],
+      )
+      expect(notified).toBe(0)
+      allowed = true
+      expect((yield* bus.publishAllOnce(events)).inserted).toBe(true)
+      expect(yield* db.all("SELECT value FROM event_once_probe")).toHaveLength(2)
+      expect(notified).toBe(2)
+    }),
+  )
+
+  it.effect("owns every once batch member before a projector waits", () =>
+    Effect.gen(function* () {
+      const bus = yield* Bus.Service
+      const arrived = yield* Deferred.make<void>(),
+        release = yield* Deferred.make<void>()
+      const id = Event.ID.create(),
+        data = { id, text: "original" }
+      yield* bus.project(SyncMessage, (event) =>
+        event.data.text === "first"
+          ? Deferred.succeed(arrived, undefined).pipe(Effect.andThen(Deferred.await(release)))
+          : Effect.void,
+      )
+      const fiber = yield* bus
+        .publishAllOnce([
+          [SyncMessage, { id, text: "first" }, { id: Event.ID.create(), created: 801 }],
+          [SyncMessage, data, { id: Event.ID.create(), created: 802 }],
+        ])
+        .pipe(Effect.forkScoped)
+      yield* Deferred.await(arrived)
+      data.text = "substituted"
+      yield* Deferred.succeed(release, undefined)
+      expect((yield* Fiber.join(fiber)).events[1].data.text).toBe("original")
+    }),
+  )
+
+  it.effect("refuses invalid once IDs and timestamps without creating a sequence", () =>
+    Effect.gen(function* () {
+      const bus = yield* Bus.Service
+      const { db } = yield* Database.Service
+      const id = Event.ID.create(),
+        eventID = Event.ID.create()
+      for (const created of [NaN, Infinity, 1.5])
+        expect(
+          Exit.isFailure(
+            yield* bus.publishAllOnce([[SyncMessage, { id, text: "x" }, { id: eventID, created }]]).pipe(Effect.exit),
+          ),
+        ).toBe(true)
+      expect(
+        Exit.isFailure(
+          yield* bus
+            .publishAllOnce([
+              [SyncMessage, { id, text: "x" }, { id: eventID, created: 1 }],
+              [SyncMessage, { id, text: "y" }, { id: eventID, created: 2 }],
+            ])
+            .pipe(Effect.exit),
+        ),
+      ).toBe(true)
+      expect(yield* db.select().from(EventSequenceTable).where(eq(EventSequenceTable.aggregate_id, id)).all()).toEqual(
+        [],
+      )
+    }),
+  )
+
+  itWithoutPersistence.effect("refuses once publication when event persistence is disabled", () =>
+    Effect.gen(function* () {
+      const bus = yield* Bus.Service
+      const { db } = yield* Database.Service
+      const id = Event.ID.create()
+      expect(
+        Exit.isFailure(
+          yield* bus
+            .publishAllOnce([[SyncMessage, { id, text: "unsupported" }, { id: Event.ID.create(), created: 1 }]])
+            .pipe(Effect.exit),
+        ),
+      ).toBe(true)
+      expect(yield* db.select().from(EventSequenceTable).where(eq(EventSequenceTable.aggregate_id, id)).all()).toEqual(
+        [],
+      )
     }),
   )
 
