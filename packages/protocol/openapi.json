@@ -2226,6 +2226,9 @@
                       "$ref": "#/components/schemas/PromptInput.SkillAttachment"
                     }
                   },
+                  "disclosure": {
+                    "$ref": "#/components/schemas/ExecutionDisclosure.Service"
+                  },
                   "mcpRevision": {
                     "$ref": "#/components/schemas/Mcp.RequestRevision"
                   },
@@ -2370,6 +2373,9 @@
                     "items": {
                       "$ref": "#/components/schemas/PromptInput.SkillAttachment"
                     }
+                  },
+                  "disclosure": {
+                    "$ref": "#/components/schemas/ExecutionDisclosure.Service"
                   },
                   "mcpRevision": {
                     "$ref": "#/components/schemas/Mcp.RequestRevision"
@@ -3581,7 +3587,7 @@
             }
           }
         },
-        "description": "Suspend MCP readiness for an exact existing pending user input before host credential replacement. Never admits or wakes work. The bounded process-local claim must be committed before promotion; expiry or restart never restores the old grant.",
+        "description": "Suspend capability readiness for an exact existing pending user input before host credential replacement. Never admits or wakes work. The bounded process-local claim must be committed before promotion; expiry or restart never restores the old grant.",
         "summary": "Claim pending input capability renewal",
         "requestBody": {
           "content": {
@@ -3672,7 +3678,7 @@
             }
           }
         },
-        "description": "Commit process-local MCP credentials for an exact pending user input. Renewal requires its active claim. Identical committed-claim retries acknowledge success after delivery without changing credentials. Never admits or wakes work; rejects stale claims and revisions.",
+        "description": "Commit the exact original process-local MCP and disclosure components for a pending user input. Renewal requires its active claim. Identical committed-claim retries acknowledge success after delivery without changing credentials. Never admits or wakes work; rejects stale claims and revisions.",
         "summary": "Renew pending input capability",
         "requestBody": {
           "content": {
@@ -3681,7 +3687,24 @@
                 "type": "object",
                 "properties": {
                   "mcp": {
-                    "$ref": "#/components/schemas/Mcp.RequestServers"
+                    "anyOf": [
+                      {
+                        "$ref": "#/components/schemas/Mcp.RequestServers"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "disclosure": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/components/schemas/ExecutionDisclosure.Service"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "revision": {
                     "anyOf": [
@@ -3704,7 +3727,6 @@
                     ]
                   }
                 },
-                "required": ["mcp"],
                 "additionalProperties": false
               }
             }
@@ -14207,6 +14229,65 @@
             "$ref": "#/components/schemas/Connection.EnvInfo"
           }
         ]
+      },
+      "ExecutionDisclosure.Service": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "number",
+            "enum": [1]
+          },
+          "endpoint": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          "token": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 16384
+          },
+          "issuer": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "audience": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "keys": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ExecutionDisclosure.VerificationKey"
+            },
+            "minItems": 1,
+            "maxItems": 8
+          }
+        },
+        "required": ["version", "endpoint", "token", "issuer", "audience", "keys"],
+        "additionalProperties": false
+      },
+      "ExecutionDisclosure.VerificationKey": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "algorithm": {
+            "type": "string",
+            "enum": ["Ed25519"]
+          },
+          "publicKey": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{43}$"
+          }
+        },
+        "required": ["id", "algorithm", "publicKey"],
+        "additionalProperties": false
       },
       "FileDiff.Info": {
         "type": "object",
