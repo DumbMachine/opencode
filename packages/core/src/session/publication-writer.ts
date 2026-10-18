@@ -14,6 +14,7 @@ import { SessionRunCoordinator } from "./run-coordinator.js"
 import { SessionExecutionCapability } from "./execution-capability.js"
 import { SessionLifecycle } from "./lifecycle.js"
 import { SessionTable } from "./sql.js"
+import { SessionPublicationAdmission } from "./publication-admission.js"
 
 const definitions = new Map<string, Event.Definition>(
   [
@@ -44,33 +45,38 @@ interface Captured {
   readonly live: () => boolean
 }
 
-// Capture before model hooks/preflight. The service and installation cannot be
-// substituted while callback I/O waits. Only this closure can construct a writer.
-export const capture = Effect.fnUntraced(
-  function* (
-    input: Pick<Captured, "sessionID" | "inputID" | "revision"> & {
-      readonly service: ExecutionDisclosure.Service
-    },
-  ) {
+type CaptureInput = Pick<Captured, "sessionID" | "inputID" | "revision"> & {
+  readonly service: ExecutionDisclosure.Service
+}
+
+// Capture before hooks/preflight, including when an older host supplies no
+// publication descriptor. A descriptor can never be silently ignored: it still
+// requires the exact captured owner, installation and persistent local writer.
+export const capturePreflight = Effect.fnUntraced(
+  function* (input: CaptureInput) {
     const service = Schema.decodeUnknownSync(ExecutionDisclosure.Service)(structuredClone(input.service))
     const sessionID = input.sessionID,
       inputID = input.inputID,
       revision = input.revision
-    const bus = yield* Bus.Service
-    const database = yield* Database.Service
-    const owner = Option.getOrUndefined(yield* Effect.serviceOption(SessionRunCoordinator.Ownership))
-    if (!bus.persistent || !owner || !Number.isSafeInteger(revision) || revision <= 0)
-      return yield* Effect.die(unavailable())
     const installed = SessionExecutionCapability.captureSelection(sessionID, inputID, revision, service)
-    const state: Captured = { sessionID, inputID, revision, bus, database, live: () => owner.live() && installed() }
-    if (!state.live()) return yield* Effect.die(unavailable())
-    const prepareContext = Effect.fnUntraced(
-      function* (request: Pick<ExecutionDisclosure.ContextRequest, "contextDigest" | "components">) {
-        const owned = structuredClone(request)
-        if (!state.live()) return yield* Effect.die(unavailable())
-        const prepared = yield* SessionDisclosure.prepare(service, { ...owned, sessionID, inputID, kind: "primary" })
-        if (!state.live()) return yield* Effect.die(unavailable())
-        const writer = yield* make({ prepared, state })
+    const bus = Option.getOrUndefined(yield* Effect.serviceOption(Bus.Service))
+    const database = Option.getOrUndefined(yield* Effect.serviceOption(Database.Service))
+    const owner = Option.getOrUndefined(yield* Effect.serviceOption(SessionRunCoordinator.Ownership))
+    if (!owner || !Number.isSafeInteger(revision) || revision <= 0) return yield* Effect.die(unavailable())
+    const live = () => owner.live() && installed()
+    if (!live()) return yield* Effect.die(unavailable())
+    const prepareRequest = Effect.fnUntraced(
+      function* (request: ExecutionDisclosure.ContextRequest) {
+        const owned = Schema.decodeUnknownSync(ExecutionDisclosure.ContextRequest)(structuredClone(request))
+        if (!live() || owned.sessionID !== sessionID || owned.inputID !== inputID || owned.kind !== "primary")
+          return yield* Effect.die(unavailable())
+        const prepared = yield* SessionDisclosure.prepareRequest(service, owned)
+        if (!live()) return yield* Effect.die(unavailable())
+        if (prepared.publication && (!bus?.persistent || !database)) return yield* Effect.die(unavailable())
+        const writer =
+          prepared.publication && bus && database
+            ? yield* make({ prepared, state: { sessionID, inputID, revision, bus, database, live } })
+            : undefined
         return { proof: structuredClone(prepared.proof), signed: structuredClone(prepared.signed), writer }
       },
       Effect.catchCauseIf(
@@ -78,13 +84,38 @@ export const capture = Effect.fnUntraced(
         () => Effect.die(unavailable()),
       ),
     )
-    return Object.freeze({ prepareContext })
+    return Object.freeze({ prepareRequest, available: bus?.persistent === true && database !== undefined })
   },
   Effect.catchCauseIf(
     (cause) => !Cause.hasInterrupts(cause),
     () => Effect.die(unavailable()),
   ),
 )
+
+// Strict writer capture preserves its original fail-before-I/O behavior.
+export const capture = Effect.fnUntraced(function* (input: CaptureInput) {
+  const sessionID = input.sessionID,
+    inputID = input.inputID
+  const captured = yield* capturePreflight(input)
+  if (!captured.available) return yield* Effect.die(unavailable())
+  const prepareRequest = Effect.fnUntraced(function* (request: ExecutionDisclosure.ContextRequest) {
+    const prepared = yield* captured.prepareRequest(request)
+    if (!prepared.writer) return yield* Effect.die(unavailable())
+    return { ...prepared, writer: prepared.writer }
+  })
+  const prepareContext = (request: Pick<ExecutionDisclosure.ContextRequest, "contextDigest" | "components">) =>
+    Effect.suspend(() =>
+      prepareRequest(
+        SessionDisclosure.makeRequest({
+          ...request,
+          sessionID,
+          inputID,
+          kind: "primary",
+        }),
+      ),
+    )
+  return Object.freeze({ prepareContext, prepareRequest })
+})
 
 // Consumes host authority, never attests a producer. The actual generating
 // request must use this capture-owned preflight. Legacy inputs do not install it.
@@ -177,6 +208,7 @@ const make = Effect.fnUntraced(function* (input: {
         eventVersion: definition.durable?.version ?? 1,
         event: { ...envelope, data: encoded },
       })
+      const envelopeDigest = SessionDisclosure.digest({ ...envelope, data: encoded })
       let retained: SessionPublication.Permit | undefined
       const valid = (permit: SessionPublication.Permit) => live() && permit.valid()
       const check = (permit: SessionPublication.Permit) =>
@@ -221,20 +253,37 @@ const make = Effect.fnUntraced(function* (input: {
             })
           const witnessOptions = { id: witnessID, created, location, commit: firstCommit }
           const result = definition.durable
-            ? yield* bus.publishAllOnce([
-                [SessionEvent.PublicationCommitted, witness, witnessOptions],
-                [
-                  definition,
-                  owned,
-                  {
-                    id,
-                    created,
-                    location,
-                    ...(metadata === undefined ? {} : { metadata }),
-                    commit: () => check(permit),
-                  },
-                ],
-              ])
+            ? yield* bus
+                .publishAllOnce([
+                  [SessionEvent.PublicationCommitted, witness, witnessOptions],
+                  [
+                    definition,
+                    owned,
+                    {
+                      id,
+                      created,
+                      location,
+                      ...(metadata === undefined ? {} : { metadata }),
+                      commit: () => check(permit),
+                    },
+                  ],
+                ])
+                .pipe(
+                  Effect.provideService(SessionPublicationAdmission.Service, {
+                    accepts: (event) =>
+                      valid(permit) &&
+                      event.id === id &&
+                      event.type === definition.type &&
+                      SessionDisclosure.digest({
+                        id: event.id,
+                        created: event.created,
+                        type: event.type,
+                        data: Schema.encodeUnknownSync(definition.data)(event.data),
+                        location: event.location,
+                        ...(event.metadata === undefined ? {} : { metadata: event.metadata }),
+                      }) === envelopeDigest,
+                  }),
+                )
             : yield* bus.publishAllOnce([[SessionEvent.PublicationCommitted, witness, witnessOptions]])
           // The witness commits admission of this exact unit, not delivery.
           // Retirement ordered after that commit may let the admitted unit
@@ -299,5 +348,7 @@ const make = Effect.fnUntraced(function* (input: {
       () => Effect.die(unavailable()),
     ),
   )
-  return { prepare }
+  return Object.freeze({ prepare })
 })
+
+export type Writer = Effect.Success<ReturnType<typeof make>>

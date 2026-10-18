@@ -45,6 +45,9 @@ import { SessionDisclosure } from "./disclosure.js"
 import { SessionExecutionCapability } from "./execution-capability.js"
 import { SessionRunCoordinator } from "./run-coordinator.js"
 import { NativeProducer } from "../execution-producer.js"
+import { SessionPublicationWriter } from "./publication-writer.js"
+import { Bus } from "../bus.js"
+import { Database } from "../database/database.js"
 
 const IMAGE_BYTES_TRIGGER = 25 * 1024 * 1024 // 25 MiB
 const IMAGE_BYTES_TARGET = 15 * 1024 * 1024 // 15 MiB
@@ -58,6 +61,7 @@ export type ExecuteError = Tool.Error | Permission.DeclinedError | QuestionTool.
 export interface Prepared<Event = SessionRequest> {
   readonly disclosure?: Effect.Success<ReturnType<typeof SessionDisclosure.prepare>>
   readonly assertCurrent?: Effect.Effect<void>
+  readonly publication?: SessionPublicationWriter.Writer
   readonly event: Event
   readonly request: LLMRequest
   readonly options: StreamOptions
@@ -88,6 +92,7 @@ export interface Input {
 
 export const baseTranscript = (input: {
   readonly agent: Agent.Info
+  readonly contextPolicy?: SessionSchema.Info["contextPolicy"]
   readonly model: SessionRunnerModel.Resolved
   readonly tools: Tool.Snapshot
   readonly initial: string
@@ -98,14 +103,17 @@ export const baseTranscript = (input: {
   const providerMetadataKey = input.model.model.route.providerMetadataKey ?? input.model.model.provider
   return {
     providerMetadataKey,
-    system: [
-      input.agent.system
-        ? input.agent.system
-        : SessionSystemPrompt.make(input.tools.definitions.map((tool) => tool.name)),
-      input.initial,
-      input.ephemeral ?? "",
-      input.instructions ?? "",
-    ]
+    system: (input.contextPolicy
+      ? [input.instructions ?? ""]
+      : [
+          input.agent.system
+            ? input.agent.system
+            : SessionSystemPrompt.make(input.tools.definitions.map((tool) => tool.name)),
+          input.initial,
+          input.ephemeral ?? "",
+          input.instructions ?? "",
+        ]
+    )
       .filter((part) => part.length > 0)
       .map(SystemPart.make),
     messages: toLLMMessages(input.messages, input.model.ref, providerMetadataKey),
@@ -233,6 +241,8 @@ export const layer = Layer.effect(
       ) => Effect.Effect<{ readonly event: S; readonly invoked: number }>,
     ) {
       const service = input.disclosure === undefined ? undefined : structuredClone(input.disclosure)
+      if (input.session.contextPolicy && (kind !== "primary" || service?.publicationVersion !== 1))
+        return yield* Effect.die(new Error("Execution publication authorization is unavailable"))
       if (!SessionInputRequirements.serviceSupported(service))
         return yield* Effect.die(new Error("Execution publication authorization is unavailable"))
       const inputID = input.inputID
@@ -271,6 +281,15 @@ export const layer = Layer.effect(
         if (service !== undefined && (!owner!.live() || !earlier!() || !installed!()))
           throw new Error("Execution context authorization is unavailable")
       })
+      const publicationCapture =
+        service !== undefined && (service.compositionVersion === 1 || service.publicationVersion === 1)
+          ? yield* SessionPublicationWriter.capturePreflight({
+              sessionID,
+              inputID: inputID!,
+              revision: revision!,
+              service,
+            })
+          : undefined
       yield* current
       const scope = { sessionID, agent: input.agent, model: model.ref, kind }
       const tools = input.tools ?? {
@@ -430,20 +449,23 @@ export const layer = Layer.effect(
               const observed = producer
                 ? yield* producer.observe(request, shapedObservation.invoked + modelObservation.invoked, extra)
                 : undefined
-              const prepared = yield* SessionDisclosure.prepareRequest(
-                service!,
+              const exact =
                 observed ??
-                  SessionDisclosure.makeRequest({
-                    sessionID,
-                    inputID: inputID!,
-                    kind,
-                    contextDigest,
-                    components: [...(input.disclosureComponents ?? []), ...extra],
-                  }),
-              )
+                SessionDisclosure.makeRequest({
+                  sessionID,
+                  inputID: inputID!,
+                  kind,
+                  contextDigest,
+                  components: [...(input.disclosureComponents ?? []), ...extra],
+                })
+              const prepared = publicationCapture
+                ? { ...(yield* publicationCapture.prepareRequest(exact)), publication: undefined }
+                : { ...(yield* SessionDisclosure.prepareRequest(service!, exact)), writer: undefined }
               yield* current
               return prepared
             })
+      if (input.session.contextPolicy && (!disclosure?.proof.complete || !disclosure.writer))
+        return yield* Effect.die(new Error("Execution publication authorization is unavailable"))
       const transportNames = [
         "http.request",
         "http.response",
@@ -529,6 +551,7 @@ export const layer = Layer.effect(
       return {
         event: shaped,
         disclosure,
+        publication: disclosure?.writer,
         assertCurrent,
         request,
         options: {
@@ -576,5 +599,5 @@ export const layer = Layer.effect(
 export const node = makeLocationNode({
   service: Service,
   layer,
-  deps: [PluginHooks.node, SessionModelTransport.node, App.node, LayerNodePlatform.llmClient],
+  deps: [PluginHooks.node, SessionModelTransport.node, App.node, Bus.node, Database.node, LayerNodePlatform.llmClient],
 })

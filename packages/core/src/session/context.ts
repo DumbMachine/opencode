@@ -177,7 +177,7 @@ const layer = Layer.effect(
       const input =
         captured === undefined ? yield* SessionHistory.latestInput(db, sessionID).pipe(Effect.orDie) : captured.input
       const execution = input?.type === "user" ? input.execution : undefined
-      yield* mcpTools.flush
+      if (!session.contextPolicy) yield* mcpTools.flush
       const agent = captured?.selection?.agent ?? (yield* agents.select(execution?.agent ?? session.agent))
       if (!agent.info)
         return yield* new AgentNotFoundError({
@@ -185,55 +185,78 @@ const layer = Layer.effect(
           agent: execution?.agent ?? session.agent ?? agent.id,
         })
       // Session permissions narrow discovery the same way they narrow the tool snapshot.
-      const permissions = Permission.merge(agent.info.permissions, session.permissions ?? [])
-      const executionTools = executionMcp
-        ? yield* Effect.gen(function* () {
-            const discovered = yield* mcpTools.tools(executionMcp)
-            const event = yield* hooks.trigger("tool", "resolve", {
-              sessionID,
-              agent: agent.id,
-              tools: discovered.map((tool) => ({
-                name: tool.name,
-                namespace: tool.options?.namespace,
-                effectiveName: Tool.effectiveName(tool),
-                group: tool.options?.group,
-              })),
-              renames: [],
+      const permissions = session.contextPolicy
+        ? [{ action: "*", resource: "*", effect: "deny" as const }]
+        : Permission.merge(agent.info.permissions, session.permissions ?? [])
+      const executionTools =
+        executionMcp && !session.contextPolicy
+          ? yield* Effect.gen(function* () {
+              const discovered = yield* mcpTools.tools(executionMcp)
+              const event = yield* hooks.trigger("tool", "resolve", {
+                sessionID,
+                agent: agent.id,
+                tools: discovered.map((tool) => ({
+                  name: tool.name,
+                  namespace: tool.options?.namespace,
+                  effectiveName: Tool.effectiveName(tool),
+                  group: tool.options?.group,
+                })),
+                renames: [],
+              })
+              const renamed = new Map(event.renames.map((item) => [item.from, item.to]))
+              return discovered.map((tool) => {
+                const next = renamed.get(Tool.effectiveName(tool))
+                return next ? Tool.rename(tool, next) : tool
+              })
             })
-            const renamed = new Map(event.renames.map((item) => [item.from, item.to]))
-            return discovered.map((tool) => {
-              const next = renamed.get(Tool.effectiveName(tool))
-              return next ? Tool.rename(tool, next) : tool
-            })
-          })
-        : undefined
+          : undefined
       const loaded = yield* Effect.all(
         {
           tools: registry.snapshot(
             permissions,
             executionTools ? { excludeGroups: ["mcp"], tools: executionTools } : undefined,
           ),
-          shared: sharedInstructions(sessionID),
-          skills: skillInstructions.load(permissions),
-          mcp: executionMcp ? Effect.succeed(Instructions.empty) : mcpInstructions.load(permissions),
-          ephemeral: executionMcp ? mcpInstructions.ephemeral(executionMcp, permissions) : Effect.succeed(undefined),
+          shared: session.contextPolicy
+            ? Effect.succeed({
+                builtins: Instructions.empty,
+                discovery: Instructions.empty,
+                references: Instructions.empty,
+                entries: Instructions.empty,
+              })
+            : sharedInstructions(sessionID),
+          skills: session.contextPolicy ? Effect.succeed(Instructions.empty) : skillInstructions.load(permissions),
+          mcp:
+            executionMcp || session.contextPolicy
+              ? Effect.succeed(Instructions.empty)
+              : mcpInstructions.load(permissions),
+          ephemeral:
+            executionMcp && !session.contextPolicy
+              ? mcpInstructions.ephemeral(executionMcp, permissions)
+              : Effect.succeed(undefined),
         },
         { concurrency: "unbounded" },
       )
+      if (
+        session.contextPolicy &&
+        (loaded.tools.definitions.length !== 0 || loaded.tools.codeModeCatalog !== undefined)
+      )
+        return yield* Effect.die(new Error("Session context policy requires empty tools"))
       return {
         session,
         input,
         model: captured?.selection?.model ?? execution?.model ?? session.model,
         agent: { ...agent, info: agent.info },
-        instructions: Instructions.combine([
-          loaded.shared.builtins,
-          CodeModeInstructions.make(loaded.tools.codeModeCatalog),
-          loaded.shared.discovery,
-          loaded.skills,
-          loaded.shared.references,
-          loaded.mcp,
-          loaded.shared.entries,
-        ]),
+        instructions: session.contextPolicy
+          ? Instructions.empty
+          : Instructions.combine([
+              loaded.shared.builtins,
+              CodeModeInstructions.make(loaded.tools.codeModeCatalog),
+              loaded.shared.discovery,
+              loaded.skills,
+              loaded.shared.references,
+              loaded.mcp,
+              loaded.shared.entries,
+            ]),
         tools: loaded.tools,
         ephemeral: loaded.ephemeral,
       }

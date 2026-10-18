@@ -13,6 +13,8 @@ import { SessionError } from "@opencode/schema/session-error"
 import { Money } from "@opencode/schema/money"
 import { SessionUsage } from "../usage.js"
 import type { Tool } from "../../tool.js"
+import type { Event } from "@opencode/schema/event"
+import type { SessionPublicationWriter } from "../publication-writer.js"
 
 type Input = {
   readonly sessionID: SessionSchema.ID
@@ -22,6 +24,7 @@ type Input = {
   readonly snapshot?: Snapshot.ID
   readonly started: number
   readonly assistantMessageID: SessionMessage.ID
+  readonly publication?: SessionPublicationWriter.Writer
 }
 
 const asRecord = (value: unknown): Record<string, unknown> =>
@@ -75,6 +78,13 @@ const hostedContent = (result: ToolResultValue): NonEmptyContent => {
  * and consumers fold by id/ordinal rather than global position.
  */
 export const createLLMEventPublisher = (bus: Pick<Bus.Interface, "publish">, input: Input) => {
+  const publishContent = <D extends Event.Definition>(definition: D, data: Event.Data<D>) =>
+    input.publication
+      ? input.publication.prepare(definition, data).pipe(
+          Effect.flatMap((unit) => unit.publish),
+          Effect.asVoid,
+        )
+      : bus.publish(definition, data).pipe(Effect.asVoid)
   const deltaBatchInterval = 100
   type ToolState = {
     readonly name: string
@@ -207,7 +217,7 @@ export const createLLMEventPublisher = (bus: Pick<Bus.Interface, "publish">, inp
     "text",
     (_textID, value, ordinal, state) =>
       Effect.gen(function* () {
-        yield* bus.publish(SessionEvent.Text.Ended, {
+        yield* publishContent(SessionEvent.Text.Ended, {
           sessionID: input.sessionID,
           assistantMessageID: yield* currentAssistantMessageID(),
           ordinal,
@@ -217,7 +227,7 @@ export const createLLMEventPublisher = (bus: Pick<Bus.Interface, "publish">, inp
       }),
     (_textID, value, ordinal) =>
       Effect.gen(function* () {
-        yield* bus.publish(SessionEvent.Text.Delta, {
+        yield* publishContent(SessionEvent.Text.Delta, {
           sessionID: input.sessionID,
           assistantMessageID: yield* currentAssistantMessageID(),
           ordinal,
@@ -230,7 +240,7 @@ export const createLLMEventPublisher = (bus: Pick<Bus.Interface, "publish">, inp
     "reasoning",
     (_reasoningID, value, ordinal, state) =>
       Effect.gen(function* () {
-        yield* bus.publish(SessionEvent.Reasoning.Ended, {
+        yield* publishContent(SessionEvent.Reasoning.Ended, {
           sessionID: input.sessionID,
           assistantMessageID: yield* currentAssistantMessageID(),
           ordinal,
@@ -240,7 +250,7 @@ export const createLLMEventPublisher = (bus: Pick<Bus.Interface, "publish">, inp
       }),
     (_reasoningID, value, ordinal) =>
       Effect.gen(function* () {
-        yield* bus.publish(SessionEvent.Reasoning.Delta, {
+        yield* publishContent(SessionEvent.Reasoning.Delta, {
           sessionID: input.sessionID,
           assistantMessageID: yield* currentAssistantMessageID(),
           ordinal,
@@ -406,7 +416,7 @@ export const createLLMEventPublisher = (bus: Pick<Bus.Interface, "publish">, inp
         outputStarted = true
         const startedTextOrdinal = yield* text.start(event.id, providerState(event.providerMetadata))
         yield* publishPendingDeltas()
-        yield* bus.publish(SessionEvent.Text.Started, {
+        yield* publishContent(SessionEvent.Text.Started, {
           sessionID: input.sessionID,
           assistantMessageID: yield* startAssistant(),
           ordinal: startedTextOrdinal,
@@ -422,7 +432,7 @@ export const createLLMEventPublisher = (bus: Pick<Bus.Interface, "publish">, inp
         outputStarted = true
         const startedReasoningOrdinal = yield* reasoning.start(event.id, providerState(event.providerMetadata))
         yield* publishPendingDeltas()
-        yield* bus.publish(SessionEvent.Reasoning.Started, {
+        yield* publishContent(SessionEvent.Reasoning.Started, {
           sessionID: input.sessionID,
           assistantMessageID: yield* startAssistant(),
           ordinal: startedReasoningOrdinal,

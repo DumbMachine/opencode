@@ -107,6 +107,8 @@ export const layer = Layer.effect(
     ) {
       const session = yield* store.get(sessionID)
       if (!session) return
+      if (session.contextPolicy)
+        return yield* Effect.die(new Error("Session context policy does not support title generation"))
       const firstUser = yield* SessionHistory.firstUserMessage(db, session.id)
       if (!firstUser) return
       const messages = !isUntitled(session)

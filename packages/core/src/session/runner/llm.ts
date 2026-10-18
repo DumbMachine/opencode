@@ -210,7 +210,11 @@ const layer = Layer.effect(
                     continuing = true
                     entering = false
                     step = 1
-                    if (!selected.session.parentID && SessionTitle.isUntitled(selected.session)) {
+                    if (
+                      !selected.session.contextPolicy &&
+                      !selected.session.parentID &&
+                      SessionTitle.isUntitled(selected.session)
+                    ) {
                       const cause = yield* SessionHistory.latestInput(db, sessionID).pipe(Effect.orDie)
                       yield* FiberMap.run(
                         titles,
@@ -222,7 +226,12 @@ const layer = Layer.effect(
                     return undefined
                   }
                   const loaded = yield* loadWithGrant(sessionID, selected)
-                  if (promoted > 0 && !loaded.session.parentID && SessionTitle.isUntitled(loaded.session))
+                  if (
+                    promoted > 0 &&
+                    !loaded.session.contextPolicy &&
+                    !loaded.session.parentID &&
+                    SessionTitle.isUntitled(loaded.session)
+                  )
                     yield* FiberMap.run(
                       titles,
                       sessionID,
@@ -323,6 +332,7 @@ const layer = Layer.effect(
         const stepLimitReached = loaded.agent.info.steps !== undefined && step >= loaded.agent.info.steps
         const transcript = SessionModelRequest.baseTranscript({
           agent: loaded.agent.info,
+          contextPolicy: loaded.session.contextPolicy,
           model: loaded.model,
           tools: loaded.tools,
           initial: loaded.initial,
@@ -356,6 +366,7 @@ const layer = Layer.effect(
           agent: loaded.agent.id,
           model: loaded.model,
           prepared,
+          contextPolicy: loaded.session.contextPolicy,
           retry: (cause, error, proposed) =>
             retry.decide({
               cause,

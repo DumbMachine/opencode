@@ -1,10 +1,13 @@
+// Authored PostgreSQL bootstrap; the SQLite migration generator does not write this file.
 import { Effect } from "effect"
 import type { DatabaseMigration } from "./migration.js"
 
 const schema: Omit<DatabaseMigration.Migration, "id"> = {
   up(tx) {
     return Effect.gen(function* () {
-      yield* tx.run(`CREATE TABLE IF NOT EXISTS "session_lifecycle" ("id" text PRIMARY KEY, "retired_at" bigint);`)
+      yield* tx.run(
+        `CREATE TABLE IF NOT EXISTS "session_lifecycle" ("id" text PRIMARY KEY, "retired_at" bigint, "context_policy" text);`,
+      )
 
       yield* tx.run(`
         CREATE OR REPLACE FUNCTION json_extract(doc text, path text) RETURNS text IMMUTABLE LANGUAGE sql AS $$
@@ -137,6 +140,7 @@ const schema: Omit<DatabaseMigration.Migration, "id"> = {
           "summary_files" integer,
           "summary_diffs" text,
           "metadata" text,
+          "context_policy" text,
           "cost" real DEFAULT 0 NOT NULL,
           "tokens_input" integer DEFAULT 0 NOT NULL,
           "tokens_output" integer DEFAULT 0 NOT NULL,

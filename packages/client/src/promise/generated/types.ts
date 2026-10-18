@@ -47,6 +47,8 @@ export type TokenUsageInfo = {
 
 export type SessionMetadata = { [x: string]: JsonValue }
 
+export type SessionContextPolicy = { version: 1 }
+
 export type FileDiffInfo = {
   file: string
   patch: string
@@ -2025,6 +2027,7 @@ export type SessionInfo = {
   title?: string
   subpath?: string
   metadata?: SessionMetadata
+  contextPolicy?: SessionContextPolicy
   permissions?: PermissionRuleset
   revert?: SessionRevert
   location: LocationPublicRef
@@ -2049,6 +2052,7 @@ export type SessionCreated = {
     model?: ModelRef
     metadata?: SessionMetadata
     permissions?: PermissionRuleset
+    contextPolicy?: SessionContextPolicy
     version: string
   }
 }
@@ -2985,6 +2989,7 @@ export type SessionCreateInput = {
     readonly model?: { readonly id: string; readonly providerID: string; readonly variant?: string } | null
     readonly location?: { readonly directory: string } | null
     readonly metadata?: { readonly [x: string]: JsonValue } | null
+    readonly contextPolicy?: { readonly version: 1 }
     readonly permissions?: ReadonlyArray<{
       readonly action: string
       readonly resource: string
@@ -2998,6 +3003,7 @@ export type SessionCreateInput = {
     readonly model?: { readonly id: string; readonly providerID: string; readonly variant?: string } | null
     readonly location?: { readonly directory: string } | null
     readonly metadata?: { readonly [x: string]: JsonValue } | null
+    readonly contextPolicy?: { readonly version: 1 }
     readonly permissions?: ReadonlyArray<{
       readonly action: string
       readonly resource: string
@@ -3011,6 +3017,7 @@ export type SessionCreateInput = {
     readonly model?: { readonly id: string; readonly providerID: string; readonly variant?: string } | null
     readonly location?: { readonly directory: string } | null
     readonly metadata?: { readonly [x: string]: JsonValue } | null
+    readonly contextPolicy?: { readonly version: 1 }
     readonly permissions?: ReadonlyArray<{
       readonly action: string
       readonly resource: string
@@ -3024,6 +3031,7 @@ export type SessionCreateInput = {
     readonly model?: { readonly id: string; readonly providerID: string; readonly variant?: string } | null
     readonly location?: { readonly directory: string } | null
     readonly metadata?: { readonly [x: string]: JsonValue } | null
+    readonly contextPolicy?: { readonly version: 1 }
     readonly permissions?: ReadonlyArray<{
       readonly action: string
       readonly resource: string
@@ -3037,6 +3045,7 @@ export type SessionCreateInput = {
     readonly model?: { readonly id: string; readonly providerID: string; readonly variant?: string } | null
     readonly location?: { readonly directory: string } | null
     readonly metadata?: { readonly [x: string]: JsonValue } | null
+    readonly contextPolicy?: { readonly version: 1 }
     readonly permissions?: ReadonlyArray<{
       readonly action: string
       readonly resource: string
@@ -3050,12 +3059,27 @@ export type SessionCreateInput = {
     readonly model?: { readonly id: string; readonly providerID: string; readonly variant?: string } | null
     readonly location?: { readonly directory: string } | null
     readonly metadata?: { readonly [x: string]: JsonValue } | null
+    readonly contextPolicy?: { readonly version: 1 }
     readonly permissions?: ReadonlyArray<{
       readonly action: string
       readonly resource: string
       readonly effect: "allow" | "deny" | "ask"
     }> | null
   }["metadata"]
+  readonly contextPolicy?: {
+    readonly id?: string | null
+    readonly title?: string | null
+    readonly agent?: string | null
+    readonly model?: { readonly id: string; readonly providerID: string; readonly variant?: string } | null
+    readonly location?: { readonly directory: string } | null
+    readonly metadata?: { readonly [x: string]: JsonValue } | null
+    readonly contextPolicy?: { readonly version: 1 }
+    readonly permissions?: ReadonlyArray<{
+      readonly action: string
+      readonly resource: string
+      readonly effect: "allow" | "deny" | "ask"
+    }> | null
+  }["contextPolicy"]
   readonly permissions?: {
     readonly id?: string | null
     readonly title?: string | null
@@ -3063,6 +3087,7 @@ export type SessionCreateInput = {
     readonly model?: { readonly id: string; readonly providerID: string; readonly variant?: string } | null
     readonly location?: { readonly directory: string } | null
     readonly metadata?: { readonly [x: string]: JsonValue } | null
+    readonly contextPolicy?: { readonly version: 1 }
     readonly permissions?: ReadonlyArray<{
       readonly action: string
       readonly resource: string
@@ -3105,6 +3130,7 @@ export type SessionImportInput = {
       readonly title?: string
       readonly subpath?: string
       readonly metadata?: { readonly [x: string]: JsonValue }
+      readonly contextPolicy?: { readonly version: 1 }
       readonly permissions?: ReadonlyArray<{
         readonly action: string
         readonly resource: string
@@ -3430,6 +3456,7 @@ export type SessionImportInput = {
       readonly title?: string
       readonly subpath?: string
       readonly metadata?: { readonly [x: string]: JsonValue }
+      readonly contextPolicy?: { readonly version: 1 }
       readonly permissions?: ReadonlyArray<{
         readonly action: string
         readonly resource: string
@@ -3755,6 +3782,7 @@ export type SessionImportInput = {
       readonly title?: string
       readonly subpath?: string
       readonly metadata?: { readonly [x: string]: JsonValue }
+      readonly contextPolicy?: { readonly version: 1 }
       readonly permissions?: ReadonlyArray<{
         readonly action: string
         readonly resource: string

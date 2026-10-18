@@ -100,6 +100,8 @@ import { asc, desc, eq, sql } from "drizzle-orm"
 import { testEffect } from "./lib/effect"
 import { promptLocationNode } from "./fixture/prompt-location"
 import { disclosureHost } from "./fixture/disclosure-host"
+import { publicationHost } from "./fixture/publication-host"
+import type { ExecutionDisclosure } from "@opencode/schema/execution-disclosure"
 import { LocationServiceMap } from "@opencode/core/location-service-map"
 import { Expected } from "./lib/session-message"
 import { permissionLayer } from "./lib/permission"
@@ -1056,6 +1058,116 @@ describe("SessionRunnerLLM", () => {
       expect(s.requests).toHaveLength(1)
       expect(yield* s.inbox).toEqual([])
       expect(JSON.stringify(yield* s.context)).not.toContain(host.config.token)
+    } finally {
+      host.server.stop(true)
+    }
+  })
+  scenario("authorizes actual streamed text and reasoning from the original captured model attempt", function* (s) {
+    for (const [index, originalID] of [sessionID, otherSessionID].entries()) {
+      yield* insertSession(originalID)
+      const contexts: ExecutionDisclosure.ContextRequest[] = []
+      const publications: ExecutionDisclosure.PublicationRequest[] = []
+      const host = publicationHost({
+        observeContext: (request) => {
+          expect(s.requests).toHaveLength(index)
+          contexts.push(request)
+        },
+        observe: async (request) => {
+          expect(s.requests).toHaveLength(index + 1)
+          expect(contexts).toHaveLength(1)
+          expect(request).toMatchObject({
+            sessionID: originalID,
+            inputID: contexts[0]!.inputID,
+            attempt: contexts[0]!.attempt,
+            contextDigest: contexts[0]!.contextDigest,
+            componentsDigest: contexts[0]!.componentsDigest,
+          })
+          const rows = await Effect.runPromise(
+            s.db.select().from(EventTable).where(eq(EventTable.aggregate_id, originalID)).all().pipe(Effect.orDie),
+          )
+          // The host must decide before either the exact output or its witness commits.
+          expect(rows.some((row) => row.id === request.unitID || row.data.unitID === request.unitID)).toBe(false)
+          publications.push(request)
+        },
+      })
+      try {
+        const original = yield* s.session.prompt({
+          sessionID: originalID,
+          text: `Original input ${index}`,
+          metadata: { original: index },
+          disclosure: { ...host.config, compositionVersion: 1 },
+          mcpRevision: 7,
+          resume: false,
+        })
+        yield* s.llm.push(
+          TestLLM.complete(
+            { reason: { normalized: "stop" } },
+            LLMEvent.reasoningStart({ id: `reasoning-${index}` }),
+            LLMEvent.reasoningDelta({ id: `reasoning-${index}`, text: `Thought ${index}` }),
+            LLMEvent.reasoningEnd({ id: `reasoning-${index}` }),
+            LLMEvent.textStart({ id: `answer-${index}` }),
+            LLMEvent.textDelta({ id: `answer-${index}`, text: `Answer ${index}` }),
+            LLMEvent.textEnd({ id: `answer-${index}` }),
+          ),
+        )
+        yield* s.session.resume(originalID)
+        expect(contexts).toHaveLength(1)
+        expect(contexts[0]!.inputID).toBe(original.id)
+        expect(publications).toHaveLength(6)
+        expect(new Set(publications.map((unit) => unit.unitID)).size).toBe(6)
+        const rows = yield* s.db
+          .select()
+          .from(EventTable)
+          .where(eq(EventTable.aggregate_id, originalID))
+          .all()
+          .pipe(Effect.orDie)
+        const witnesses = rows.filter(
+          (row) => row.type === Bus.versionedType(SessionEvent.PublicationCommitted.type, 1),
+        )
+        expect(witnesses).toHaveLength(6)
+        expect(witnesses.map((row) => row.data.sequence)).toEqual([0, 1, 2, 3, 4, 5])
+        expect(witnesses.map((row) => row.data.unitID)).toEqual(publications.map((unit) => unit.unitID))
+        for (const witness of witnesses) expect(witness.data.inputID).toBe(original.id)
+        const context = yield* s.session.context(originalID)
+        expect(JSON.stringify(context)).toContain(`Answer ${index}`)
+        expect(JSON.stringify(context)).toContain(`Thought ${index}`)
+        expect(JSON.stringify(context)).not.toContain(host.config.token)
+      } finally {
+        host.server.stop(true)
+      }
+    }
+  })
+  scenario("blocks actual streamed content when its publication permit belongs to another input", function* (s) {
+    let calls = 0
+    const host = publicationHost({
+      observe: () => {
+        calls++
+      },
+      mutate: (proof) => ({ ...proof, inputID: SessionMessage.ID.make("msg_foreign_publication") }),
+    })
+    try {
+      yield* s.session.prompt({
+        sessionID,
+        text: "Input whose output must be authorized",
+        disclosure: { ...host.config, compositionVersion: 1 },
+        mcpRevision: 7,
+        resume: false,
+      })
+      yield* s.llm.push(TestLLM.text("Must remain invisible", "denied-publication"))
+      expect((yield* Effect.exit(s.resume))._tag).toBe("Failure")
+      expect(s.requests).toHaveLength(1)
+      expect(calls).toBeGreaterThan(0)
+      const rows = yield* s.db
+        .select()
+        .from(EventTable)
+        .where(eq(EventTable.aggregate_id, sessionID))
+        .all()
+        .pipe(Effect.orDie)
+      expect(rows.filter((row) => row.type === Bus.versionedType(SessionEvent.PublicationCommitted.type, 1))).toEqual(
+        [],
+      )
+      expect(rows.filter((row) => row.type === Bus.versionedType(SessionEvent.Text.Ended.type, 1))).toEqual([])
+      expect(JSON.stringify(yield* s.context)).not.toContain("Must remain invisible")
     } finally {
       host.server.stop(true)
     }

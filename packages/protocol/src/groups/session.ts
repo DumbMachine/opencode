@@ -225,6 +225,7 @@ export const makeSessionGroup = <I extends HttpApiMiddleware.AnyId, S, FormI ext
           model: Model.Ref.pipe(Schema.optional),
           location: Location.PublicRef.pipe(Schema.optional),
           metadata: Session.Metadata.pipe(Schema.optional),
+          contextPolicy: Session.Info.fields.contextPolicy,
           permissions: Permission.Ruleset.pipe(Schema.optional),
         }),
         success: Schema.Struct({ data: PublicSessionInfo }),

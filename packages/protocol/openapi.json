@@ -1126,6 +1126,9 @@
                       }
                     ]
                   },
+                  "contextPolicy": {
+                    "$ref": "#/components/schemas/Session.ContextPolicy"
+                  },
                   "permissions": {
                     "anyOf": [
                       {
@@ -17876,6 +17879,17 @@
         "required": ["_tag", "message"],
         "additionalProperties": false
       },
+      "Session.ContextPolicy": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "number",
+            "enum": [1]
+          }
+        },
+        "required": ["version"],
+        "additionalProperties": false
+      },
       "Session.ForkBoundary": {
         "anyOf": [
           {
@@ -18229,6 +18243,9 @@
           },
           "metadata": {
             "$ref": "#/components/schemas/Session.Metadata"
+          },
+          "contextPolicy": {
+            "$ref": "#/components/schemas/Session.ContextPolicy"
           },
           "permissions": {
             "$ref": "#/components/schemas/Permission.Ruleset"

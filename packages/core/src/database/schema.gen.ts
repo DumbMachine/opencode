@@ -158,7 +158,8 @@ const schema: Omit<DatabaseMigration.Migration, "id"> = {
       yield* tx.run(`
         CREATE TABLE \`session_lifecycle\` (
           \`id\` text PRIMARY KEY,
-          \`retired_at\` integer
+          \`retired_at\` integer,
+          \`context_policy\` text
         );
       `)
       yield* tx.run(`
@@ -204,6 +205,7 @@ const schema: Omit<DatabaseMigration.Migration, "id"> = {
           \`summary_files\` integer,
           \`summary_diffs\` text,
           \`metadata\` text,
+          \`context_policy\` text,
           \`cost\` real DEFAULT 0 NOT NULL,
           \`tokens_input\` integer DEFAULT 0 NOT NULL,
           \`tokens_output\` integer DEFAULT 0 NOT NULL,

@@ -31,7 +31,7 @@ import { SessionInbox } from "@opencode/core/session/inbox"
 import { SessionLifecycle } from "@opencode/core/session/lifecycle"
 import { InstructionEntry } from "@opencode/core/session/instruction-entry"
 import { SessionEvent } from "@opencode/core/session/event"
-import { SessionTable } from "@opencode/core/session/sql"
+import { SessionLifecycleTable, SessionTable } from "@opencode/core/session/sql"
 import { SessionStore } from "@opencode/core/session/store"
 import { SessionTransfer } from "@opencode/core/session/transfer"
 import { Workspace } from "@opencode/core/workspace"
@@ -106,6 +106,61 @@ function withTmp<A, E, R>(f: (directory: string) => Effect.Effect<A, E, R>) {
 }
 
 describe("Session.create", () => {
+  it.effect("fixes an opt-in context policy at original birth and rejects untracked writers", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const bus = yield* Bus.Service
+      const transfer = yield* SessionTransfer.Service
+      for (let index = 0; index < 2; index++) {
+        const original = yield* sessions.create({ location, contextPolicy: { version: 1 } })
+        expect(original.contextPolicy).toEqual({ version: 1 })
+        expect((yield* sessions.create({ id: original.id, location })).contextPolicy).toEqual({ version: 1 })
+        const legacy = yield* sessions.create({ location })
+        expect(
+          (yield* Effect.exit(sessions.create({ id: legacy.id, location, contextPolicy: { version: 1 } })))._tag,
+        ).toBe("Failure")
+        expect((yield* sessions.get(legacy.id)).contextPolicy).toBeUndefined()
+        const unsupported: ReadonlyArray<Effect.Effect<unknown, unknown>> = [
+          sessions.create({ parentID: original.id }),
+          sessions.fork({ sessionID: original.id }),
+          sessions.prompt({ sessionID: original.id, text: "Untracked input", resume: false }),
+          sessions.shell({ sessionID: original.id, command: "pwd" }),
+          sessions.compact({ sessionID: original.id }),
+          sessions.synthetic({ sessionID: original.id, text: "Untracked content", resume: false }),
+          bus.publish(SessionEvent.Text.Ended, {
+            sessionID: original.id,
+            assistantMessageID: SessionMessage.ID.create(),
+            ordinal: 0,
+            text: "Untracked output",
+          }),
+          transfer.import({ data: { info: { ...original, id: Session.ID.create() }, messages: [] }, location }),
+        ]
+        for (const operation of unsupported) expect((yield* Effect.exit(operation))._tag).toBe("Failure")
+        expect(yield* sessions.messages({ sessionID: original.id })).toEqual([])
+        const { db } = yield* Database.Service
+        expect(
+          (yield* db.select().from(SessionLifecycleTable).where(eq(SessionLifecycleTable.id, original.id)).get())
+            ?.context_policy,
+        ).toEqual({ version: 1 })
+        yield* sessions.retire(original.id)
+        expect(
+          (yield* db.select().from(SessionLifecycleTable).where(eq(SessionLifecycleTable.id, original.id)).get())
+            ?.context_policy,
+        ).toEqual({ version: 1 })
+        expect(
+          (yield* Effect.exit(
+            bus.publish(SessionEvent.Text.Ended, {
+              sessionID: original.id,
+              assistantMessageID: SessionMessage.ID.create(),
+              ordinal: 0,
+              text: "Late output",
+            }),
+          ))._tag,
+        ).toBe("Failure")
+      }
+    }),
+  )
+
   liveIt.live("preserves the project canonical directory when creating a session in another clone", () =>
     withTmp((directory) =>
       Effect.gen(function* () {

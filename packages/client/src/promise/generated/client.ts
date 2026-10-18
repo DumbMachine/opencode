@@ -610,6 +610,7 @@ export function make(options: ClientOptions) {
               model: input?.["model"],
               location: input?.["location"],
               metadata: input?.["metadata"],
+              contextPolicy: input?.["contextPolicy"],
               permissions: input?.["permissions"],
             },
             successStatus: 200,

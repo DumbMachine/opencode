@@ -217,6 +217,7 @@ export type SessionCreateInput = {
   readonly model?: Model.Ref | undefined
   readonly location?: Location.PublicRef | undefined
   readonly metadata?: Session.Metadata | undefined
+  readonly contextPolicy?: { readonly version: 1 } | undefined
   readonly permissions?: Permission.Ruleset | undefined
 }
 export type SessionCreateOutput = Session.Info
@@ -512,6 +513,7 @@ export type SessionLogOutput =
             readonly model?: Model.Ref | undefined
             readonly metadata?: Session.Metadata | undefined
             readonly permissions?: Permission.Ruleset | undefined
+            readonly contextPolicy?: { readonly version: 1 } | undefined
             readonly version: string
           }
         }

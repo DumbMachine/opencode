@@ -21,6 +21,7 @@ type SessionMessageData = Omit<(typeof SessionMessage.Info)["Encoded"], "type" |
 export const SessionLifecycleTable = pgTable("session_lifecycle", {
   id: text().$type<SessionSchema.ID>().primaryKey(),
   retired_at: bigint({ mode: "number" }),
+  context_policy: text().$type<Session.Info["contextPolicy"]>(),
 })
 
 export const SessionTable = pgTable(
@@ -46,6 +47,7 @@ export const SessionTable = pgTable(
     summary_files: integer(),
     summary_diffs: text().$type<FileDiff.LegacyInfo[]>(),
     metadata: text().$type<Record<string, unknown>>(),
+    context_policy: text().$type<Session.Info["contextPolicy"]>(),
     cost: real().notNull().default(0),
     tokens_input: integer().notNull().default(0),
     tokens_output: integer().notNull().default(0),

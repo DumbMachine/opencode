@@ -1,8 +1,8 @@
 {
   "version": "7",
   "dialect": "sqlite",
-  "id": "5aacc289-d87d-46bd-bace-e0e2a4f262f4",
-  "prevIds": ["e98619ef-c334-45e3-8c48-9932ed1ef290"],
+  "id": "78092380-3a7e-4430-9647-3ac7d7ee1333",
+  "prevIds": ["5aacc289-d87d-46bd-bace-e0e2a4f262f4"],
   "ddl": [
     {
       "name": "account_state",
@@ -960,6 +960,16 @@
       "autoincrement": false,
       "default": null,
       "generated": null,
+      "name": "context_policy",
+      "entityType": "columns",
+      "table": "session_lifecycle"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
       "name": "id",
       "entityType": "columns",
       "table": "session_message"
@@ -1261,6 +1271,16 @@
       "default": null,
       "generated": null,
       "name": "metadata",
+      "entityType": "columns",
+      "table": "session_v2"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "context_policy",
       "entityType": "columns",
       "table": "session_v2"
     },

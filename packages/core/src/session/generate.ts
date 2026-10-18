@@ -21,6 +21,8 @@ export const generate = Effect.fn("SessionGenerate.generate")(function* (input: 
   session: SessionSchema.Info
   prompt: string
 }) {
+  if (input.session.contextPolicy)
+    return yield* Effect.die(new Error("Session context policy does not support independent generation"))
   const instances = yield* Instance.Service
   const database = yield* Database.Service
   const llm = yield* LLMClient.Service

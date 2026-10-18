@@ -206,6 +206,7 @@ export const make = Effect.fn("Session.make")(function* () {
       Effect.gen(function* () {
         const session = yield* get(sessionID)
         if (
+          (session.contextPolicy !== undefined && input.disclosure?.publicationVersion !== 1) ||
           !SessionInputRequirements.supported(input.capabilities) ||
           !SessionInputRequirements.serviceSupported(input.disclosure) ||
           (input.disclosure !== undefined && input.mcpRevision === undefined)
@@ -280,6 +281,8 @@ export const make = Effect.fn("Session.make")(function* () {
     input: { id?: SessionMessage.ID; command: string },
   ) {
     const session = yield* get(sessionID)
+    if (session.contextPolicy)
+      return yield* Effect.die(new Error("Session context policy does not support shell execution"))
     // The server owns completion recording even if the submitting client disconnects.
     const running = yield* Effect.gen(function* () {
       const started = yield* SessionShell.start({ session, command: input.command }).pipe(
@@ -324,6 +327,8 @@ export const make = Effect.fn("Session.make")(function* () {
     input: { messageID?: SessionMessage.ID; skill: Skill.ID; resume?: boolean },
   ) {
     const session = yield* get(sessionID)
+    if (session.contextPolicy)
+      return yield* Effect.die(new Error("Session context policy does not support skill execution"))
     const skill = yield* SessionSkill.get({ session, skill: input.skill }).pipe(
       Effect.provideService(Instance.Service, instances),
     )
@@ -347,6 +352,7 @@ export const make = Effect.fn("Session.make")(function* () {
     input: { id?: SessionMessage.ID; delivery?: SessionInbox.Delivery },
   ) {
     const session = yield* get(sessionID)
+    if (session.contextPolicy) return yield* Effect.die(new Error("Session context policy does not support compaction"))
     if (session.revert) yield* SessionRevert.commit(bus, session)
     const inputID = input.id ?? SessionMessage.ID.create()
     const admitted = yield* admission

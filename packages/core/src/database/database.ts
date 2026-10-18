@@ -18,7 +18,10 @@ const makeDatabase = EffectDrizzleSqlite.makeWithDefaults()
 type DatabaseShape = Effect.Success<typeof makeDatabase>
 
 class EffectPgSession extends PgAsyncSession {
-  constructor(public client: Sql, dialect: PgDialect) {
+  constructor(
+    public client: Sql,
+    dialect: PgDialect,
+  ) {
     super(dialect)
   }
   override prepareQuery(query: any, mode: any, _name?: any, mapper?: any): any {
@@ -78,6 +81,7 @@ const numericPgFields = new Set([
 ])
 
 const jsonPgFields = new Set([
+  "context_policy",
   "model",
   "fork_boundary",
   "summary_diffs",
@@ -252,7 +256,6 @@ function compatPostgresDb(client: Sql): DatabaseShape {
 
   return pgDb as unknown as DatabaseShape
 }
-
 
 export interface Interface {
   db: DatabaseShape

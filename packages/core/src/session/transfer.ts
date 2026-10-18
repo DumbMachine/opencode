@@ -63,6 +63,7 @@ const layer = Layer.effect(
       }),
       import: Effect.fn("SessionTransfer.import")(function* (input) {
         const sessionID = input.data.info.id
+        if (input.data.info.contextPolicy) return yield* new ImportConflictError({ sessionID })
         const recorded = yield* db
           .select({ id: SessionTable.id })
           .from(SessionTable)

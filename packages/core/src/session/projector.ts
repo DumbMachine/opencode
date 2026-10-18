@@ -14,7 +14,7 @@ import { SessionMessageUpdater } from "./message-updater.js"
 import { SessionInbox } from "./inbox.js"
 import { Workspace } from "@opencode/schema/workspace"
 import { InstructionState } from "./instruction-state.js"
-import { SessionInboxTable, SessionMessageTable, SessionTable } from "./sql.js"
+import { SessionInboxTable, SessionLifecycleTable, SessionMessageTable, SessionTable } from "./sql.js"
 import { InstructionEntry } from "./instruction-entry.js"
 import { Slug } from "../util/slug.js"
 import { FSUtil } from "@opencode/util/fs-util"
@@ -26,6 +26,8 @@ import type { SessionSchema } from "./schema.js"
 import { ProjectTable } from "../project/sql.js"
 import { SessionLifecycle } from "./lifecycle.js"
 import { NotFoundError } from "./error.js"
+import type { Event } from "@opencode/schema/event"
+import { SessionPublicationAdmission } from "./publication-admission.js"
 
 type DatabaseService = Database.Interface["db"]
 type MessageEvent = Exclude<
@@ -118,6 +120,7 @@ const projectFork = Effect.fn("SessionProjector.projectFork")(function* (
     .get()
     .pipe(Effect.orDie)
   if (!parent) return yield* Effect.die(new Error(`Fork parent session not found: ${event.data.parentID}`))
+  if (parent.context_policy) return yield* Effect.die(new Error("Session context policy does not support forks"))
   const boundary = yield* db
     .select({ seq: SessionMessageTable.seq })
     .from(SessionMessageTable)
@@ -439,19 +442,55 @@ const layer = Layer.effectDiscard(
   Effect.gen(function* () {
     const bus = yield* Bus.Service
     const db = (yield* Database.Service).db
-    yield* bus.project(SessionEvent.Created, (event) =>
+    const metadataOnly = new Set<Event.Definition>([
+      SessionEvent.Created,
+      SessionEvent.Deleted,
+      SessionEvent.Viewed,
+      SessionEvent.UsageRecorded,
+      SessionEvent.Execution.Succeeded,
+      SessionEvent.Execution.Interrupted,
+      SessionEvent.InboxCancelled,
+      SessionEvent.InboxDeliveryChanged,
+    ])
+    const project = <D extends Event.Definition>(definition: D, handler: Bus.Subscriber<D>) =>
+      bus.project(definition, (event) =>
+        Effect.gen(function* () {
+          const sessionID = (event.data as { readonly sessionID: SessionSchema.ID }).sessionID
+          if (!metadataOnly.has(definition)) yield* SessionPublicationAdmission.assert(db, sessionID, event)
+          yield* handler(event)
+        }),
+      )
+    yield* project(SessionEvent.Created, (event) =>
       Effect.gen(function* () {
+        if (
+          event.data.contextPolicy &&
+          (!bus.persistent ||
+            event.data.parentID ||
+            event.data.metadata !== undefined ||
+            event.data.title !== undefined)
+        )
+          return yield* Effect.die(new Error("Session context policy requires an original persistent session"))
         if (event.data.parentID) {
           yield* SessionLifecycle.activate(db, event.data.parentID).pipe(Effect.orDie)
           const parent = yield* db
-            .select({ id: SessionTable.id })
+            .select({ id: SessionTable.id, contextPolicy: SessionTable.context_policy })
             .from(SessionTable)
             .where(eq(SessionTable.id, event.data.parentID))
             .get()
             .pipe(Effect.orDie)
           if (!parent) return yield* Effect.die(new NotFoundError({ sessionID: event.data.parentID }))
+          if (parent.contextPolicy)
+            return yield* Effect.die(new Error("Session context policy does not support child sessions"))
         }
         yield* SessionLifecycle.activate(db, event.data.sessionID).pipe(Effect.orDie)
+        if (event.data.contextPolicy) {
+          yield* db
+            .update(SessionLifecycleTable)
+            .set({ context_policy: event.data.contextPolicy })
+            .where(eq(SessionLifecycleTable.id, event.data.sessionID))
+            .run()
+            .pipe(Effect.orDie)
+        }
         const stored = yield* db
           .insert(SessionTable)
           .values({
@@ -466,6 +505,7 @@ const layer = Layer.effectDiscard(
             agent: event.data.agent,
             model: event.data.model,
             metadata: event.data.metadata,
+            context_policy: event.data.contextPolicy,
             permission: event.data.permissions,
             version: event.data.version,
             time_created: event.created,
@@ -476,9 +516,11 @@ const layer = Layer.effectDiscard(
           .get()
           .pipe(Effect.orDie)
         if (!stored) return yield* Effect.die(new SessionAlreadyProjected())
+        if (event.data.contextPolicy)
+          yield* InstructionState.initialize(db, event.data.sessionID, event.durable.seq, {})
       }),
     )
-    yield* bus.project(SessionEvent.Moved, (event) =>
+    yield* project(SessionEvent.Moved, (event) =>
       Effect.gen(function* () {
         yield* run(db, event)
         yield* db
@@ -555,14 +597,14 @@ const layer = Layer.effectDiscard(
         )
       }),
     )
-    yield* bus.project(SessionEvent.Deleted, (event) =>
+    yield* project(SessionEvent.Deleted, (event) =>
       Effect.gen(function* () {
         // Replayed deletion keeps the same permanent identity semantics.
         yield* SessionLifecycle.retire(db, event.data.sessionID)
         yield* db.delete(SessionTable).where(eq(SessionTable.id, event.data.sessionID)).run().pipe(Effect.orDie)
       }),
     )
-    yield* bus.project(SessionEvent.AgentSelected, (event) =>
+    yield* project(SessionEvent.AgentSelected, (event) =>
       Effect.gen(function* () {
         yield* run(db, event)
         yield* db
@@ -573,7 +615,7 @@ const layer = Layer.effectDiscard(
           .pipe(Effect.orDie)
       }),
     )
-    yield* bus.project(SessionEvent.ModelSelected, (event) =>
+    yield* project(SessionEvent.ModelSelected, (event) =>
       Effect.gen(function* () {
         yield* run(db, event)
         yield* db
@@ -584,7 +626,7 @@ const layer = Layer.effectDiscard(
           .pipe(Effect.orDie)
       }),
     )
-    yield* bus.project(SessionEvent.Renamed, (event) =>
+    yield* project(SessionEvent.Renamed, (event) =>
       db
         .update(SessionTable)
         .set({ title: event.data.title, time_updated: event.created })
@@ -592,7 +634,7 @@ const layer = Layer.effectDiscard(
         .run()
         .pipe(Effect.orDie),
     )
-    yield* bus.project(SessionEvent.MetadataUpdated, (event) =>
+    yield* project(SessionEvent.MetadataUpdated, (event) =>
       db
         .update(SessionTable)
         .set({ metadata: event.data.metadata, time_updated: event.created })
@@ -600,7 +642,7 @@ const layer = Layer.effectDiscard(
         .run()
         .pipe(Effect.orDie),
     )
-    yield* bus.project(SessionEvent.Permissions, (event) =>
+    yield* project(SessionEvent.Permissions, (event) =>
       db
         .update(SessionTable)
         .set({ permission: event.data.permissions, time_updated: event.created })
@@ -608,7 +650,7 @@ const layer = Layer.effectDiscard(
         .run()
         .pipe(Effect.orDie),
     )
-    yield* bus.project(SessionEvent.Viewed, (event) => {
+    yield* project(SessionEvent.Viewed, (event) => {
       const idle = event.data.idle
       return db
         .update(SessionTable)
@@ -622,10 +664,10 @@ const layer = Layer.effectDiscard(
         .run()
         .pipe(Effect.orDie)
     })
-    yield* bus.project(SessionEvent.MessageContentUpdated, (event) => run(db, event))
-    yield* bus.project(SessionEvent.UsageRecorded, (event) => applyUsage(db, event.data.sessionID, event.data))
-    yield* bus.project(SessionEvent.Forked, (event) => projectFork(db, event))
-    yield* bus.project(SessionEvent.InboxDelivered, (event) =>
+    yield* project(SessionEvent.MessageContentUpdated, (event) => run(db, event))
+    yield* project(SessionEvent.UsageRecorded, (event) => applyUsage(db, event.data.sessionID, event.data))
+    yield* project(SessionEvent.Forked, (event) => projectFork(db, event))
+    yield* project(SessionEvent.InboxDelivered, (event) =>
       Effect.gen(function* () {
         const input = yield* SessionInbox.projectDelivered(db, {
           id: event.data.inboxID,
@@ -660,7 +702,7 @@ const layer = Layer.effectDiscard(
         )
       }),
     )
-    yield* bus.project(SessionEvent.InboxEnqueued, (event) =>
+    yield* project(SessionEvent.InboxEnqueued, (event) =>
       Effect.gen(function* () {
         yield* SessionLifecycle.activate(db, event.data.sessionID).pipe(Effect.orDie)
         yield* SessionInbox.projectAdmitted(db, {
@@ -678,66 +720,66 @@ const layer = Layer.effectDiscard(
           .pipe(Effect.orDie)
       }),
     )
-    yield* bus.project(SessionEvent.InboxCancelled, (event) =>
+    yield* project(SessionEvent.InboxCancelled, (event) =>
       SessionInbox.projectCancelled(db, {
         id: event.data.inboxID,
         sessionID: event.data.sessionID,
       }),
     )
-    yield* bus.project(SessionEvent.InboxDeliveryChanged, (event) =>
+    yield* project(SessionEvent.InboxDeliveryChanged, (event) =>
       SessionInbox.projectDeliveryChanged(db, {
         id: event.data.inboxID,
         sessionID: event.data.sessionID,
         delivery: event.data.delivery,
       }),
     )
-    yield* bus.project(SessionEvent.Execution.Succeeded, (event) => projectIdle(db, event))
-    yield* bus.project(SessionEvent.Execution.Failed, (event) => projectIdle(db, event))
-    yield* bus.project(SessionEvent.Execution.Interrupted, (event) => projectIdle(db, event))
-    yield* bus.project(SessionEvent.InstructionsUpdated, (event) =>
+    yield* project(SessionEvent.Execution.Succeeded, (event) => projectIdle(db, event))
+    yield* project(SessionEvent.Execution.Failed, (event) => projectIdle(db, event))
+    yield* project(SessionEvent.Execution.Interrupted, (event) => projectIdle(db, event))
+    yield* project(SessionEvent.InstructionsUpdated, (event) =>
       Effect.gen(function* () {
         yield* run(db, event)
         yield* InstructionState.apply(db, event.data.sessionID, event.durable.seq, event.data.delta)
       }),
     )
-    yield* bus.project(SessionEvent.Synthetic, (event) => run(db, event))
-    yield* bus.project(SessionEvent.Skill.Activated, (event) => run(db, event))
-    yield* bus.project(SessionEvent.Shell.Started, (event) => run(db, event))
-    yield* bus.project(SessionEvent.Shell.Ended, (event) => run(db, event))
-    yield* bus.project(SessionEvent.Step.Started, (event) => run(db, event))
-    yield* bus.project(SessionEvent.Step.Streamed, (event) => run(db, event))
-    yield* bus.project(SessionEvent.Step.Ended, (event) =>
+    yield* project(SessionEvent.Synthetic, (event) => run(db, event))
+    yield* project(SessionEvent.Skill.Activated, (event) => run(db, event))
+    yield* project(SessionEvent.Shell.Started, (event) => run(db, event))
+    yield* project(SessionEvent.Shell.Ended, (event) => run(db, event))
+    yield* project(SessionEvent.Step.Started, (event) => run(db, event))
+    yield* project(SessionEvent.Step.Streamed, (event) => run(db, event))
+    yield* project(SessionEvent.Step.Ended, (event) =>
       Effect.gen(function* () {
         yield* run(db, event)
         yield* applyUsage(db, event.data.sessionID, event.data)
       }),
     )
-    yield* bus.project(SessionEvent.Step.Failed, (event) =>
+    yield* project(SessionEvent.Step.Failed, (event) =>
       Effect.gen(function* () {
         yield* run(db, event)
         if (event.data.cost !== undefined && event.data.tokens !== undefined)
           yield* applyUsage(db, event.data.sessionID, { cost: event.data.cost, tokens: event.data.tokens })
       }),
     )
-    yield* bus.project(SessionEvent.Text.Started, (event) => run(db, event))
-    yield* bus.project(SessionEvent.Text.Ended, (event) => run(db, event))
-    yield* bus.project(SessionEvent.Tool.Input.Started, (event) => run(db, event))
-    yield* bus.project(SessionEvent.Tool.Input.Ended, (event) => run(db, event))
-    yield* bus.project(SessionEvent.Tool.Called, (event) => run(db, event))
-    yield* bus.project(SessionEvent.Tool.Success, (event) => run(db, event))
-    yield* bus.project(SessionEvent.Tool.Failed, (event) => run(db, event))
-    yield* bus.project(SessionEvent.Reasoning.Started, (event) => run(db, event))
-    yield* bus.project(SessionEvent.Reasoning.Ended, (event) => run(db, event))
-    yield* bus.project(SessionEvent.RetryScheduled, (event) => run(db, event))
-    yield* bus.project(SessionEvent.Compaction.Started, (event) => run(db, event))
-    yield* bus.project(SessionEvent.Compaction.Ended, (event) =>
+    yield* project(SessionEvent.Text.Started, (event) => run(db, event))
+    yield* project(SessionEvent.Text.Ended, (event) => run(db, event))
+    yield* project(SessionEvent.Tool.Input.Started, (event) => run(db, event))
+    yield* project(SessionEvent.Tool.Input.Ended, (event) => run(db, event))
+    yield* project(SessionEvent.Tool.Called, (event) => run(db, event))
+    yield* project(SessionEvent.Tool.Success, (event) => run(db, event))
+    yield* project(SessionEvent.Tool.Failed, (event) => run(db, event))
+    yield* project(SessionEvent.Reasoning.Started, (event) => run(db, event))
+    yield* project(SessionEvent.Reasoning.Ended, (event) => run(db, event))
+    yield* project(SessionEvent.RetryScheduled, (event) => run(db, event))
+    yield* project(SessionEvent.Compaction.Started, (event) => run(db, event))
+    yield* project(SessionEvent.Compaction.Ended, (event) =>
       Effect.gen(function* () {
         yield* run(db, event)
         yield* InstructionState.advanceEpoch(db, event.data.sessionID, event.durable.seq)
       }),
     )
-    yield* bus.project(SessionEvent.Compaction.Failed, (event) => run(db, event))
-    yield* bus.project(SessionEvent.RevertEvent.Staged, (event) =>
+    yield* project(SessionEvent.Compaction.Failed, (event) => run(db, event))
+    yield* project(SessionEvent.RevertEvent.Staged, (event) =>
       Effect.gen(function* () {
         const revert = event.data.revert
         yield* db
@@ -751,7 +793,7 @@ const layer = Layer.effectDiscard(
           .pipe(Effect.orDie)
       }),
     )
-    yield* bus.project(SessionEvent.RevertEvent.Cleared, (event) =>
+    yield* project(SessionEvent.RevertEvent.Cleared, (event) =>
       db
         .update(SessionTable)
         .set({ revert: null, time_updated: event.created })
@@ -759,7 +801,7 @@ const layer = Layer.effectDiscard(
         .run()
         .pipe(Effect.orDie, Effect.asVoid),
     )
-    yield* bus.project(SessionEvent.RevertEvent.Committed, (event) =>
+    yield* project(SessionEvent.RevertEvent.Committed, (event) =>
       Effect.gen(function* () {
         const boundary = yield* db
           .select({ seq: SessionMessageTable.seq })

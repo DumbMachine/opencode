@@ -68,6 +68,7 @@ import type { Command } from "./command.js"
 import { SessionEnvironment } from "./session/environment.js"
 import { SessionLifecycle } from "./session/lifecycle.js"
 import { InstructionEntry } from "./session/instruction-entry.js"
+import { SessionContextPolicy } from "@opencode/schema/session-context-policy"
 
 // get project -> project.locations
 //
@@ -90,6 +91,7 @@ type CreateBaseInput = {
   model?: Model.Ref
   metadata?: SessionSchema.Metadata
   permissions?: Permission.Ruleset
+  contextPolicy?: SessionSchema.Info["contextPolicy"]
 }
 type CreateInput = CreateBaseInput &
   ({ location: Location.Ref; parentID?: never } | { parentID: SessionSchema.ID; location?: never })
@@ -273,6 +275,10 @@ const layer = Layer.effect(
 
     const result = Service.of({
       create: Effect.fn("Session.create")(function* (input) {
+        const contextPolicy =
+          input.contextPolicy === undefined
+            ? undefined
+            : Schema.decodeUnknownSync(SessionContextPolicy.Policy)(structuredClone(input.contextPolicy))
         const sessionID = input.id ?? SessionSchema.ID.create()
         const recorded = yield* db
           .transaction(() =>
@@ -282,9 +288,21 @@ const layer = Layer.effect(
             }),
           )
           .pipe(Effect.catchTag("SqlError", (error) => Effect.die(error)))
-        if (recorded) return recorded
+        if (recorded) {
+          if (recorded.contextPolicy && !bus.persistent)
+            return yield* Effect.die(new Error("Session context policy requires event persistence"))
+          if (contextPolicy && contextPolicy.version !== recorded.contextPolicy?.version)
+            return yield* Effect.die(new Error("Session context policy cannot be changed"))
+          return recorded
+        }
         const parent = input.parentID ? yield* store.get(input.parentID) : undefined
         if (input.parentID && parent === undefined) return yield* new NotFoundError({ sessionID: input.parentID })
+        if (input.parentID && (contextPolicy || parent?.contextPolicy))
+          return yield* Effect.die(new Error("Session context policy does not support child sessions"))
+        if (contextPolicy && (input.metadata !== undefined || input.title !== undefined))
+          return yield* Effect.die(new Error("Session context policy does not support birth annotations"))
+        if (contextPolicy && !bus.persistent)
+          return yield* Effect.die(new Error("Session context policy requires event persistence"))
         const location = parent?.location ?? input.location
         if (location === undefined)
           return yield* Effect.die(new Error("Session.create requires either location or an existing parentID"))
@@ -306,6 +324,7 @@ const layer = Layer.effect(
               // location, so host policies that read them treat the family uniformly.
               metadata: input.metadata ?? parent?.metadata,
               permissions: input.permissions ?? parent?.permissions,
+              contextPolicy,
               model: input.model
                 ? {
                     id: Model.ID.make(input.model.id),
@@ -333,12 +352,17 @@ const layer = Layer.effect(
                 )
             }),
           )
-        if (projected.type === "existing") return projected.session
+        if (projected.type === "existing") {
+          if (contextPolicy && contextPolicy.version !== projected.session.contextPolicy?.version)
+            return yield* Effect.die(new Error("Session context policy cannot be changed"))
+          return projected.session
+        }
         // TODO: Restore recorded sessions onto replacement synchronized workspaces in a future API slice.
         return yield* result.get(sessionID).pipe(Effect.orDie)
       }),
       fork: Effect.fn("Session.fork")(function* (input) {
         const parent = yield* result.get(input.sessionID)
+        if (parent.contextPolicy) return yield* Effect.die(new Error("Session context policy does not support forks"))
         const boundary = yield* db
           .select({ id: SessionMessageTable.id })
           .from(SessionMessageTable)
@@ -436,7 +460,8 @@ const layer = Layer.effect(
       beginInboxCapabilityRenewal: (input) =>
         sessions.forSession(input.sessionID).beginInboxCapabilityRenewal(input.inboxID, input.claim),
       renewInboxCapability: (input) => sessions.forSession(input.sessionID).renewInboxCapability(input.inboxID, input),
-      resumeInboxCapability: (input) => sessions.forSession(input.sessionID).resumeInboxCapability(input.inboxID, input),
+      resumeInboxCapability: (input) =>
+        sessions.forSession(input.sessionID).resumeInboxCapability(input.inboxID, input),
       cancelInbox: (input) => sessions.forSession(input.sessionID).cancelInbox(input.inboxID),
       steerInbox: (input) => sessions.forSession(input.sessionID).steerInbox(input.inboxID),
       queueInbox: (input) => sessions.forSession(input.sessionID).queueInbox(input.inboxID),
@@ -463,6 +488,8 @@ const layer = Layer.effect(
       }),
       command: Effect.fn("Session.command")(function* (input) {
         const session = yield* result.get(input.sessionID)
+        if (session.contextPolicy)
+          return yield* Effect.die(new Error("Session context policy does not support commands"))
         return yield* SessionCommand.execute({ ...input, session }).pipe(
           Effect.provideService(Instance.Service, instances),
         )

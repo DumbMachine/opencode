@@ -48,6 +48,7 @@ interface Input {
   readonly agent: Agent.ID
   readonly model: SessionRunnerModel.Resolved
   readonly prepared: Omit<SessionModelRequest.Prepared, "event">
+  readonly contextPolicy?: SessionSchema.Info["contextPolicy"]
   readonly retry: (
     cause: AIError,
     error: SessionError.Error,
@@ -70,13 +71,14 @@ export const make = Effect.gen(function* () {
   const toolOutput = yield* ToolOutput.Service
 
   const attempt = Effect.fn("SessionStep.attempt")(function* (input: Input) {
-    const startSnapshot = yield* snapshots.capture()
+    const startSnapshot = input.contextPolicy ? undefined : yield* snapshots.capture()
     const publisher = createLLMEventPublisher(bus, {
       sessionID: input.sessionID,
       assistantMessageID: input.assistantMessageID,
       agent: input.agent,
       model: input.model.ref,
       providerMetadataKey: input.model.model.route.providerMetadataKey ?? input.model.model.provider,
+      publication: input.prepared.publication,
       snapshot: startSnapshot,
       started: yield* Clock.currentTimeMillis,
     })
@@ -221,7 +223,7 @@ export const make = Effect.gen(function* () {
 
         const record = publisher.record()
         if (record.finish || record.failure) {
-          const snapshot = yield* snapshots.capture()
+          const snapshot = input.contextPolicy ? undefined : yield* snapshots.capture()
           const files =
             startSnapshot && snapshot
               ? startSnapshot === snapshot

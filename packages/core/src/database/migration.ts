@@ -6,7 +6,7 @@ import { supportsForeignKeyToggle } from "#sqlite"
 import type { EffectDrizzleSqlite } from "./drizzle.js"
 import { migrations } from "./migration.gen.js"
 import sqliteSchema from "./schema.gen.js"
-import pgSchema from "./schema.gen.pg.js"
+import pgSchema from "./schema.pg.js"
 import type { Dialect } from "./dialect.js"
 import { Global } from "@opencode/util/global"
 
@@ -75,20 +75,22 @@ export function applyOnly(db: Database, input: Migration[], dialect: Dialect = "
     if (completed.size === 0) {
       // Existing installs used Drizzle's migration journal. Seed the new
       // journal once so TypeScript migrations don't replay old SQL.
-      const legacy = dialect === "postgres"
-        ? yield* db.get(sql`SELECT table_name AS name FROM information_schema.tables WHERE table_schema = 'public' AND table_name = ${"__drizzle_migrations"}`)
-        : yield* db.get(sql`SELECT name FROM sqlite_master WHERE type = 'table' AND name = ${"__drizzle_migrations"}`)
+      const legacy =
+        dialect === "postgres"
+          ? yield* db.get(
+              sql`SELECT table_name AS name FROM information_schema.tables WHERE table_schema = 'public' AND table_name = ${"__drizzle_migrations"}`,
+            )
+          : yield* db.get(sql`SELECT name FROM sqlite_master WHERE type = 'table' AND name = ${"__drizzle_migrations"}`)
       if (legacy) {
-        const named = dialect === "postgres"
-          ? (
-              yield* db.all<{ name: string }>(sql`
+        const named =
+          dialect === "postgres"
+            ? (yield* db.all<{ name: string }>(sql`
                 SELECT column_name AS name FROM information_schema.columns
                 WHERE table_schema = 'public' AND table_name = '__drizzle_migrations' AND column_name = 'name'
-              `)
-            ).length > 0
-          : (
-              yield* db.all<{ name: string }>(sql`SELECT name FROM pragma_table_info('__drizzle_migrations')`)
-            ).some((column) => column.name === "name")
+              `)).length > 0
+            : (yield* db.all<{ name: string }>(sql`SELECT name FROM pragma_table_info('__drizzle_migrations')`)).some(
+                (column) => column.name === "name",
+              )
 
         if (named || dialect === "postgres") {
           if (dialect === "postgres") {

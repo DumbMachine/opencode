@@ -27,6 +27,7 @@ import { Project } from "./project.js"
 import { SessionFork } from "./session-fork.js"
 import { Permission } from "./permission.js"
 import { ExecutionDisclosure } from "./execution-disclosure.js"
+import { SessionContextPolicy } from "./session-context-policy.js"
 
 export { FileAttachment }
 
@@ -65,6 +66,7 @@ export const Created = Event.durable({
     /** Host-supplied annotations resolved at creation, including any inherited from a parent. */
     metadata: SessionMetadata.pipe(optional),
     permissions: Permission.Ruleset.pipe(optional),
+    contextPolicy: SessionContextPolicy.Policy.pipe(optional),
     version: Schema.String,
   },
 })

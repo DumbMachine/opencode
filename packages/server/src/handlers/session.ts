@@ -132,6 +132,7 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
                 agent: ctx.payload.agent,
                 model: ctx.payload.model,
                 metadata: ctx.payload.metadata,
+                contextPolicy: ctx.payload.contextPolicy,
                 permissions: ctx.payload.permissions,
                 location: ctx.payload.location ?? { directory: AbsolutePath.make(process.cwd()) },
               })
