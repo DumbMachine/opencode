@@ -4,6 +4,7 @@ import { Effect, Option, Schema } from "effect"
 import { and, eq } from "drizzle-orm"
 import type { Event } from "@opencode/schema/event"
 import { ExecutionDisclosure } from "@opencode/schema/execution-disclosure"
+import { ExecutionProducer } from "@opencode/schema/execution-producer"
 import { SessionMessage } from "@opencode/schema/session-message"
 import type { SessionID } from "@opencode/schema/session-id"
 import type { Database } from "../database/database.js"
@@ -13,13 +14,7 @@ import { SessionPublicationAdmission } from "./publication-admission.js"
 
 // Derived native metadata, never a transcript field or an authorization grant.
 // The host resolves each referenced immutable receipt to its source manifest.
-export const Reference = Schema.Struct({
-  contextReference: ExecutionDisclosure.PublicationProof.fields.contextReference,
-  inputID: ExecutionDisclosure.PublicationProof.fields.inputID,
-  receiptReference: ExecutionDisclosure.PublicationProof.fields.receiptReference,
-  unitID: ExecutionDisclosure.PublicationProof.fields.unitID,
-  unitDigest: ExecutionDisclosure.PublicationProof.fields.unitDigest,
-})
+export const Reference = ExecutionProducer.PublicationReference
 export interface Reference extends Schema.Schema.Type<typeof Reference> {}
 export const State = Schema.Struct({
   version: Schema.Literal(1),

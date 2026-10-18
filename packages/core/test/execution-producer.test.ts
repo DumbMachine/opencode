@@ -1,7 +1,7 @@
 import { expect } from "bun:test"
 import { createPublicKey, verify } from "node:crypto"
 import { DateTime, Effect, Schema } from "effect"
-import { LLM, Message } from "@opencode/ai"
+import { LLM, Message, SystemPart } from "@opencode/ai"
 import { OpenAIChat } from "@opencode/ai/protocols"
 import { SessionMessage } from "@opencode/schema/session-message"
 import { Model } from "@opencode/schema/model"
@@ -249,5 +249,82 @@ it.effect("observes exact owned human projections and binds every logical field 
     expect(stripped?.components).toHaveLength(3)
     expect(stripped?.components.every((component) => component.proof === undefined)).toBeTrue()
     expect(stripped?.componentsDigest).toBe(SessionDisclosure.digest(stripped?.components))
+  }),
+)
+
+it.effect("measures closed request-only dependencies without endorsing unaccounted values", () =>
+  Effect.gen(function* () {
+    const enrolled = yield* NativeProducer.enroll({
+      version: 1,
+      challenge: "d".repeat(43),
+      audience: "closed-host",
+      contracts: ["human-plaintext-identity-v1", "model-plaintext-projection-v1", "model-request-only-plaintext-v1"],
+    })
+    expect(
+      Schema.decodeUnknownSync(ExecutionProducer.EnrollmentProof)(JSON.parse(enrolled.signed.payload)).contracts,
+    ).toEqual(["human-plaintext-identity-v1", "model-plaintext-projection-v1", "model-request-only-plaintext-v1"])
+    const scope = prepare("Original full human")
+    const payload = yield* NativeProducer.prepareInput({
+      ...scope,
+      payload: {
+        text: scope.original.text,
+        metadata: { source: "bound-host-metadata" },
+      },
+    })
+    if (!payload) throw new Error("Missing original preparation")
+    const message = SessionMessage.User.make({
+      ...payload,
+      id: scope.inputID,
+      type: "user",
+      time: { created: DateTime.makeUnsafe(0) },
+    })
+    const model = OpenAIChat.route.model({ id: "fixture-model", provider: "fixture-provider" })
+    const ref = Model.Ref.make({ id: Model.ID.make("fixture-model"), providerID: Provider.ID.make("fixture-provider") })
+    const request = LLM.request({ model, system: [], messages: toLLMMessages([message], ref, "fixture-provider") })
+    const captured = NativeProducer.captureContext({
+      sessionID: scope.sessionID,
+      inputID: scope.inputID,
+      model: ref,
+      providerMetadataKey: "fixture-provider",
+      messages: [message],
+      components: [],
+      requestOnly: { provenance: [] },
+    })
+    if (!captured) throw new Error("Missing closed capture")
+    const observed = yield* captured.observe(request, 0, [])
+    if (!observed?.composition) throw new Error("Missing closed observation")
+    const composed = Schema.decodeUnknownSync(ExecutionProducer.RequestOnlyComposition)(
+      JSON.parse(observed.composition.payload),
+    )
+    expect(valid(observed.composition, enrolled.key)).toBe(true)
+    expect(composed.complete).toBe(true)
+    expect(composed.messageCount).toBe(1)
+    const projected = Schema.decodeUnknownSync(ExecutionProducer.RequestOnlyUserProjection)(
+      JSON.parse(observed.components[0]!.proof!),
+    )
+    expect(projected.metadataRevision).toBe(SessionDisclosure.digest(payload.metadata))
+    expect(projected.instructionsRevision).toBe(Hash.sha256("native-input-instructions-v1\0"))
+    expect(projected.controlRevision).toBe(SessionDisclosure.digest({ execution: null, capabilities: [] }))
+    const admitted = yield* NativeProducer.inputContext(scope.sessionID, scope.inputID, payload)
+    expect(admitted?.kind).toBe("input")
+    if (!admitted?.composition) throw new Error("Missing measured input")
+    expect(valid(admitted.composition, enrolled.key)).toBe(true)
+    for (const unaccounted of [
+      LLM.request({ model, system: [SystemPart.make("Unaccounted system")], messages: request.messages }),
+      LLM.request({ model, system: [], messages: request.messages, metadata: { hidden: "Private metadata" } }),
+      LLM.request({
+        model,
+        system: [],
+        messages: request.messages,
+        providerOptions: { arbitrary: { input: "Private input" } },
+      }),
+      LLM.request({ model, system: [], messages: request.messages, toolChoice: "none" }),
+      LLM.request({ model, system: [], messages: [...request.messages, Message.user("Unknown history")] }),
+    ])
+      expect(yield* captured.observe(unaccounted, 0, [])).toBeUndefined()
+    expect(yield* captured.observe(request, 1, [])).toBeUndefined()
+    expect(
+      yield* NativeProducer.inputContext(scope.sessionID, scope.inputID, { ...payload, text: "Changed input" }),
+    ).toBeUndefined()
   }),
 )

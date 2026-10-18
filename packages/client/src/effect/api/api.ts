@@ -45,7 +45,9 @@ export type ServerEnrollProducerInput = {
   readonly version: 1
   readonly challenge: string
   readonly audience: string
-  readonly contracts?: ReadonlyArray<"human-plaintext-identity-v1" | "model-plaintext-projection-v1"> | undefined
+  readonly contracts?:
+    | ReadonlyArray<"human-plaintext-identity-v1" | "model-plaintext-projection-v1" | "model-request-only-plaintext-v1">
+    | undefined
 }
 export type ServerEnrollProducerOutput = ExecutionProducer.Enrollment
 export type ServerEnrollProducerOperation<E = never> = (

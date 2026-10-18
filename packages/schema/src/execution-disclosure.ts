@@ -22,7 +22,7 @@ export const Service = Schema.Struct({
   publicationVersion: Schema.Literal(1).pipe(optional),
   // The installed host callback explicitly accepts partial producer evidence.
   // Absence preserves the original request shape for older installations.
-  compositionVersion: Schema.Literal(1).pipe(optional),
+  compositionVersion: Schema.Literals([1, 2]).pipe(optional),
   issuer: bounded(512),
   audience: bounded(512),
   keys: Schema.Array(VerificationKey).check(Schema.isMinLength(1), Schema.isMaxLength(8)),

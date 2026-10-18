@@ -31,6 +31,7 @@ import { SessionSchema } from "./schema.js"
 import { SessionStore } from "./store.js"
 import type { ExecutionDisclosure } from "@opencode/schema/execution-disclosure"
 import { Hash } from "@opencode/util/hash"
+import type { SessionPublicationProvenance } from "./publication-provenance.js"
 
 export interface Selection {
   readonly input?: SessionMessage.User | SessionMessage.Synthetic
@@ -47,6 +48,10 @@ export interface Loaded {
   readonly disclosureRevision?: number
   readonly disclosureCurrent?: () => boolean
   readonly disclosureComponents?: readonly ExecutionDisclosure.Component[]
+  readonly disclosureProvenance?: readonly {
+    readonly id: SessionMessage.ID
+    readonly state: SessionPublicationProvenance.State | null
+  }[]
   readonly executionInstructions?: string
   readonly input?: SessionMessage.User | SessionMessage.Synthetic
   readonly session: SessionSchema.Info
@@ -303,6 +308,7 @@ const layer = Layer.effect(
         ],
         ephemeral: selection.ephemeral,
         messages: history.entries.map((entry) => entry.message),
+        disclosureProvenance: history.entries.map((entry) => ({ id: entry.message.id, state: entry.provenance })),
         input: history.input,
         executionInstructions: history.input?.type === "user" ? history.input.execution?.instructions : undefined,
         tools: selection.tools,

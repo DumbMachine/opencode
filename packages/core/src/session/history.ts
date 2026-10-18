@@ -95,7 +95,9 @@ const messageEntries = Effect.fnUntraced(function* (
     .all()
     .pipe(Effect.orDie)
   const entries = yield* Effect.forEach(rows, (row) =>
-    decodeMessageRow(row).pipe(Effect.map((message) => ({ seq: row.seq, message }))),
+    decodeMessageRow(row).pipe(
+      Effect.map((message) => ({ seq: row.seq, message, provenance: row.publication_provenance })),
+    ),
   )
   // Re-expansion may cross a native checkpoint whose completion already advanced the instruction
   // epoch: the baseline supersedes the chronological updates before it. Forks seed their baseline

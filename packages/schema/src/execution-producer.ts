@@ -9,7 +9,11 @@ import { optional } from "./schema.js"
 const bounded = (maximum: number) => Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(maximum))
 const Digest = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/))
 export const SignatureDomain = "opencode.execution-producer.v1\0"
-export const Contract = Schema.Literals(["human-plaintext-identity-v1", "model-plaintext-projection-v1"])
+export const Contract = Schema.Literals([
+  "human-plaintext-identity-v1",
+  "model-plaintext-projection-v1",
+  "model-request-only-plaintext-v1",
+])
 
 export interface SignedFact extends Schema.Schema.Type<typeof SignedFact> {}
 export const SignedFact = Schema.Struct({
@@ -23,7 +27,7 @@ export const EnrollmentRequest = Schema.Struct({
   version: Schema.Literal(1),
   challenge: Schema.String.check(Schema.isPattern(/^[A-Za-z0-9_-]{43}$/)),
   audience: bounded(512),
-  contracts: Schema.Array(Contract).check(Schema.isMinLength(1), Schema.isMaxLength(2)).pipe(optional),
+  contracts: Schema.Array(Contract).check(Schema.isMinLength(1), Schema.isMaxLength(3)).pipe(optional),
 }).annotate({ identifier: "ExecutionProducer.EnrollmentRequest" })
 
 export interface EnrollmentProof extends Schema.Schema.Type<typeof EnrollmentProof> {}
@@ -35,7 +39,7 @@ export const EnrollmentProof = Schema.Struct({
   producerEpoch: bounded(128),
   bootNonce: Schema.String.check(Schema.isPattern(/^[A-Za-z0-9_-]{43}$/)).pipe(optional),
   key: VerificationKey,
-  contracts: Schema.Array(Contract).check(Schema.isMinLength(1), Schema.isMaxLength(2)),
+  contracts: Schema.Array(Contract).check(Schema.isMinLength(1), Schema.isMaxLength(3)),
   issuedAt: Schema.Int,
 }).annotate({ identifier: "ExecutionProducer.EnrollmentProof" })
 
@@ -89,3 +93,55 @@ export const ModelComposition = Schema.Struct({
   complete: Schema.Literal(false),
   issuedAt: Schema.Int,
 }).annotate({ identifier: "ExecutionProducer.ModelComposition" })
+
+// Measured dependencies of a closed request. The host still resolves their
+// source manifests and current disclosure eligibility; these hashes grant none.
+export const PublicationReference = Schema.Struct({
+  contextReference: Digest,
+  inputID: SessionMessageID,
+  receiptReference: Digest,
+  unitID: bounded(128),
+  unitDigest: Digest,
+}).annotate({ identifier: "ExecutionProducer.PublicationReference" })
+export interface PublicationReference extends Schema.Schema.Type<typeof PublicationReference> {}
+
+const ProjectionPosition = {
+  version: Schema.Literal(1),
+  index: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0), Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER)),
+  projectionRevision: Digest,
+}
+export const RequestOnlyUserProjection = Schema.Struct({
+  ...ProjectionPosition,
+  contract: Schema.Literal("session-user-context-v1"),
+  preparedInput: SignedFact,
+  metadataRevision: Digest,
+  instructionsRevision: Digest,
+  controlRevision: Digest,
+}).annotate({ identifier: "ExecutionProducer.RequestOnlyUserProjection" })
+export interface RequestOnlyUserProjection extends Schema.Schema.Type<typeof RequestOnlyUserProjection> {}
+
+export const RequestOnlyAssistantProjection = Schema.Struct({
+  ...ProjectionPosition,
+  contract: Schema.Literal("session-assistant-publication-v1"),
+  messageRevision: Digest,
+  references: Schema.Array(PublicationReference).check(Schema.isMinLength(1), Schema.isMaxLength(128)),
+}).annotate({ identifier: "ExecutionProducer.RequestOnlyAssistantProjection" })
+export interface RequestOnlyAssistantProjection extends Schema.Schema.Type<typeof RequestOnlyAssistantProjection> {}
+
+export const RequestOnlyComposition = Schema.Struct({
+  version: Schema.Literal(1),
+  purpose: Schema.Literal("native-model-composition"),
+  producerEpoch: bounded(128),
+  contract: Schema.Literal("model-request-only-plaintext-v1"),
+  sessionID: SessionID,
+  inputID: SessionMessageID,
+  kind: Schema.Literals(["primary", "input"]),
+  attempt: bounded(128),
+  contextDigest: Digest,
+  componentsDigest: Digest,
+  complete: Schema.Literal(true),
+  messageCount: Schema.Int.check(Schema.isGreaterThan(0), Schema.isLessThanOrEqualTo(2048)),
+  instructionInputID: SessionMessageID,
+  issuedAt: Schema.Int,
+}).annotate({ identifier: "ExecutionProducer.RequestOnlyComposition" })
+export interface RequestOnlyComposition extends Schema.Schema.Type<typeof RequestOnlyComposition> {}

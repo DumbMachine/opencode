@@ -16,6 +16,7 @@ import { SessionExecutionCapability } from "./execution-capability.js"
 import { SessionLifecycle } from "./lifecycle.js"
 import { SessionInboxTable, SessionTable } from "./sql.js"
 import { SessionPublicationAdmission } from "./publication-admission.js"
+import { NativeProducer } from "../execution-producer.js"
 
 const modelDefinitions = new Map<string, Event.Definition>(
   [
@@ -138,16 +139,21 @@ export const captureInput = Effect.fnUntraced(
         )
         if (owned.files?.length || owned.agents?.length || owned.skills?.length) return yield* Effect.die(unavailable())
         const contextDigest = SessionDisclosure.digest({ kind: "native-human-input-v1", payload: owned })
-        const request = SessionDisclosure.makeRequest({
-          sessionID,
-          inputID,
-          kind: "input",
-          contextDigest,
-          components: [{ kind: "message", id: inputID, revision: SessionDisclosure.digest(owned) }],
-        })
+        const request =
+          service.compositionVersion === 2
+            ? yield* NativeProducer.inputContext(sessionID, inputID, owned)
+            : SessionDisclosure.makeRequest({
+                sessionID,
+                inputID,
+                kind: "input",
+                contextDigest,
+                components: [{ kind: "message", id: inputID, revision: SessionDisclosure.digest(owned) }],
+              })
+        if (!request || request.contextDigest !== contextDigest) return yield* Effect.die(unavailable())
         if (!live()) return yield* Effect.die(unavailable())
         const prepared = yield* SessionDisclosure.prepareRequest(service, request)
-        if (!live() || !prepared.publication) return yield* Effect.die(unavailable())
+        if (!live() || !prepared.publication || (service.compositionVersion === 2 && !prepared.proof.complete))
+          return yield* Effect.die(unavailable())
         return yield* make({ prepared, state: { sessionID, inputID, revision, bus, database, live } })
       },
       Effect.catchCauseIf(

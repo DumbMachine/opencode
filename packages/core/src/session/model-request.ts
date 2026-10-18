@@ -46,6 +46,7 @@ import { SessionExecutionCapability } from "./execution-capability.js"
 import { SessionRunCoordinator } from "./run-coordinator.js"
 import { NativeProducer } from "../execution-producer.js"
 import { SessionPublicationWriter } from "./publication-writer.js"
+import type { SessionPublicationProvenance } from "./publication-provenance.js"
 import { Bus } from "../bus.js"
 import { Database } from "../database/database.js"
 
@@ -78,6 +79,10 @@ export interface Input {
   readonly disclosureCurrent?: () => boolean
   readonly disclosureComponents?: readonly ExecutionDisclosure.Component[]
   readonly disclosureMessages?: readonly SessionMessage.Info[]
+  readonly disclosureProvenance?: readonly {
+    readonly id: SessionMessage.ID
+    readonly state: SessionPublicationProvenance.State | null
+  }[]
   readonly session: SessionSchema.Info
   readonly agent: Agent.ID
   readonly inputID?: SessionMessage.ID
@@ -241,6 +246,9 @@ export const layer = Layer.effect(
       ) => Effect.Effect<{ readonly event: S; readonly invoked: number }>,
     ) {
       const service = input.disclosure === undefined ? undefined : structuredClone(input.disclosure)
+      const requestOnly = service?.compositionVersion === 2
+      if (requestOnly && !input.session.contextPolicy)
+        return yield* Effect.die(new Error("Execution context authorization is unavailable"))
       if (
         (input.session.contextPolicy && (kind !== "primary" || service?.publicationVersion !== 1)) ||
         (!input.session.contextPolicy && service?.publicationVersion === 1)
@@ -255,7 +263,10 @@ export const layer = Layer.effect(
       // Own canonical history and its rendered positions before the first wait,
       // including waits for ownership, hooks and the host callback.
       const producer =
-        service?.compositionVersion === 1 && kind === "primary" && inputID !== undefined && input.disclosureMessages
+        service?.compositionVersion !== undefined &&
+        kind === "primary" &&
+        inputID !== undefined &&
+        input.disclosureMessages
           ? NativeProducer.captureContext({
               sessionID,
               inputID,
@@ -263,6 +274,7 @@ export const layer = Layer.effect(
               providerMetadataKey: model.model.route.providerMetadataKey ?? model.model.provider,
               messages: input.disclosureMessages,
               components: input.disclosureComponents ?? [],
+              requestOnly: requestOnly ? { provenance: input.disclosureProvenance ?? [] } : undefined,
             })
           : undefined
       const revision = input.disclosureRevision
@@ -346,6 +358,8 @@ export const layer = Layer.effect(
       })
 
       const baseURL = base.model.route.endpoint.baseURL
+      if (requestOnly && (yield* hooks.has("session", "model.request", model.ref.providerID)))
+        return yield* Effect.die(new Error("Execution context authorization is unavailable"))
       const modelObservation = yield* hooks.triggerObserved("session", "model.request", {
         ...scope,
         baseURL: typeof baseURL === "string" ? baseURL : undefined,
@@ -452,6 +466,8 @@ export const layer = Layer.effect(
               const observed = producer
                 ? yield* producer.observe(request, shapedObservation.invoked + modelObservation.invoked, extra)
                 : undefined
+              if (requestOnly && observed === undefined)
+                return yield* Effect.die(new Error("Execution context provenance is unavailable"))
               const exact =
                 observed ??
                 SessionDisclosure.makeRequest({
@@ -467,6 +483,8 @@ export const layer = Layer.effect(
               yield* current
               return prepared
             })
+      if (requestOnly && !disclosure?.proof.complete)
+        return yield* Effect.die(new Error("Execution context provenance is unavailable"))
       if (input.session.contextPolicy && !disclosure?.writer)
         return yield* Effect.die(new Error("Execution publication authorization is unavailable"))
       const transportNames = [
@@ -520,7 +538,7 @@ export const layer = Layer.effect(
       // HTTP hooks wrap every HTTP request, including the WebSocket fallback path. The route decides
       // which transport actually carries the request, so both hook families are always offered.
       const webSocket =
-        input.webSocket === "session" && model.transport === "websocket"
+        !requestOnly && input.webSocket === "session" && model.transport === "websocket"
           ? transport.bind(
               session.id,
               {
@@ -587,11 +605,23 @@ export const layer = Layer.effect(
     })
 
     const agentHook =
-      (name: "context" | "compaction" | "generate", agent: Agent.ID) => (draft: SessionRequest, tools: Definitions) =>
-        hooks.triggerObserved("session", name, { ...draft, agent, tools })
+      (name: "context" | "compaction" | "generate", agent: Agent.ID, requestOnly = false) =>
+      (draft: SessionRequest, tools: Definitions) =>
+        requestOnly
+          ? Effect.succeed({ event: { ...draft, agent, tools }, invoked: 0 })
+          : hooks.triggerObserved("session", name, { ...draft, agent, tools })
 
     return Service.of({
-      primary: (input) => prepare("primary", input, agentHook("context", input.agent)),
+      primary: (input) =>
+        prepare(
+          "primary",
+          input,
+          agentHook(
+            "context",
+            input.agent,
+            !!input.session.contextPolicy && input.disclosure?.compositionVersion === 2,
+          ),
+        ),
       compaction: (input) => prepare("compaction", input, agentHook("compaction", input.agent)),
       generate: (input) => prepare("generate", input, agentHook("generate", input.agent)),
       title: (input) => prepare("title", input, (draft) => hooks.triggerObserved("session", "title", draft)),

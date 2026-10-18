@@ -352,6 +352,7 @@ const layer = Layer.effect(
           disclosureCurrent: loaded.disclosureCurrent,
           disclosureComponents: loaded.disclosureComponents,
           disclosureMessages: loaded.messages,
+          disclosureProvenance: loaded.disclosureProvenance,
           inputID: loaded.input?.type === "user" ? loaded.input.id : undefined,
           agent: loaded.agent.id,
           model: loaded.model,

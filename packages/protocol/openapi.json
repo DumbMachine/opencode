@@ -14409,7 +14409,7 @@
           },
           "compositionVersion": {
             "type": "number",
-            "enum": [1]
+            "enum": [1, 2]
           },
           "issuer": {
             "type": "string",
@@ -14486,10 +14486,14 @@
             "type": "array",
             "items": {
               "type": "string",
-              "enum": ["human-plaintext-identity-v1", "model-plaintext-projection-v1"]
+              "enum": [
+                "human-plaintext-identity-v1",
+                "model-plaintext-projection-v1",
+                "model-request-only-plaintext-v1"
+              ]
             },
             "minItems": 1,
-            "maxItems": 2
+            "maxItems": 3
           }
         },
         "required": ["version", "challenge", "audience"],
