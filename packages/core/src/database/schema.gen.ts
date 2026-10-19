@@ -230,6 +230,37 @@ const schema: Omit<DatabaseMigration.Migration, "id"> = {
         );
       `)
       yield* tx.run(`
+        CREATE TABLE \`session_terminal_control\` (
+          \`session_id\` text NOT NULL,
+          \`input_id\` text NOT NULL,
+          \`attempt\` text NOT NULL,
+          \`message_id\` text NOT NULL,
+          \`tool_call_id\` text NOT NULL,
+          \`producer_epoch\` text NOT NULL,
+          \`producer_key_id\` text NOT NULL,
+          \`context_reference\` text NOT NULL,
+          \`receipt_reference\` text NOT NULL,
+          \`evidence\` text NOT NULL,
+          \`unit_id\` text,
+          \`unit_digest\` text,
+          \`created\` integer NOT NULL,
+          CONSTRAINT \`session_terminal_control_pk\` PRIMARY KEY(\`session_id\`, \`input_id\`),
+          CONSTRAINT \`fk_session_terminal_control_session_id_session_v2_id_fk\` FOREIGN KEY (\`session_id\`) REFERENCES \`session_v2\`(\`id\`) ON DELETE CASCADE
+        );
+      `)
+      yield* tx.run(`
+        CREATE TABLE \`session_terminal_invocation\` (
+          \`session_id\` text NOT NULL,
+          \`input_id\` text NOT NULL,
+          \`invocation_id\` text NOT NULL,
+          \`context_reference\` text NOT NULL,
+          \`evidence\` text NOT NULL,
+          \`created\` integer NOT NULL,
+          CONSTRAINT \`session_terminal_invocation_pk\` PRIMARY KEY(\`session_id\`, \`input_id\`, \`invocation_id\`),
+          CONSTRAINT \`fk_session_terminal_invocation_session_id_session_v2_id_fk\` FOREIGN KEY (\`session_id\`) REFERENCES \`session_v2\`(\`id\`) ON DELETE CASCADE
+        );
+      `)
+      yield* tx.run(`
         CREATE TABLE \`workspace\` (
           \`id\` text PRIMARY KEY,
           \`provider\` text NOT NULL,

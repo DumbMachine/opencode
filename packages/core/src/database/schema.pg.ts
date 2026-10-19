@@ -274,6 +274,20 @@ const schema: Omit<DatabaseMigration.Migration, "id"> = {
       yield* tx.run(
         `CREATE UNIQUE INDEX IF NOT EXISTS "session_pending_session_admitted_seq_idx" ON "session_pending" ("session_id", "admitted_seq");`,
       )
+      yield* tx.run(`CREATE TABLE IF NOT EXISTS "session_terminal_invocation" (
+        "session_id" text NOT NULL REFERENCES "session_v2"("id") ON DELETE CASCADE,
+        "input_id" text NOT NULL, "invocation_id" text NOT NULL, "context_reference" text NOT NULL,
+        "evidence" text NOT NULL, "created" bigint NOT NULL,
+        CONSTRAINT "session_terminal_invocation_pk" PRIMARY KEY ("session_id", "input_id", "invocation_id")
+      );`)
+      yield* tx.run(`CREATE TABLE IF NOT EXISTS "session_terminal_control" (
+        "session_id" text NOT NULL REFERENCES "session_v2"("id") ON DELETE CASCADE,
+        "input_id" text NOT NULL, "attempt" text NOT NULL, "message_id" text NOT NULL,
+        "tool_call_id" text NOT NULL, "producer_epoch" text NOT NULL, "producer_key_id" text NOT NULL,
+        "context_reference" text NOT NULL, "receipt_reference" text NOT NULL, "evidence" text NOT NULL,
+        "unit_id" text, "unit_digest" text, "created" bigint NOT NULL,
+        CONSTRAINT "session_terminal_control_pk" PRIMARY KEY ("session_id", "input_id")
+      );`)
       yield* tx.run(`CREATE INDEX IF NOT EXISTS "session_v2_project_idx" ON "session_v2" ("project_id");`)
       yield* tx.run(`CREATE INDEX IF NOT EXISTS "session_v2_workspace_idx" ON "session_v2" ("workspace_id");`)
       yield* tx.run(`CREATE INDEX IF NOT EXISTS "session_v2_parent_idx" ON "session_v2" ("parent_id");`)

@@ -8,7 +8,8 @@ import { Instructions } from "../instructions/index.js"
 import { InstructionState } from "./instruction-state.js"
 import { SessionProviderContext } from "./provider-context.js"
 import { SessionInputRequirements } from "./input-requirements.js"
-import { SessionMessageTable } from "./sql.js"
+import { SessionMessageTable, SessionTerminalControlTable, SessionTerminalInvocationTable } from "./sql.js"
+import { SessionPublicationProvenance } from "./publication-provenance.js"
 
 type DatabaseService = Database.Interface["db"]
 
@@ -110,6 +111,36 @@ const messageEntries = Effect.fnUntraced(function* (
   )
 })
 
+// A UI-control omission needs the exact private observation/batch binding and
+// measured row revision. An arbitrary/stale marker is never a history filter.
+const modelEntries = Effect.fnUntraced(function* (
+  db: DatabaseService,
+  sessionID: SessionSchema.ID,
+  entries: Effect.Success<ReturnType<typeof messageEntries>>,
+) {
+  const controls = yield* db
+    .select()
+    .from(SessionTerminalControlTable)
+    .where(eq(SessionTerminalControlTable.session_id, sessionID))
+    .all()
+    .pipe(Effect.orDie)
+  return entries.filter((entry) => {
+    const terminal = entry.provenance?.terminalControl
+    if (!terminal) return true
+    if (
+      entry.provenance?.revision !== SessionPublicationProvenance.revision(entry.message) ||
+      !controls.some(
+        (control) =>
+          control.message_id === entry.message.id &&
+          control.unit_id === terminal.unitID &&
+          control.unit_digest === terminal.unitDigest,
+      )
+    )
+      throw new Error("Terminal control history binding is unavailable")
+    return false
+  })
+})
+
 export const load = Effect.fn("SessionHistory.load")(function* (
   db: DatabaseService,
   sessionID: SessionSchema.ID,
@@ -159,7 +190,7 @@ export const entriesForRunner = Effect.fn("SessionHistory.entriesForRunner")(fun
         const messages = yield* messageEntries(db, sessionID, boundary)
         return {
           initial: yield* InstructionState.initial(db, sessionID, instructions),
-          entries: messages,
+          entries: yield* modelEntries(db, sessionID, messages),
           input: yield* latestInput(db, sessionID),
         }
       }),
@@ -177,7 +208,7 @@ export const preview = Effect.fn("SessionHistory.preview")(function* (
   return yield* db
     .transaction(() =>
       Effect.gen(function* () {
-        const messages = yield* messageEntries(db, sessionID, boundary)
+        const messages = yield* modelEntries(db, sessionID, yield* messageEntries(db, sessionID, boundary))
         // An active assistant may contain an unresolved tool call, so only preview the settled prefix.
         const unsettled = messages.findIndex(
           (entry) => entry.message.type === "assistant" && entry.message.time.completed === undefined,
@@ -239,4 +270,36 @@ export const requiresDisclosure = Effect.fn("SessionHistory.requiresDisclosure")
     const required = decode(row.requirements)
     return Option.isNone(required) || SessionInputRequirements.auxiliaryBlocked(required.value)
   })
+})
+
+// The private barrier precedes pub2, so an uncertain publication or restart
+// cannot dispatch the old input again. It carries no model/source authority.
+export const terminalInput = Effect.fnUntraced(function* (
+  db: DatabaseService,
+  sessionID: SessionSchema.ID,
+  inputID: SessionMessage.ID,
+) {
+  const terminal = yield* db
+    .select({ inputID: SessionTerminalControlTable.input_id })
+    .from(SessionTerminalControlTable)
+    .where(
+      and(eq(SessionTerminalControlTable.session_id, sessionID), eq(SessionTerminalControlTable.input_id, inputID)),
+    )
+    .get()
+    .pipe(Effect.orDie)
+  if (terminal) return true
+  return (
+    (yield* db
+      .select({ inputID: SessionTerminalInvocationTable.input_id })
+      .from(SessionTerminalInvocationTable)
+      .where(
+        and(
+          eq(SessionTerminalInvocationTable.session_id, sessionID),
+          eq(SessionTerminalInvocationTable.input_id, inputID),
+        ),
+      )
+      .limit(1)
+      .get()
+      .pipe(Effect.orDie)) !== undefined
+  )
 })

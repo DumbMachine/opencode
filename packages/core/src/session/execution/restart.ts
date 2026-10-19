@@ -3,6 +3,9 @@ export * as SessionRestart from "./restart.js"
 import { Context, Effect, Layer } from "effect"
 import { makeGlobalNode } from "@opencode/util/effect/app-node"
 import { Bus } from "../../bus.js"
+import { Database } from "../../database/database.js"
+import { SessionHistory } from "../history.js"
+import { SessionInbox } from "../inbox.js"
 import { Job } from "../../job.js"
 import { Session } from "../../session.js"
 import { SessionEvent } from "../event.js"
@@ -37,8 +40,9 @@ export interface Interface {
    * Resumes Sessions whose execution claim was never released — turns orphaned
    * by a process that died without teardown, or interrupted by a graceful
    * shutdown (which preserves the claim on purpose). The claim is never
-   * cleared here: only a terminal event releases it, so a death anywhere in
-   * the resume path leaves the same orphaned claim for the next boot.
+   * cleared here except for an exact input with a durable private stop barrier;
+   * other claims need a terminal event, so a death in the resume path leaves
+   * the same orphaned claim for the next boot.
    */
   readonly resumeSuspendedSessions: Effect.Effect<void>
 }
@@ -66,6 +70,7 @@ export const layer = (options?: Options) =>
   Layer.effect(
     Service,
     Effect.gen(function* () {
+      const db = (yield* Database.Service).db
       const store = yield* SessionStore.Service
       const execution = yield* SessionExecution.Service
       const bus = yield* Bus.Service
@@ -75,6 +80,34 @@ export const layer = (options?: Options) =>
       const maxAttempts = options?.maxAttempts ?? DEFAULT_MAX_ATTEMPTS
 
       const prepareResume = Effect.fnUntraced(function* (sessionID: SessionSchema.ID) {
+        // A verified stop or uncertain dispatch is deny-only. Resolve the next
+        // actual input before adding restart notices; protected admission may
+        // reject those notices, and an old input must never resume through them.
+        const recovery = yield* SessionInbox.serialized(
+          sessionID,
+          Effect.gen(function* () {
+            const pending = yield* SessionInbox.nextPromotable(db, sessionID, "input")
+            const latest = yield* SessionHistory.latestInput(db, sessionID).pipe(Effect.orDie)
+            const inputID = pending?.id ?? latest?.id
+            if (inputID && (yield* SessionHistory.terminalInput(db, sessionID, inputID))) {
+              if (yield* execution.isActive(sessionID)) return "ordinary" as const
+              yield* store.release(sessionID)
+              return "stopped" as const
+            }
+            // A new input keeps its own authority checks. A restart note for
+            // the old stopped input must not obstruct that independent work.
+            if (
+              pending &&
+              (pending.type === "user" || pending.type === "synthetic") &&
+              latest &&
+              pending.id !== latest.id &&
+              (yield* SessionHistory.terminalInput(db, sessionID, latest.id))
+            )
+              return "independent" as const
+            return "ordinary" as const
+          }),
+        )
+        if (recovery === "stopped") return false
         // Durable before the resume runs, so a crash inside the resumed turn is
         // counted by the next sweep and the budget cannot be dodged.
         const attempts = yield* store.countResume(sessionID)
@@ -89,6 +122,7 @@ export const layer = (options?: Options) =>
           )
           return false
         }
+        if (recovery === "independent") return true
         yield* bus.publish(SessionEvent.Synthetic, {
           sessionID,
           text: CONTINUE_AFTER_SERVER_RESTART,
@@ -236,5 +270,5 @@ export const layer = (options?: Options) =>
 export const node = makeGlobalNode({
   service: Service,
   layer: layer(),
-  deps: [SessionStore.node, SessionExecution.node, Bus.node, Job.node, Session.node],
+  deps: [Database.node, SessionStore.node, SessionExecution.node, Bus.node, Job.node, Session.node],
 })

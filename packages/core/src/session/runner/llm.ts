@@ -179,6 +179,12 @@ const layer = Layer.effect(
                   if (candidate === "blocked" && !force && !continuing) return DrainResult.Complete()
                   // Never resolve a claimed input's agent/configuration. It has
                   // no execution obligation until readiness commits.
+                  const actualInput =
+                    typeof candidate === "object"
+                      ? candidate
+                      : yield* SessionHistory.latestInput(db, sessionID).pipe(Effect.orDie)
+                  if (actualInput && (yield* SessionHistory.terminalInput(db, sessionID, actualInput.id)))
+                    return DrainResult.Complete()
                   const selected = yield* prepareSelection(sessionID, candidate === "blocked" ? undefined : candidate)
                   const promoted = yield* SessionInbox.promote(db, bus, sessionID, scope, (pending) =>
                     Effect.gen(function* () {
@@ -257,6 +263,8 @@ const layer = Layer.effect(
       while (true) {
         const next = yield* advanceToStep()
         if (next._tag !== "Ready") return next
+        if (next.context.input && (yield* SessionHistory.terminalInput(db, sessionID, next.context.input.id)))
+          return DrainResult.Complete()
         continuing = yield* runStep(next.context, step)
         step++
         force = false
@@ -268,6 +276,8 @@ const layer = Layer.effect(
       sessionID: SessionSchema.ID,
       selected: SessionContext.Selection,
     ) {
+      if (selected.input && (yield* SessionHistory.terminalInput(db, sessionID, selected.input.id)))
+        return yield* Effect.die(new Error("Execution context authorization is unavailable"))
       const scope = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
         selected.session.contextPolicy?.version === 2 ? NativeProducer.managedPreparation(effect) : effect
       const preview = yield* scope(context.load(selected))
@@ -337,6 +347,9 @@ const layer = Layer.effect(
     })
 
     const prepareContext = Effect.fn("SessionRunner.prepareContext")(function* (sessionID: SessionSchema.ID) {
+      const input = yield* SessionHistory.latestInput(db, sessionID).pipe(Effect.orDie)
+      if (input && (yield* SessionHistory.terminalInput(db, sessionID, input.id)))
+        return yield* Effect.die(new Error("Execution context authorization is unavailable"))
       return yield* loadWithGrant(sessionID, yield* prepareSelection(sessionID))
     })
 

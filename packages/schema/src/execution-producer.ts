@@ -179,6 +179,7 @@ export interface McpInvocation extends Schema.Schema.Type<typeof McpInvocation> 
 export const McpInvocation = Schema.Struct({
   version: Schema.Literal(1),
   purpose: Schema.Literal("native-mcp-invocation"),
+  terminalVersion: Schema.Literal(1).pipe(optional),
   contract: Schema.Literal("mcp-invocation-v1"),
   producerEpoch: bounded(128),
   sessionID: SessionID,
@@ -207,6 +208,7 @@ export interface ToolResultProjection extends Schema.Schema.Type<typeof ToolResu
 export const ToolResultProjection = Schema.Struct({
   version: Schema.Literal(1),
   purpose: Schema.Literal("native-tool-result-projection"),
+  terminalVersion: Schema.Literal(1).pipe(optional),
   contract: Schema.Literal("mcp-result-projection-v1"),
   producerEpoch: bounded(128),
   sessionID: SessionID,

@@ -19,6 +19,10 @@ export const Reference = ExecutionProducer.PublicationReference
 export interface Reference extends Schema.Schema.Type<typeof Reference> {}
 export const State = Schema.Struct({
   version: Schema.Literals([1, 2]),
+  terminalControl: Schema.Struct({
+    unitID: ExecutionDisclosure.PublicationProof.fields.unitID,
+    unitDigest: ExecutionDisclosure.PublicationProof.fields.unitDigest,
+  }).pipe(optional),
   complete: Schema.Boolean.pipe(optional),
   groups: Schema.Array(
     Schema.Struct({
@@ -29,8 +33,8 @@ export const State = Schema.Struct({
     }),
   ).pipe(optional),
   revision: ExecutionDisclosure.PublicationProof.fields.unitDigest,
-  references: Schema.Array(Reference).check(Schema.isMinLength(1)),
-})
+  references: Schema.Array(Reference),
+}).check(Schema.makeFilter((state) => state.terminalControl !== undefined || state.references.length > 0))
 export interface State extends Schema.Schema.Type<typeof State> {}
 
 export const revision = (message: SessionMessage.Info) =>
@@ -48,7 +52,11 @@ export const next = Effect.fnUntraced(function* (
   const admission = Option.getOrUndefined(yield* Effect.serviceOption(SessionPublicationAdmission.Service))
   const proof = admission?.accepts(event) ? (admission.publicationFor?.(event) ?? admission.publication) : undefined
   const source =
-    proof && proof.kind !== "human-input" && proof.sessionID === sessionID && proof.unitID === event.id
+    proof &&
+    !(proof.version === 2 && proof.mode === "terminal-control") &&
+    proof.kind !== "human-input" &&
+    proof.sessionID === sessionID &&
+    proof.unitID === event.id
       ? Schema.decodeUnknownSync(Reference)(proof)
       : undefined
   const before = yield* db
@@ -58,14 +66,27 @@ export const next = Effect.fnUntraced(function* (
     .get()
     .pipe(Effect.orDie)
   const prior = before?.publication_provenance
-  if (!source && !prior) return null
+  const terminal = proof?.version === 2 && proof.mode === "terminal-control"
+  if (!source && !prior && !terminal) return null
   const old =
     before === undefined
       ? undefined
       : Schema.decodeUnknownSync(SessionMessage.Info)({ ...before.data, id: before.id, type: before.type })
   // Existing unknown or changed rows stay unknown. A later permitted write
   // cannot retroactively classify their previous content.
-  if (before !== undefined && (!prior || !old || prior.revision !== revision(old))) return null
+  if (!terminal && before !== undefined && (!prior || !old || prior.revision !== revision(old))) return null
+  if (proof?.version === 2 && proof.mode === "terminal-control") {
+    if (proof.kind !== "tool-control" || proof.complete) return null
+    const retained =
+      prior && old && prior.revision === revision(old)
+        ? prior
+        : { version: 2 as const, complete: false, groups: [], references: prior?.references ?? [] }
+    return State.make({
+      ...retained,
+      revision: revision(message),
+      terminalControl: { unitID: proof.unitID, unitDigest: proof.unitDigest },
+    })
+  }
   if (!source && old) {
     // Native terminal controls can clear retry bookkeeping. Preserve lineage
     // only when every other encoded field is exactly unchanged.

@@ -661,6 +661,7 @@ export type SessionPublicationCommitted = {
       | { operation: "ephemeral-event"; length: 1 }
       | { operation: "tool-event"; length: 1 }
       | { operation: "tool-spill"; length: 1 }
+      | { operation: "terminal-control"; length: number }
   }
 }
 

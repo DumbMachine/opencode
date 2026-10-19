@@ -4,7 +4,7 @@ import { fileURLToPath } from "url"
 import path from "path"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { EffectDrizzleSqlite } from "@opencode/core/database/drizzle"
-import { Deferred, Effect, Fiber, Layer } from "effect"
+import { Deferred, Effect, Exit, Fiber, Layer } from "effect"
 import { Reactivity } from "effect/unstable/reactivity"
 import { SqlClient, Statement } from "effect/unstable/sql"
 import { sql } from "drizzle-orm"
@@ -22,6 +22,8 @@ import sessionInboxMigration from "@opencode/core/database/migration/20260812181
 import sessionViewedStateMigration from "@opencode/core/database/migration/20260819222447_session_viewed_state"
 import messagePublicationProvenanceMigration from "@opencode/core/database/migration/20261018142423_message_publication_provenance"
 import { Global } from "@opencode/util/global"
+import terminalIntentMigration from "@opencode/core/database/migration/20261019214250_terminal_invocation_intent"
+import terminalControlMigration from "@opencode/core/database/migration/20261019213736_terminal_control_observation"
 
 const run = <A, E>(
   effect: Effect.Effect<A, E, SqlClient.SqlClient | Global.Service>,
@@ -63,6 +65,37 @@ const parkedClient = (arrived: Deferred.Deferred<void>, gate: Deferred.Deferred<
   ).pipe(Layer.provide(SqliteClient.layer({ filename: ":memory:", disableWAL: true })), Layer.provide(Reactivity.layer))
 
 describe("DatabaseMigration", () => {
+  test("upgrades terminal observation storage once, preserves legacy inputs and cascades session retirement", async () => {
+    await run(
+      Effect.gen(function* () {
+        const db = yield* makeDb
+        yield* db.run(sql`PRAGMA foreign_keys = ON`)
+        yield* db.run(sql`CREATE TABLE session_v2 (id text PRIMARY KEY)`)
+        yield* db.run(sql`INSERT INTO session_v2 VALUES ('legacy'), ('other')`)
+        yield* DatabaseMigration.applyOnly(db, [terminalControlMigration, terminalIntentMigration])
+        yield* DatabaseMigration.applyOnly(db, [terminalControlMigration, terminalIntentMigration])
+        yield* db.run(sql`INSERT INTO session_terminal_invocation (session_id,input_id,invocation_id,context_reference,evidence,created)
+        VALUES ('legacy','input','first','context','{}',1), ('legacy','input','second','context','{}',1)`)
+        expect((yield* db.all(sql`SELECT * FROM session_terminal_invocation`)).length).toBe(2)
+        expect(yield* db.all(sql`SELECT * FROM session_terminal_control`)).toEqual([])
+        const insert = (session: string) =>
+          db.run(sql`INSERT INTO session_terminal_control
+        (session_id,input_id,attempt,message_id,tool_call_id,producer_epoch,producer_key_id,
+         context_reference,receipt_reference,evidence,created)
+        VALUES (${session},'input','attempt','message','call','epoch','key','context','receipt','{}',1)`)
+        yield* insert("legacy")
+        expect(Exit.isFailure(yield* insert("legacy").pipe(Effect.exit))).toBeTrue()
+        yield* insert("other")
+        expect((yield* db.all(sql`SELECT * FROM session_terminal_control`)).length).toBe(2)
+        yield* db.run(sql`DELETE FROM session_v2 WHERE id='legacy'`)
+        expect(yield* db.all(sql`SELECT * FROM session_terminal_invocation`)).toEqual([])
+        expect(
+          yield* db.all(sql`SELECT session_id,input_id,unit_id,unit_digest FROM session_terminal_control`),
+        ).toEqual([{ session_id: "other", input_id: "input", unit_id: null, unit_digest: null }])
+      }),
+    )
+  })
+
   test("adds private message provenance without fabricating legacy associations", async () => {
     await run(
       Effect.gen(function* () {

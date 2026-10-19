@@ -678,6 +678,7 @@ export type SessionLogOutput =
               | { readonly operation: "ephemeral-event"; readonly length: 1 }
               | { readonly operation: "tool-event"; readonly length: 1 }
               | { readonly operation: "tool-spill"; readonly length: 1 }
+              | { readonly operation: "terminal-control"; readonly length: number }
           }
         }
       | {

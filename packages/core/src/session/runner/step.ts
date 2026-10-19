@@ -10,7 +10,7 @@ import {
   type ToolCall,
 } from "@opencode/ai"
 import type { Agent } from "@opencode/schema/agent"
-import { Cause, Clock, Data, Effect, Exit, Fiber, Option, Stream } from "effect"
+import { Cause, Clock, Data, Deferred, Effect, Exit, Fiber, Option, Stream } from "effect"
 import { SessionError } from "@opencode/schema/session-error"
 import { Bus } from "../../bus.js"
 import { Permission } from "../../permission.js"
@@ -28,6 +28,7 @@ import { SessionUsage } from "../usage.js"
 import { SessionRunnerModel } from "./model.js"
 import { createLLMEventPublisher } from "./publish-llm-event.js"
 import { SessionRunnerRetry } from "./retry.js"
+import { NativeProducer } from "../../execution-producer.js"
 
 export type Outcome = Data.TaggedEnum<{
   Completed: { readonly needsContinuation: boolean }
@@ -82,6 +83,9 @@ export const make = Effect.gen(function* () {
       snapshot: startSnapshot,
       started: yield* Clock.currentTimeMillis,
     })
+    const terminalSignal = yield* Deferred.make<void>()
+    let terminalOutcome: { readonly id: string; readonly result: Tool.NormalizedResult } | undefined
+    const terminalResult = () => terminalOutcome
     const toolRuns: Array<{
       readonly call: ToolCall
       readonly fiber: Fiber.Fiber<void, Permission.DeclinedError | QuestionTool.CancelledError>
@@ -110,7 +114,7 @@ export const make = Effect.gen(function* () {
     ).pipe(
       Stream.runForEach((event) =>
         Effect.gen(function* () {
-          if (overflowFailure || publisher.hasProviderError()) return
+          if (terminalOutcome || overflowFailure || publisher.hasProviderError()) return
           if (
             LLMEvent.is.providerError(event) &&
             isContextOverflowFailure(event) &&
@@ -125,8 +129,19 @@ export const make = Effect.gen(function* () {
             call: event,
             fiber: yield* Effect.uninterruptibleMask((restore) =>
               restore(executeTool(event)).pipe(
-                Effect.flatMap((result) => toolOutput.truncate(result, input.prepared.publication)),
-                Effect.flatMap((outcome) => publisher.toolExecution(event.id, event.name, outcome)),
+                Effect.catchCause((cause) => {
+                  const result = NativeProducer.terminalToolResult(cause)
+                  return result ? Effect.succeed(result) : Effect.failCause(cause)
+                }),
+                Effect.flatMap((result) => {
+                  if (!NativeProducer.isTerminalToolResult(result))
+                    return toolOutput.truncate(result, input.prepared.publication)
+                  terminalOutcome = { id: event.id, result }
+                  return Deferred.succeed(terminalSignal, undefined).pipe(Effect.as(result))
+                }),
+                Effect.flatMap((outcome) =>
+                  terminalOutcome ? Effect.void : publisher.toolExecution(event.id, event.name, outcome),
+                ),
                 Effect.catchTag("Tool.Error", (error) =>
                   publisher.failTool(event.id, toSessionError(error), error.metadata, error).pipe(Effect.asVoid),
                 ),
@@ -135,18 +150,59 @@ export const make = Effect.gen(function* () {
           })
         }),
       ),
-      Effect.ensuring(publisher.flush()),
+      Effect.ensuring(Effect.suspend(() => (terminalOutcome ? Effect.void : publisher.flush()))),
     )
 
     // Keep the final tool and Step events uninterruptible, even when the work itself is cancelled.
     return yield* Effect.uninterruptibleMask((restore) =>
       Effect.gen(function* () {
-        const stream = yield* restore(providerStream).pipe(Effect.exit)
+        const stream = yield* Effect.raceFirst(
+          restore(providerStream).pipe(Effect.exit),
+          Deferred.await(terminalSignal).pipe(Effect.as(Exit.succeed(undefined))),
+        )
+        const terminalAfterStream = terminalResult()
+        if (terminalAfterStream) {
+          yield* interruptTools
+          yield* restore(publisher.terminalControl(terminalAfterStream.id, terminalAfterStream.result))
+          return Outcome.Completed({ needsContinuation: false })
+        }
         const streamFailure = Option.getOrUndefined(Exit.findErrorOption(stream))
         const streamInterrupted = Exit.hasInterrupts(stream)
-        if (!overflowFailure && publisher.hasStarted()) yield* publisher.streamed()
+        // A local terminal mutation may invalidate the generating context after
+        // the provider body ends but before its signed result arrives. Join the
+        // local tools before rejecting this ordinary boundary publication.
+        const streamed =
+          !overflowFailure && publisher.hasStarted()
+            ? yield* publisher.streamed().pipe(Effect.exit)
+            : Exit.succeed(undefined)
         if (streamInterrupted) yield* interruptTools
-        const joined = yield* restore(Fiber.awaitAll(toolRuns.map((run) => run.fiber))).pipe(Effect.exit)
+        const settlement = Exit.isFailure(streamed) ? input.prepared.publication?.terminalSettlement : undefined
+        if (Exit.isFailure(streamed) && (!settlement || !(yield* settlement.pending))) {
+          yield* interruptTools
+          return yield* Effect.failCause(streamed.cause)
+        }
+        const joining = Effect.raceFirst(
+          restore(Fiber.awaitAll(toolRuns.map((run) => run.fiber))),
+          Deferred.await(terminalSignal).pipe(Effect.as([])),
+        ).pipe(Effect.exit)
+        const joined = yield* settlement && Exit.isFailure(streamed)
+          ? joining.pipe(
+              Effect.timeoutOrElse({
+                duration: Math.max(0, settlement.deadline - (yield* Clock.currentTimeMillis)),
+                orElse: () => Effect.succeed(Exit.failCause(streamed.cause)),
+              }),
+            )
+          : joining
+        const terminalAfterTools = terminalResult()
+        if (terminalAfterTools) {
+          yield* interruptTools
+          yield* restore(publisher.terminalControl(terminalAfterTools.id, terminalAfterTools.result))
+          return Outcome.Completed({ needsContinuation: false })
+        }
+        if (Exit.isFailure(streamed)) {
+          yield* interruptTools
+          return yield* Effect.failCause(streamed.cause)
+        }
         if (Exit.isFailure(joined)) yield* interruptTools
         const tools = classifyToolExits(joined, toolRuns)
 

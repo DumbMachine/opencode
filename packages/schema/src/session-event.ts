@@ -681,6 +681,10 @@ export const PublicationCommitted = Event.durable({
       Schema.Struct({ operation: Schema.Literal("ephemeral-event"), length: Schema.Literal(1) }),
       Schema.Struct({ operation: Schema.Literal("tool-event"), length: Schema.Literal(1) }),
       Schema.Struct({ operation: Schema.Literal("tool-spill"), length: Schema.Literal(1) }),
+      Schema.Struct({
+        operation: Schema.Literal("terminal-control"),
+        length: PositiveInt.check(Schema.isLessThanOrEqualTo(131)),
+      }),
     ]),
   },
 })

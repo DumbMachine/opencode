@@ -1,12 +1,14 @@
 export * as SessionPublicationWriter from "./publication-writer.js"
 
 import { Cause, Clock, Effect, Option, Schema } from "effect"
-import { eq } from "drizzle-orm"
+import { and, eq, isNull } from "drizzle-orm"
+import { Money } from "@opencode/schema/money"
 import { Bus } from "../bus.js"
 import { Database } from "../database/database.js"
 import { Event } from "@opencode/schema/event"
 import { AbsolutePath } from "@opencode/schema/schema"
 import { ExecutionDisclosure } from "@opencode/schema/execution-disclosure"
+import { ExecutionProducer } from "@opencode/schema/execution-producer"
 import { SessionEvent } from "@opencode/schema/session-event"
 import { SessionInbox } from "@opencode/schema/session-inbox"
 import { SessionDisclosure } from "./disclosure.js"
@@ -14,10 +16,17 @@ import { SessionPublication } from "./publication.js"
 import { SessionRunCoordinator } from "./run-coordinator.js"
 import { SessionExecutionCapability } from "./execution-capability.js"
 import { SessionLifecycle } from "./lifecycle.js"
-import { SessionInboxTable, SessionTable } from "./sql.js"
+import {
+  SessionInboxTable,
+  SessionMessageTable,
+  SessionTable,
+  SessionTerminalControlTable,
+  SessionTerminalInvocationTable,
+} from "./sql.js"
 import { SessionPublicationAdmission } from "./publication-admission.js"
 import { NativeProducer } from "../execution-producer.js"
 import { ToolEventPublication } from "../event/tool-publication.js"
+import { SessionHistory } from "./history.js"
 import { interruptedToolError } from "./tool-interruption.js"
 
 const modelDefinitions = new Map<string, Event.Definition>(
@@ -84,6 +93,8 @@ export const capturePreflight = Effect.fnUntraced(
         const pending = NativeProducer.capturePendingTools(request)
         const owned = Schema.decodeUnknownSync(ExecutionDisclosure.ContextRequest)(structuredClone(request))
         if (!live() || owned.sessionID !== sessionID || owned.inputID !== inputID || owned.kind !== "primary")
+          return yield* Effect.die(unavailable())
+        if (database && (yield* SessionHistory.terminalInput(database.db, sessionID, inputID)))
           return yield* Effect.die(unavailable())
         const prepared = yield* SessionDisclosure.prepareRequest(service, owned)
         if (!live()) return yield* Effect.die(unavailable())
@@ -484,10 +495,33 @@ const make = Effect.fnUntraced(function* (input: {
     descriptor.version === 2 && context.kind === "primary"
       ? NativeProducer.captureToolControl(input.state.service, input.prepared.signed)
       : undefined
+  let terminalObserved = false
   const valid = (permit: SessionPublication.Permit) => live() && permit.valid()
+  const ordinaryValid = (permit: SessionPublication.Permit) => !terminalObserved && valid(permit)
   const check = (permit: SessionPublication.Permit) =>
     Effect.sync(() => {
       if (!valid(permit)) throw new AdmissionDenied()
+    })
+  // The same retained lifecycle row serializes ordinary commits against
+  // observation of a verified terminal outcome across native SQL connections.
+  // This runs again inside the canonical Bus publication transaction.
+  const ordinaryCheck = (permit: SessionPublication.Permit) =>
+    Effect.gen(function* () {
+      if (!ordinaryValid(permit)) return yield* Effect.die(unavailable())
+      yield* SessionLifecycle.activate(database.db, context.sessionID).pipe(Effect.orDie)
+      const stopped = yield* database.db
+        .select({ inputID: SessionTerminalControlTable.input_id })
+        .from(SessionTerminalControlTable)
+        .where(
+          and(
+            eq(SessionTerminalControlTable.session_id, context.sessionID),
+            eq(SessionTerminalControlTable.input_id, context.inputID),
+          ),
+        )
+        .get()
+        .pipe(Effect.orDie)
+      if (stopped) return yield* Effect.die(unavailable())
+      if (!ordinaryValid(permit)) return yield* Effect.die(unavailable())
     })
   const witness = Effect.fnUntraced(function* (
     unit: {
@@ -500,7 +534,7 @@ const make = Effect.fnUntraced(function* (input: {
     },
     permit: SessionPublication.Permit,
   ) {
-    yield* check(permit)
+    yield* ordinaryCheck(permit)
     const proof = permit.proof
     const session = yield* database.db
       .select({ directory: SessionTable.directory, workspaceID: SessionTable.workspace_id })
@@ -538,11 +572,7 @@ const make = Effect.fnUntraced(function* (input: {
               directory: AbsolutePath.make(session.directory),
               ...(session.workspaceID ? { workspaceID: session.workspaceID } : {}),
             },
-            commit: () =>
-              check(permit).pipe(
-                Effect.andThen(SessionLifecycle.activate(database.db, context.sessionID).pipe(Effect.orDie)),
-                Effect.andThen(check(permit)),
-              ),
+            commit: () => ordinaryCheck(permit),
           },
         ],
       ]),
@@ -588,6 +618,7 @@ const make = Effect.fnUntraced(function* (input: {
     }
     if (
       !valid(permit) ||
+      (permit.proof.version === 2 && permit.proof.mode === "terminal-control") ||
       Object.entries(expected).some(([key, value]) => permit.proof[key as keyof typeof permit.proof] !== value)
     )
       return yield* Effect.die(unavailable())
@@ -599,7 +630,7 @@ const make = Effect.fnUntraced(function* (input: {
     event: Event.Payload,
     source?: object,
   ): Effect.fn.Return<ToolEventPublication.Admission & { readonly digest: string; readonly valid: () => boolean }> {
-    if (!control || !live()) return yield* Effect.die(unavailable())
+    if (!control || !live() || terminalObserved) return yield* Effect.die(unavailable())
     const encoded = Schema.encodeUnknownSync(definition.data)(event.data) as Record<string, unknown>
     if (
       (typeof encoded.sessionID === "string" && encoded.sessionID !== context.sessionID) ||
@@ -646,7 +677,7 @@ const make = Effect.fnUntraced(function* (input: {
       projection,
     })
     const accepts = (actual: Event.Payload) =>
-      valid(permit) &&
+      ordinaryValid(permit) &&
       actual.id === event.id &&
       actual.type === definition.type &&
       SessionDisclosure.digest({
@@ -659,8 +690,8 @@ const make = Effect.fnUntraced(function* (input: {
       }) === envelopeDigest
     return {
       digest,
-      valid: () => valid(permit),
-      check: check(permit),
+      valid: () => ordinaryValid(permit),
+      check: ordinaryCheck(permit),
       provide: <A, E, R>(effect: Effect.Effect<A, E, R>) =>
         Effect.gen(function* () {
           const previous = Option.getOrUndefined(yield* Effect.serviceOption(SessionPublicationAdmission.Service))
@@ -718,6 +749,369 @@ const make = Effect.fnUntraced(function* (input: {
     )
     return Object.freeze({ id, digest: admission.digest, created, publish })
   })
+  const invocationKey = (fact: NonNullable<ReturnType<typeof NativeProducer.invocationObservation>>) =>
+    and(
+      eq(SessionTerminalInvocationTable.session_id, fact.sessionID),
+      eq(SessionTerminalInvocationTable.input_id, fact.inputID),
+      eq(SessionTerminalInvocationTable.invocation_id, fact.invocationID),
+    )
+  const prepareInvocation = Effect.fnUntraced(function* (source: object) {
+    const fact = NativeProducer.invocationObservation(source)
+    if (
+      !control ||
+      !live() ||
+      !fact ||
+      fact.sessionID !== context.sessionID ||
+      fact.inputID !== context.inputID ||
+      fact.attempt !== context.attempt ||
+      fact.contextReference !== context.contextReference ||
+      Buffer.byteLength(fact.evidence) > 8192
+    )
+      return yield* Effect.die(unavailable())
+    yield* database.db
+      .transaction(() =>
+        Effect.gen(function* () {
+          yield* SessionLifecycle.activate(database.db, context.sessionID).pipe(Effect.orDie)
+          yield* database.db
+            .insert(SessionTerminalInvocationTable)
+            .values({
+              session_id: fact.sessionID,
+              input_id: fact.inputID,
+              invocation_id: fact.invocationID,
+              context_reference: fact.contextReference,
+              evidence: fact.evidence,
+              created: Date.now(),
+            })
+            .onConflictDoNothing()
+            .run()
+            .pipe(Effect.orDie)
+          const retained = yield* database.db
+            .select()
+            .from(SessionTerminalInvocationTable)
+            .where(invocationKey(fact))
+            .get()
+            .pipe(Effect.orDie)
+          if (retained?.evidence !== fact.evidence) return yield* Effect.die(unavailable())
+        }),
+      )
+      .pipe(Effect.orDie)
+  }, Effect.uninterruptible)
+  const completeInvocation = Effect.fnUntraced(function* (source: object) {
+    const fact = NativeProducer.invocationObservation(source)
+    if (
+      !control ||
+      !fact ||
+      fact.sessionID !== context.sessionID ||
+      fact.inputID !== context.inputID ||
+      fact.attempt !== context.attempt ||
+      fact.contextReference !== context.contextReference
+    )
+      return yield* Effect.die(unavailable())
+    // Only the actual SDK verifier calls this after its exact ordinary result.
+    yield* database.db
+      .delete(SessionTerminalInvocationTable)
+      .where(and(invocationKey(fact), eq(SessionTerminalInvocationTable.evidence, fact.evidence)))
+      .run()
+      .pipe(Effect.orDie)
+  }, Effect.uninterruptible)
+  // Retain a deny-only execution barrier as soon as the signed result arrives,
+  // before hooks unwind or pub2 starts. Cancellation cannot erase an uncertain
+  // committed host mutation. This private row never authorizes publication.
+  const observeTerminal = Effect.fnUntraced(function* (source: object) {
+    const fact = NativeProducer.terminalObservation(source)
+    if (
+      !control ||
+      !fact ||
+      fact.sessionID !== context.sessionID ||
+      fact.inputID !== context.inputID ||
+      fact.attempt !== context.attempt ||
+      fact.contextReference !== context.contextReference ||
+      Buffer.byteLength(fact.evidence) > 32768
+    )
+      return yield* Effect.die(unavailable())
+    terminalObserved = true
+    const key = and(
+      eq(SessionTerminalControlTable.session_id, context.sessionID),
+      eq(SessionTerminalControlTable.input_id, context.inputID),
+    )
+    yield* database.db
+      .transaction(() =>
+        Effect.gen(function* () {
+          yield* SessionLifecycle.activate(database.db, context.sessionID).pipe(Effect.orDie)
+          const value = {
+            session_id: fact.sessionID,
+            input_id: fact.inputID,
+            attempt: fact.attempt,
+            message_id: fact.messageID,
+            tool_call_id: fact.toolCallID,
+            producer_epoch: fact.producerEpoch,
+            producer_key_id: fact.producerKeyID,
+            context_reference: fact.contextReference,
+            receipt_reference: fact.receiptReference,
+            evidence: fact.evidence,
+          }
+          yield* database.db
+            .insert(SessionTerminalControlTable)
+            .values({ ...value, created: Date.now() })
+            .onConflictDoNothing()
+            .run()
+            .pipe(Effect.orDie)
+          const retained = yield* database.db
+            .select()
+            .from(SessionTerminalControlTable)
+            .where(key)
+            .get()
+            .pipe(Effect.orDie)
+          if (
+            !retained ||
+            Object.entries(value).some(([name, value]) => retained[name as keyof typeof retained] !== value)
+          )
+            return yield* Effect.die(unavailable())
+        }),
+      )
+      .pipe(Effect.orDie)
+  }, Effect.uninterruptible)
+  // This bounded UI control unit is the only publication path for a verified
+  // terminal outcome. Its witness and every visible event share one commit.
+  const prepareTerminal = Effect.fnUntraced(function* (terminal: {
+    readonly id: string
+    readonly assistantMessageID: ExecutionDisclosure.ContextProof["inputID"]
+    readonly source: object
+    readonly pending: readonly { readonly id: string; readonly executed: boolean }[]
+  }): Effect.fn.Return<Unit> {
+    if (
+      !control ||
+      !live() ||
+      !NativeProducer.isTerminalToolResult(terminal.source) ||
+      terminal.pending.length > 128 ||
+      new Set(terminal.pending.map((item) => item.id)).size !== terminal.pending.length ||
+      terminal.pending.some((item) => item.id === terminal.id)
+    )
+      return yield* Effect.die(unavailable())
+    yield* observeTerminal(terminal.source)
+    const row = yield* database.db
+      .select()
+      .from(SessionMessageTable)
+      .where(
+        and(
+          eq(SessionMessageTable.session_id, context.sessionID),
+          eq(SessionMessageTable.id, terminal.assistantMessageID),
+        ),
+      )
+      .get()
+      .pipe(Effect.orDie)
+    if (!row) return yield* Effect.die(unavailable())
+    const assistant = yield* SessionHistory.decodeMessageRow(row).pipe(Effect.orDie)
+    if (assistant.type !== "assistant") return yield* Effect.die(unavailable())
+    const actualTools = assistant.content.filter((item) => item.type === "tool")
+    const completed = actualTools.find((item) => item.id === terminal.id)
+    if (!completed || (completed.state.status !== "running" && completed.state.status !== "streaming"))
+      return yield* Effect.die(unavailable())
+    const pending = actualTools.filter(
+      (item) => item.id !== terminal.id && (item.state.status === "running" || item.state.status === "streaming"),
+    )
+    if (pending.length > 128) return yield* Effect.die(unavailable())
+    const data = [
+      {
+        definition: SessionEvent.Tool.Success,
+        data: {
+          sessionID: context.sessionID,
+          assistantMessageID: terminal.assistantMessageID,
+          id: terminal.id,
+          content: [{ type: "text", text: "Operation completed." }],
+          executed: false,
+        },
+      },
+      ...pending.map((item) => ({
+        definition: SessionEvent.Tool.Failed,
+        data: {
+          sessionID: context.sessionID,
+          assistantMessageID: terminal.assistantMessageID,
+          id: item.id,
+          error: interruptedToolError,
+          executed: item.executed === true,
+        },
+      })),
+      {
+        definition: SessionEvent.Step.Ended,
+        data: {
+          sessionID: context.sessionID,
+          assistantMessageID: terminal.assistantMessageID,
+          finish: "stop",
+          cost: Money.USD.make(0),
+          tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        },
+      },
+    ].map((item) => ({
+      definition: item.definition,
+      data: Schema.decodeUnknownSync(item.definition.data)(
+        JSON.parse(JSON.stringify(Schema.encodeUnknownSync(item.definition.data)(item.data))),
+      ),
+      id: Event.ID.create(),
+    }))
+    const id = data[0].id,
+      witnessID = Event.ID.create(),
+      created = yield* Clock.currentTimeMillis,
+      sequence = nextSequence++
+    if (!Number.isSafeInteger(sequence)) return yield* Effect.die(unavailable())
+    const session = yield* database.db
+      .select({ directory: SessionTable.directory, workspaceID: SessionTable.workspace_id })
+      .from(SessionTable)
+      .where(eq(SessionTable.id, context.sessionID))
+      .get()
+      .pipe(Effect.orDie)
+    if (!session) return yield* Effect.die(unavailable())
+    const location = {
+      directory: AbsolutePath.make(session.directory),
+      ...(session.workspaceID ? { workspaceID: session.workspaceID } : {}),
+    }
+    const events = data.map((item) => ({
+      id: item.id,
+      created,
+      type: item.definition.type,
+      data: Schema.encodeUnknownSync(item.definition.data)(item.data),
+      location,
+    }))
+    const batch = { operation: "terminal-control" as const, length: events.length + 1 }
+    const digest = SessionDisclosure.digest({
+      version: 2,
+      kind: "tool-control",
+      sessionID: context.sessionID,
+      inputID: context.inputID,
+      contextReference: context.contextReference,
+      contextDigest: context.contextDigest,
+      componentsDigest: context.componentsDigest,
+      attempt: context.attempt,
+      sequence,
+      batch: { ...batch, witnessID, events: [witnessID, ...events.map((event) => event.id)] },
+      events,
+    })
+    const key = and(
+      eq(SessionTerminalControlTable.session_id, context.sessionID),
+      eq(SessionTerminalControlTable.input_id, context.inputID),
+    )
+    yield* database.db
+      .update(SessionTerminalControlTable)
+      .set({ unit_id: id, unit_digest: digest })
+      .where(and(key, isNull(SessionTerminalControlTable.unit_id)))
+      .run()
+      .pipe(Effect.orDie)
+    const retainedUnit = yield* database.db
+      .select()
+      .from(SessionTerminalControlTable)
+      .where(key)
+      .get()
+      .pipe(Effect.orDie)
+    if (retainedUnit?.unit_id !== id || retainedUnit.unit_digest !== digest) return yield* Effect.die(unavailable())
+    const projection = NativeProducer.projectTerminalUnit(digest, terminal.source)
+    if (!projection) return yield* Effect.die(unavailable())
+    const identity = Schema.decodeUnknownSync(Schema.fromJsonString(ExecutionProducer.ToolResultProjection))(
+      projection.payload,
+    )
+    if (
+      identity.sessionID !== context.sessionID ||
+      identity.inputID !== context.inputID ||
+      identity.attempt !== context.attempt ||
+      identity.messageID !== terminal.assistantMessageID ||
+      identity.toolCallID !== terminal.id
+    )
+      return yield* Effect.die(unavailable())
+    // Do not retain caller-owned arrays or result aliases across authorization.
+    const envelopes = new Map(events.map((event) => [event.id, SessionDisclosure.digest(event)]))
+    let retained: SessionPublication.Permit | undefined
+    const publish = Effect.gen(function* () {
+      const permit =
+        retained ??
+        (yield* ToolEventPublication.without(
+          authorizer.authorize({
+            unitID: id,
+            unitDigest: digest,
+            kind: "tool-control",
+            projection,
+          }),
+        ))
+      const expected = {
+        version: 2,
+        purpose: "thread-publication",
+        kind: "tool-control",
+        issuer: context.issuer,
+        audience: descriptor.audience,
+        organizationID: descriptor.organizationID,
+        threadID: descriptor.threadID,
+        sessionID: context.sessionID,
+        inputID: context.inputID,
+        attempt: context.attempt,
+        contextReference: context.contextReference,
+        contextDigest: context.contextDigest,
+        componentsDigest: context.componentsDigest,
+        capabilityID: descriptor.capabilityID,
+        capabilityGeneration: revision,
+        unitID: id,
+        unitDigest: digest,
+        mode: "terminal-control",
+        complete: false,
+      }
+      if (Object.entries(expected).some(([key, value]) => permit.proof[key as keyof typeof permit.proof] !== value))
+        return yield* Effect.die(unavailable())
+      retained = permit
+      const proof = permit.proof
+      const witness: Event.Data<typeof SessionEvent.PublicationCommitted> = {
+        sessionID: context.sessionID,
+        inputID: context.inputID,
+        attempt: context.attempt,
+        contextReference: context.contextReference,
+        contextDigest: context.contextDigest,
+        componentsDigest: context.componentsDigest,
+        capabilityID: proof.capabilityID,
+        capabilityGeneration: proof.capabilityGeneration,
+        unitID: id,
+        unitDigest: digest,
+        receiptReference: proof.receiptReference,
+        authorizationVersion: proof.authorizationVersion,
+        manifestBinding: proof.manifestBinding,
+        audienceBinding: proof.audienceBinding,
+        sequence,
+        batch,
+      }
+      const admission = {
+        publication: proof,
+        accepts: (event: Event.Payload) =>
+          valid(permit) &&
+          envelopes.get(event.id) ===
+            SessionDisclosure.digest({
+              id: event.id,
+              created: event.created,
+              type: event.type,
+              data: event.data,
+              location: event.location,
+              ...(event.metadata === undefined ? {} : { metadata: event.metadata }),
+            }),
+      }
+      return yield* ToolEventPublication.without(
+        bus.publishAllOnce([
+          [
+            SessionEvent.PublicationCommitted,
+            witness,
+            {
+              id: witnessID,
+              created,
+              location,
+              commit: () =>
+                check(permit).pipe(
+                  Effect.andThen(SessionLifecycle.activate(database.db, context.sessionID).pipe(Effect.orDie)),
+                  Effect.andThen(check(permit)),
+                ),
+            },
+          ],
+          ...data.map(
+            (item) =>
+              [item.definition, item.data, { id: item.id, created, location, commit: () => check(permit) }] as const,
+          ),
+        ]),
+      ).pipe(Effect.provideService(SessionPublicationAdmission.Service, admission))
+    })
+    return Object.freeze({ id, digest, created, publish })
+  })
   const prepareSpill = Effect.fnUntraced(function* (
     spill: { readonly path: string; readonly content: string; readonly projection: object },
     source: object,
@@ -771,11 +1165,38 @@ const make = Effect.fnUntraced(function* (input: {
       yield* unit.publish
     }
   })
+  const assertExecution = Effect.gen(function* () {
+    if (!live() || (yield* SessionHistory.terminalInput(database.db, context.sessionID, context.inputID)))
+      return yield* Effect.die(unavailable())
+  })
   return Object.freeze({
     prepare,
     ...(control
       ? {
+          assertExecution,
+          terminalSettlement: {
+            deadline: context.expiresAt,
+            pending: database.db
+              .select({ id: SessionTerminalInvocationTable.invocation_id })
+              .from(SessionTerminalInvocationTable)
+              .where(
+                and(
+                  eq(SessionTerminalInvocationTable.session_id, context.sessionID),
+                  eq(SessionTerminalInvocationTable.input_id, context.inputID),
+                ),
+              )
+              .limit(1)
+              .get()
+              .pipe(
+                Effect.orDie,
+                Effect.map((row) => row !== undefined),
+              ),
+          },
           prepareTool,
+          prepareTerminal,
+          observeTerminal,
+          prepareInvocation,
+          completeInvocation,
           prepareSpill,
           settleInterrupted,
           authorizeEvent,

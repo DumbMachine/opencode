@@ -37,7 +37,7 @@ const contextKey = key()
 const resultKey = key()
 const publicationKey = key()
 const catalogKey = key()
-const fixture = (actor = "first") => {
+const fixture = (actor = "first", publicationVersion: 1 | 2 = 1) => {
   const now = Date.now()
   const service = ExecutionDisclosure.Service.make({
     version: 1,
@@ -47,6 +47,7 @@ const fixture = (actor = "first") => {
     audience: "model-context",
     keys: [contextKey.descriptor],
     catalog: { version: 1, audience: "catalog", keys: [catalogKey.descriptor] },
+    publicationVersion,
   })
   const context = ExecutionDisclosure.ContextProof.make({
     version: 1,
@@ -60,7 +61,7 @@ const fixture = (actor = "first") => {
     componentsDigest: Hash.sha256("components-" + actor),
     contextReference: Hash.sha256("reference-" + actor),
     publication: {
-      version: 1,
+      version: publicationVersion,
       endpoint: "http://127.0.0.1/publication",
       audience: "publication",
       keys: [publicationKey.descriptor],
@@ -482,8 +483,9 @@ test("rejects scope substitution, reserved collisions, cancellation and mutable 
   )
 })
 
-test("verifies raw initialize and paginated catalog responses before SDK conversion and preserves later tool calls", async () => {
-  const f = fixture()
+for (const publicationVersion of [1, 2] as const)
+test(`verifies raw catalog and negotiated SDK output validation for publication ${publicationVersion}`, async () => {
+  const f = fixture("first", publicationVersion)
   const envelope = (actual: object, kind: "initialize" | "tools/list", cursor: string) => {
     const raw = JSON.stringify(actual)
     const now = Date.now()
@@ -534,14 +536,36 @@ test("verifies raw initialize and paginated catalog responses before SDK convers
                 instructions: "  Preserve these instructions.\n",
               },
             )
-            protocol.setRequestHandler("tools/list", ({ params }) =>
-              Promise.resolve({
-                tools: [{ name: params?.cursor ? "second" : "first", inputSchema: { type: "object" as const } }],
+            protocol.setRequestHandler("tools/list", ({ params }) => {
+              const negotiated = params?._meta?.["access.execution.terminal"]
+              expect(negotiated).toEqual(publicationVersion === 2 ? { version: 1 } : undefined)
+              const ordinary = {
+                $id: "urn:access:tool-output:fixture",
+                type: "object" as const,
+                properties: { value: { type: "string" } },
+                required: ["value"],
+                additionalProperties: false,
+              }
+              const outputSchema = publicationVersion === 2 ? {
+                type: "object" as const,
+                anyOf: [ordinary, {
+                  type: "object", properties: { completed: { const: true } },
+                  required: ["completed"], additionalProperties: false,
+                }],
+              } : ordinary
+              return Promise.resolve({
+                tools: [{ name: params?.cursor ? "second" : "first", inputSchema: { type: "object" as const }, outputSchema }],
                 ...(params?.cursor ? {} : { nextCursor: "second-page" }),
+              })
+            })
+            protocol.setRequestHandler("tools/call", ({ params }) =>
+              Promise.resolve({
+                content: [{ type: "text", text: "ordinary tool still works" }],
+                structuredContent: params.arguments?.mode === "terminal" ? { completed: true }
+                  : params.arguments?.mode === "malformed" ? { value: 3 }
+                  : params.arguments?.mode === "extra" ? { completed: true, extra: true }
+                  : { value: "ordinary" },
               }),
-            )
-            protocol.setRequestHandler("tools/call", () =>
-              Promise.resolve({ content: [{ type: "text", text: "ordinary tool still works" }] }),
             )
             const transport = new WebStandardStreamableHTTPServerTransport({
               sessionIdGenerator: () => crypto.randomUUID(),
@@ -609,6 +633,12 @@ test("verifies raw initialize and paginated catalog responses before SDK convers
         expect((yield* captured.value.callTool({ name: "first" })).content).toEqual([
           { type: "text", text: "ordinary tool still works" },
         ])
+        const terminal = yield* captured.value.callTool({ name: "first", args: { mode: "terminal" } }).pipe(Effect.exit)
+        expect(Exit.isSuccess(terminal)).toBe(publicationVersion === 2)
+        for (const mode of ["malformed", "extra"]) {
+          const invalid = yield* captured.value.callTool({ name: "first", args: { mode } }).pipe(Effect.exit)
+          expect(Exit.isFailure(invalid)).toBeTrue()
+        }
         const observation = captured.evidence.observations[0]
         expect(() =>
           McpProvenance.catalog(
@@ -724,25 +754,160 @@ test("refuses unbound CodeMode source access and plugin callbacks before invocat
   )
 })
 
-
 test("the canonical executor denies unbound native leaves inside CodeMode before execution", async () => {
   const f = fixture()
   let physical = 0
-  await Effect.runPromise(Effect.gen(function* () {
-    const tools = yield* ToolRegistry.Service
-    yield* tools.transform(editor => editor.add({ name: "ambient", description: "Unsupported actor binding", input: Schema.Struct({}),
-      execute: () => Effect.sync(() => { physical++; return { content: "ambient bytes" } }) }))
-    const snapshot = yield* tools.snapshot()
-    const capture = yield* NativeProducer.captureTools({ service: f.service, signed: f.signed, current: () => true })
-    const identity = { messageID: f.invocation.messageID, toolCallID: "nested-native" }
-    const request = { sessionID: f.context.sessionID, inputID: f.context.inputID, agent: Agent.ID.make("fixture"), messageID: identity.messageID,
-      call: { type: "tool-call" as const, id: identity.toolCallID, name: "execute", input: { code: "return await tools.ambient({})" } } }
-    const result = yield* capture.run(identity, snapshot.execute(request)).pipe(Effect.exit)
-    expect(physical).toBe(0)
-    expect(Exit.isFailure(result) || (Exit.isSuccess(result) && JSON.stringify(result.value).includes("Access needed"))).toBeTrue()
-    yield* snapshot.execute({ ...request, call: { ...request.call, id: "ordinary", input: { code: "return await tools.ambient({})" } } })
-    expect(physical).toBe(1)
-  }).pipe(Effect.scoped, Effect.provide(AppNodeBuilder.build(LayerNode.group([ToolRegistry.node, PluginHooks.node]), [
-    Image.node.replace(Layer.mock(Image.Service, { normalize: () => Effect.die("unused image normalization") })),
-  ]))))
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const tools = yield* ToolRegistry.Service
+      yield* tools.transform((editor) =>
+        editor.add({
+          name: "ambient",
+          description: "Unsupported actor binding",
+          input: Schema.Struct({}),
+          execute: () =>
+            Effect.sync(() => {
+              physical++
+              return { content: "ambient bytes" }
+            }),
+        }),
+      )
+      const snapshot = yield* tools.snapshot()
+      const capture = yield* NativeProducer.captureTools({ service: f.service, signed: f.signed, current: () => true })
+      const identity = { messageID: f.invocation.messageID, toolCallID: "nested-native" }
+      const request = {
+        sessionID: f.context.sessionID,
+        inputID: f.context.inputID,
+        agent: Agent.ID.make("fixture"),
+        messageID: identity.messageID,
+        call: {
+          type: "tool-call" as const,
+          id: identity.toolCallID,
+          name: "execute",
+          input: { code: "return await tools.ambient({})" },
+        },
+      }
+      const result = yield* capture.run(identity, snapshot.execute(request)).pipe(Effect.exit)
+      expect(physical).toBe(0)
+      expect(
+        Exit.isFailure(result) || (Exit.isSuccess(result) && JSON.stringify(result.value).includes("Access needed")),
+      ).toBeTrue()
+      yield* snapshot.execute({
+        ...request,
+        call: { ...request.call, id: "ordinary", input: { code: "return await tools.ambient({})" } },
+      })
+      expect(physical).toBe(1)
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        AppNodeBuilder.build(LayerNode.group([ToolRegistry.node, PluginHooks.node]), [
+          Image.node.replace(Layer.mock(Image.Service, { normalize: () => Effect.die("unused image normalization") })),
+        ]),
+      ),
+    ),
+  )
+})
+
+test("terminal results require negotiated actual dispatch and the exact fixed host snapshot", () => {
+  for (const actor of ["first", "second"]) {
+    const f = fixture(actor, 2)
+    const invocation = { ...f.invocation, terminalVersion: 1 as const }
+    const snapshot = JSON.stringify(McpProvenance.TerminalSnapshot)
+    const actual = f.respond(snapshot, invocation, { mode: "terminal-control", complete: false })
+    expect(McpProvenance.result(f.capture, invocation, actual).proof.mode).toBe("terminal-control")
+    expect(() => McpProvenance.result(f.capture, f.invocation, actual)).toThrow()
+    for (const changed of [
+      { ...McpProvenance.TerminalSnapshot, _meta: {} },
+      { ...McpProvenance.TerminalSnapshot, isError: false },
+      { ...McpProvenance.TerminalSnapshot, structuredContent: { completed: true, path: "/original" } },
+      { content: [{ type: "text", text: "Operation completed. /original" }], structuredContent: { completed: true } },
+    ])
+      expect(() =>
+        McpProvenance.result(
+          f.capture,
+          invocation,
+          f.respond(JSON.stringify(changed), invocation, { mode: "terminal-control", complete: false }),
+        ),
+      ).toThrow()
+    expect(() =>
+      McpProvenance.result(
+        f.capture,
+        invocation,
+        f.respond(snapshot, invocation, { mode: "terminal-control", complete: true }),
+      ),
+    ).toThrow()
+  }
+})
+
+test("terminal capture bypasses result hooks, seals its projection and stops further dispatch", async () => {
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      for (const actor of ["first", "second"]) {
+        const f = fixture(actor, 2)
+        const scope = yield* NativeProducer.captureTools({
+          service: f.service,
+          signed: f.signed,
+          current: () => true,
+          observeTerminal: () => Effect.void,
+          prepareInvocation: () => Effect.void,
+          completeInvocation: () => Effect.void,
+        })
+        let dispatches = 0
+        let after = 0
+        const run = NativeProducer.dispatchMcp(
+          { server: "server-first", name: "echo", sessionID: f.context.sessionID },
+          (request) =>
+            Effect.sync(() => {
+              dispatches++
+              const meta = request.meta[McpProvenance.RequestKey] as { invocation: ExecutionProducer.SignedFact }
+              const invocation = JSON.parse(meta.invocation.payload) as ExecutionProducer.McpInvocation
+              expect(invocation.terminalVersion).toBe(1)
+              return f.respond(JSON.stringify(McpProvenance.TerminalSnapshot), invocation, {
+                mode: "terminal-control",
+                complete: false,
+              })
+            }),
+        ).pipe(
+          Effect.tap(() => Effect.sync(() => after++)),
+          Effect.catchCause(() => Effect.succeed({ content: [{ type: "text", text: "forged hook output" }] })),
+        )
+        const exit = yield* scope
+          .run({ messageID: f.invocation.messageID, toolCallID: f.invocation.toolCallID }, run)
+          .pipe(Effect.exit)
+        expect(Exit.isFailure(exit)).toBeTrue()
+        if (Exit.isSuccess(exit)) throw new Error("Expected sealed control")
+        const result = NativeProducer.terminalToolResult(exit.cause)!
+        expect(result).toEqual({ content: McpProvenance.TerminalSnapshot.content })
+        expect(after).toBe(0)
+        expect(NativeProducer.isTerminalToolResult(result)).toBeTrue()
+        expect(NativeProducer.isTerminalToolResult({ ...result })).toBeFalse()
+        expect(NativeProducer.projectToolUnit("a".repeat(64), result)).toBeUndefined()
+        const projected = NativeProducer.projectTerminalUnit("b".repeat(64), result)!
+        expect(JSON.parse(projected.payload)).toMatchObject({
+          terminalVersion: 1,
+          complete: false,
+          parentReceipts: [
+            f.respond(JSON.stringify(McpProvenance.TerminalSnapshot))._meta[McpProvenance.ResultKey].proof &&
+              JSON.parse(exit.cause.reasons.length ? projected.payload : "{}").parentReceipts[0],
+          ],
+        })
+        const replay = yield* scope
+          .run(
+            { messageID: f.invocation.messageID, toolCallID: "another" },
+            NativeProducer.dispatchMcp({ server: "server-first", name: "echo", sessionID: f.context.sessionID }, () =>
+              Effect.sync(() => {
+                dispatches++
+                return {}
+              }),
+            ),
+          )
+          .pipe(Effect.exit)
+        expect(Exit.isFailure(replay)).toBeTrue()
+        expect(dispatches).toBe(1)
+        const forged = yield* Effect.die(new Error("Terminal tool control")).pipe(Effect.exit)
+        if (Exit.isSuccess(forged)) throw new Error("Expected failure")
+        expect(NativeProducer.terminalToolResult(forged.cause)).toBeUndefined()
+      }
+    }),
+  )
 })

@@ -661,6 +661,9 @@ class ToolCapture extends Context.Service<
     readonly messageID: typeof SessionMessageID.Type
     readonly toolCallID: string
     readonly valid: () => boolean
+    readonly prepareInvocation?: (source: object) => Effect.Effect<void>
+    readonly completeInvocation?: (source: object) => Effect.Effect<void>
+    readonly terminal?: () => Effect.Effect<never>
     readonly reserve: () => void
     readonly observe: (observation: McpProvenance.Observation) => void
     readonly unknown: () => void
@@ -674,10 +677,14 @@ export const captureTools = (input: {
   readonly service: ExecutionDisclosure.Service
   readonly signed: ExecutionDisclosure.SignedProof
   readonly current: () => boolean
+  readonly observeTerminal?: (source: object) => Effect.Effect<void>
+  readonly prepareInvocation?: (source: object) => Effect.Effect<void>
+  readonly completeInvocation?: (source: object) => Effect.Effect<void>
 }) =>
   Effect.sync(() => {
     const capture = McpProvenance.capture(input.service, input.signed)
     const current = input.current
+    let stopped = false
     return {
       run: <A, E, R>(
         identity: {
@@ -693,19 +700,43 @@ export const captureTools = (input: {
           let complete = true
           const observations: McpProvenance.Observation[] = []
           const valid = () => active && current()
+          const terminal = () => observations.find((item) => item.proof.mode === "terminal-control")
           return effect.pipe(
             Effect.provideService(ToolCapture, {
               capture,
               ...identity,
               valid,
+              prepareInvocation: input.prepareInvocation,
+              completeInvocation: input.completeInvocation,
+              ...(input.observeTerminal && input.prepareInvocation && input.completeInvocation
+                ? {
+                    terminal: () =>
+                      Effect.gen(function* () {
+                        const defect = terminalDefect()
+                        terminalDefects.set(
+                          defect,
+                          Object.freeze({
+                            capture,
+                            ...identity,
+                            complete: false,
+                            observations: Object.freeze([...observations]),
+                          }),
+                        )
+                        yield* input.observeTerminal!(defect)
+                        return yield* Effect.die(defect)
+                      }).pipe(Effect.uninterruptible),
+                  }
+                : {}),
               reserve: () => {
-                if (!valid() || ++calls > 128) throw new Error("MCP provenance authorization is unavailable")
+                if (!valid() || stopped || terminal() || ++calls > 128)
+                  throw new Error("MCP provenance authorization is unavailable")
               },
               unknown: () => {
                 complete = false
               },
-              project: (unitDigest) =>
-                processSigner().toolProjection({
+              project: (unitDigest) => {
+                if (terminal()) throw new Error("MCP provenance authorization is unavailable")
+                return processSigner().toolProjection({
                   sessionID: capture.context.sessionID,
                   inputID: capture.context.inputID,
                   attempt: capture.context.attempt,
@@ -715,13 +746,30 @@ export const captureTools = (input: {
                   parentReceipts: Array.from(new Set(observations.map((item) => item.proof.receiptReference))),
                   complete,
                   issuedAt: Date.now(),
-                }),
+                })
+              },
               observe: (observation) => {
                 complete &&= observation.proof.complete
                 bytes += Buffer.byteLength(observation.snapshot)
-                if (!valid() || bytes > 32 * 1024 * 1024) throw new Error("MCP provenance authorization is unavailable")
+                if ((!valid() && observation.proof.mode !== "terminal-control") || bytes > 32 * 1024 * 1024)
+                  throw new Error("MCP provenance authorization is unavailable")
                 observations.push(Object.freeze(observation))
+                stopped ||= observation.proof.mode === "terminal-control"
               },
+            }),
+            Effect.catchCause((cause) => {
+              if (!terminal()) return Effect.failCause(cause)
+              const defect = terminalDefect()
+              terminalDefects.set(
+                defect,
+                Object.freeze({
+                  capture,
+                  ...identity,
+                  complete: false,
+                  observations: Object.freeze([...observations]),
+                }),
+              )
+              return Effect.die(defect)
             }),
             Effect.map((value) => {
               const evidence = Object.freeze({
@@ -730,6 +778,11 @@ export const captureTools = (input: {
                 complete,
                 observations: Object.freeze([...observations]),
               })
+              if (terminal()) {
+                const defect = terminalDefect()
+                terminalDefects.set(defect, evidence)
+                throw defect
+              }
               if (value !== null && typeof value === "object")
                 toolResults.set(value, { evidence, revision: toolRevision(value) })
               return { value, observations: evidence.observations, complete }
@@ -792,6 +845,7 @@ export const dispatchMcp = <A, E, R>(
       inputID: scope.capture.context.inputID,
       attempt: scope.capture.context.attempt,
       invocationID: randomUUID(),
+      ...(scope.terminal && scope.capture.context.publication?.version === 2 ? { terminalVersion: 1 as const } : {}),
       messageID: scope.messageID,
       toolCallID: scope.toolCallID,
       server: input.server,
@@ -805,6 +859,9 @@ export const dispatchMcp = <A, E, R>(
       ...(input.meta ?? {}),
       [McpProvenance.RequestKey]: { version: 1, context: scope.capture.signed, invocation: signed },
     }) as Readonly<Record<string, unknown>>
+    const intent = Object.freeze({})
+    invocationIntents.set(intent, signed)
+    if (invocation.terminalVersion === 1) yield* scope.prepareInvocation!(intent)
     if (!scope.valid()) return yield* Effect.die(new Error("MCP provenance authorization is unavailable"))
     const raw = yield* transport({ name: input.name, args, meta }).pipe(
       Effect.tapError(() => Effect.sync(() => scope.unknown())),
@@ -822,6 +879,8 @@ export const dispatchMcp = <A, E, R>(
     }
     const verified = McpProvenance.result(scope.capture, invocation, raw)
     scope.observe({ invocation: signed, proof: verified.proof, signed: verified.signed, snapshot: verified.snapshot })
+    if (verified.proof.mode === "terminal-control") return yield* scope.terminal!()
+    if (invocation.terminalVersion === 1) yield* scope.completeInvocation!(intent)
     return verified.result
   })
 
@@ -977,7 +1036,17 @@ export const catalogTransport = (server: string, transport: Transport) =>
           cursor: cursor ?? "",
         })
       }
-      return transport.send(message, options)
+      const negotiated =
+        "method" in message && message.method === "tools/list" && scope.service.publicationVersion === 2
+          ? {
+              ...message,
+              params: {
+                ...message.params,
+                _meta: { ...message.params?._meta, "access.execution.terminal": { version: 1 } },
+              },
+            }
+          : message
+      return transport.send(negotiated, options)
     }
     transport.onmessage = (message, extra) => {
       const id = "id" in message ? message.id : undefined
@@ -1035,6 +1104,89 @@ interface ToolEvidence {
   readonly complete: boolean
   readonly observations: readonly McpProvenance.Observation[]
 }
+const invocationIntents = new WeakMap<object, ExecutionProducer.SignedFact>()
+export const invocationObservation = (source: object) => {
+  const signed = invocationIntents.get(source)
+  if (!signed) return undefined
+  const invocation = Schema.decodeUnknownSync(Schema.fromJsonString(ExecutionProducer.McpInvocation))(signed.payload)
+  if (invocation.terminalVersion !== 1) return undefined
+  return Object.freeze({
+    sessionID: invocation.sessionID,
+    inputID: invocation.inputID,
+    attempt: invocation.attempt,
+    invocationID: invocation.invocationID,
+    contextReference: invocation.contextReference,
+    evidence: JSON.stringify(signed),
+  })
+}
+const terminalDefect = () => new Error("Terminal tool control")
+const terminalDefects = new WeakMap<object, ToolEvidence>()
+// Only the native capture can mint this result. Hooks never receive a normal
+// terminal result and an arbitrary defect cannot select this recovery path.
+export const terminalToolResult = <E>(cause: Cause.Cause<E>): Tool.NormalizedResult | undefined => {
+  const evidence = cause.reasons
+    .flatMap((reason) =>
+      Cause.isDieReason(reason) && typeof reason.defect === "object" && reason.defect !== null
+        ? [terminalDefects.get(reason.defect)]
+        : [],
+    )
+    .find((item) => item !== undefined)
+  if (!evidence) return undefined
+  const result: Tool.NormalizedResult = Object.freeze({ content: McpProvenance.TerminalSnapshot.content })
+  toolResults.set(result, { evidence, revision: toolRevision(result) })
+  return result
+}
+// The writer receives only this bounded metadata, derived from private verified
+// evidence. Neither arbitrary tool results nor public event flags can mint it.
+export const terminalObservation = (source: object) => {
+  const evidence = terminalDefects.get(source) ?? toolResults.get(source)?.evidence
+  if (!evidence) return undefined
+  const terminal = evidence.observations.filter((item) => item.proof.mode === "terminal-control")
+  if (terminal.length !== 1) return undefined
+  const observation = terminal[0]
+  const invocation = Schema.decodeUnknownSync(Schema.fromJsonString(ExecutionProducer.McpInvocation))(
+    observation.invocation.payload,
+  )
+  return Object.freeze({
+    sessionID: invocation.sessionID,
+    inputID: invocation.inputID,
+    attempt: invocation.attempt,
+    messageID: invocation.messageID,
+    toolCallID: invocation.toolCallID,
+    producerEpoch: invocation.producerEpoch,
+    producerKeyID: observation.invocation.keyID,
+    contextReference: invocation.contextReference,
+    receiptReference: observation.proof.receiptReference,
+    evidence: JSON.stringify({ invocation: observation.invocation, result: observation.signed }),
+  })
+}
+export const isTerminalToolResult = (result: object) => {
+  const source = toolResults.get(result)
+  return (
+    source !== undefined &&
+    source.revision === toolRevision(result) &&
+    source.evidence.observations.some((item) => item.proof.mode === "terminal-control")
+  )
+}
+export const projectTerminalUnit = (unitDigest: string, result: object) => {
+  const source = toolResults.get(result)
+  if (!source || !isTerminalToolResult(result)) return undefined
+  const evidence = source.evidence
+  const terminal = evidence.observations.filter((item) => item.proof.mode === "terminal-control")
+  if (terminal.length !== 1) return undefined
+  return processSigner().toolProjection({
+    terminalVersion: 1,
+    sessionID: evidence.capture.context.sessionID,
+    inputID: evidence.capture.context.inputID,
+    attempt: evidence.capture.context.attempt,
+    messageID: evidence.messageID,
+    toolCallID: evidence.toolCallID,
+    projectionRevision: unitDigest,
+    parentReceipts: [terminal[0].proof.receiptReference],
+    complete: false,
+    issuedAt: Date.now(),
+  })
+}
 const toolResults = new WeakMap<object, { readonly evidence: ToolEvidence; readonly revision: string }>()
 const toolRevision = (value: object) =>
   SessionDisclosure.digest(value instanceof Error ? { ...value, name: value.name, message: value.message } : value)
@@ -1075,14 +1227,14 @@ export const unknownToolSource = requireToolBinding
 // evidence. Caller metadata and output paths never supply this association.
 export const inheritToolResult = <A extends object>(before: object, after: A) => {
   const source = toolResults.get(before)
-  if (source && source.revision === toolRevision(before))
+  if (source && !isTerminalToolResult(before) && source.revision === toolRevision(before))
     toolResults.set(after, { evidence: source.evidence, revision: toolRevision(after) })
   return after
 }
 
 export const projectToolUnit = (unitDigest: string, result: object): ExecutionProducer.SignedToolFact | undefined => {
   const source = toolResults.get(result)
-  if (!source) return undefined
+  if (!source || isTerminalToolResult(result)) return undefined
   const evidence = source.evidence
   return processSigner().toolProjection({
     sessionID: evidence.capture.context.sessionID,

@@ -1,4 +1,6 @@
 import { generateKeyPairSync, sign } from "node:crypto"
+import { Hash } from "@opencode/util/hash"
+import type { ExecutionProducer } from "@opencode/schema/execution-producer"
 import type { ExecutionDisclosure } from "@opencode/schema/execution-disclosure"
 
 export const toolPublicationHost = (
@@ -92,6 +94,58 @@ export const toolPublicationHost = (
   })
   return {
     server,
+    terminal: (
+      context: ExecutionDisclosure.ContextProof,
+      signedInvocation: ExecutionProducer.SignedFact,
+      terminal = true,
+    ) => {
+      const invocation = JSON.parse(signedInvocation.payload) as ExecutionProducer.McpInvocation
+      const snapshot = JSON.stringify({
+        content: [{ type: "text", text: "Operation completed." }],
+        structuredContent: { completed: true },
+      })
+      const now = Date.now()
+      const proof: ExecutionDisclosure.ToolResultProof = {
+        version: 1,
+        purpose: "native-mcp-result",
+        issuer: context.issuer,
+        audience: context.tools!.audience,
+        organizationID: context.publication!.organizationID,
+        threadID: context.publication!.threadID,
+        capabilityID: context.publication!.capabilityID,
+        capabilityGeneration: context.publication!.capabilityGeneration,
+        sessionID: invocation.sessionID,
+        inputID: invocation.inputID,
+        attempt: invocation.attempt,
+        contextReference: invocation.contextReference,
+        contextProofRevision: invocation.contextProofRevision,
+        invocationID: invocation.invocationID,
+        messageID: invocation.messageID,
+        toolCallID: invocation.toolCallID,
+        server: invocation.server,
+        tool: invocation.tool,
+        argumentsRevision: invocation.argumentsRevision,
+        responseRevision: Hash.sha256(snapshot),
+        receiptReference: Hash.sha256(invocation.invocationID),
+        authorizationVersion: "terminal-authority",
+        manifestBinding: "e".repeat(64),
+        audienceBinding: "f".repeat(64),
+        mode: terminal ? "terminal-control" : "complete",
+        complete: !terminal,
+        issuedAt: now,
+        expiresAt: now + 30_000,
+      }
+      return {
+        ...JSON.parse(snapshot),
+        _meta: {
+          "access.execution.result": {
+            version: 1,
+            snapshot: Buffer.from(snapshot).toString("base64"),
+            proof: signature(proof, "tools", toolsKeys),
+          },
+        },
+      }
+    },
     config: {
       version: 1 as const,
       publicationVersion: 2 as const,

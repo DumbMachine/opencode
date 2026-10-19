@@ -16,6 +16,7 @@ import type { Session } from "@opencode/schema/session"
 import type { CompactionPayload, MovePayload, SyntheticPayload, UserPayload } from "@opencode/schema/session-inbox"
 import type { RevertV1 } from "@opencode/schema/session-revert"
 import type { Schema } from "effect"
+import type { Event } from "@opencode/schema/event"
 
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never
 type SessionMessageData = DistributiveOmit<(typeof SessionMessage.Info)["Encoded"], "type" | "id">
@@ -185,3 +186,44 @@ export const InstructionStateTable = sqliteTable("instruction_state", {
   initial_values: text({ mode: "json" }).notNull().$type<Instruction.Values>(),
   current_values: text({ mode: "json" }).notNull().$type<Instruction.Values>(),
 })
+
+// Private execution barrier. This is not a transcript position or source grant.
+export const SessionTerminalControlTable = sqliteTable(
+  "session_terminal_control",
+  {
+    session_id: text()
+      .$type<SessionSchema.ID>()
+      .notNull()
+      .references(() => SessionTable.id, { onDelete: "cascade" }),
+    input_id: text().$type<SessionMessage.ID>().notNull(),
+    attempt: text().notNull(),
+    message_id: text().$type<SessionMessage.ID>().notNull(),
+    tool_call_id: text().notNull(),
+    producer_epoch: text().notNull(),
+    producer_key_id: text().notNull(),
+    context_reference: text().notNull(),
+    receipt_reference: text().notNull(),
+    evidence: text().notNull(),
+    unit_id: text().$type<Event.ID>(),
+    unit_digest: text(),
+    created: integer().notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.session_id, table.input_id] })],
+)
+
+// Pre-transport deny-only intent survives uncertain host completion/recorder failure.
+export const SessionTerminalInvocationTable = sqliteTable(
+  "session_terminal_invocation",
+  {
+    session_id: text()
+      .$type<SessionSchema.ID>()
+      .notNull()
+      .references(() => SessionTable.id, { onDelete: "cascade" }),
+    input_id: text().$type<SessionMessage.ID>().notNull(),
+    invocation_id: text().notNull(),
+    context_reference: text().notNull(),
+    evidence: text().notNull(),
+    created: integer().notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.session_id, table.input_id, table.invocation_id] })],
+)

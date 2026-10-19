@@ -184,6 +184,11 @@ export const capture = (installed: ExecutionDisclosure.Service, raw: ExecutionDi
   })
 }
 
+export const TerminalSnapshot = Object.freeze({
+  content: Object.freeze([Object.freeze({ type: "text", text: "Operation completed." })]),
+  structuredContent: Object.freeze({ completed: true }),
+})
+
 export interface Observation {
   readonly invocation: ExecutionProducer.SignedFact
   readonly proof: ExecutionDisclosure.ToolResultProof
@@ -243,6 +248,14 @@ export const result = <A>(capture: Capture, invocation: ExecutionProducer.McpInv
   const cleaned = Object.fromEntries(Object.entries(received).filter(([key]) => key !== "_meta"))
   if (Object.keys(meta).length || Object.hasOwn(expected, "_meta")) cleaned._meta = meta
   if (!equal(expected, cleaned)) throw unavailable()
+  if (
+    proof.mode === "terminal-control" &&
+    (invocation.terminalVersion !== 1 ||
+      capture.context.publication?.version !== 2 ||
+      proof.complete ||
+      !equal(expected, TerminalSnapshot))
+  )
+    throw unavailable()
   // Full strict tree equality preserves the SDK result type at this boundary.
   return { result: own(cleaned) as A, proof: own(proof) as ExecutionDisclosure.ToolResultProof, signed, snapshot }
 }

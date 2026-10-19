@@ -22,7 +22,13 @@ import { SessionEvent } from "@opencode/core/session/event"
 import { SessionInbox } from "@opencode/core/session/inbox"
 import { SessionMessage } from "@opencode/core/session/message"
 import { SessionRunner } from "@opencode/core/session/runner/index"
-import { SessionInboxTable, SessionLifecycleTable, SessionTable } from "@opencode/core/session/sql"
+import {
+  SessionInboxTable,
+  SessionLifecycleTable,
+  SessionTable,
+  SessionTerminalControlTable,
+  SessionTerminalInvocationTable,
+} from "@opencode/core/session/sql"
 import { SessionStore } from "@opencode/core/session/store"
 import { SessionPublicationAdmission } from "@opencode/core/session/publication-admission"
 import { Cause, Context, Deferred, Effect, Exit, Fiber, Layer, LayerMap, Option, Scope } from "effect"
@@ -488,6 +494,190 @@ describe("SessionExecution lifecycle", () => {
       ])
       expect(yield* restartedJobs.pendingBackground).toEqual([])
     }),
+  )
+
+  it.effect("releases exact terminal input recovery claims without notices and preserves independent newer input", () =>
+    Effect.gen(function* () {
+      const database = yield* Database.Service
+      const bus = yield* Bus.Service
+      const admission = yield* SessionInbox.Service
+      const notices: SessionEvent.Synthetic[] = []
+      yield* bus.project(SessionEvent.Synthetic, (event) => Effect.sync(() => void notices.push(event)))
+      for (const kind of ["terminal", "uncertain"] as const) {
+        const sessionID = Session.ID.create()
+        const oldInput = SessionMessage.ID.create()
+        yield* seedSessions(database, [sessionID], { time_suspended: Date.now() })
+        yield* admission.admit({
+          id: oldInput,
+          sessionID,
+          item: { type: "user", payload: { text: "Old input" }, delivery: "queue" },
+        })
+        yield* SessionInbox.promote(database.db, bus, sessionID, "input")
+        if (kind === "terminal") {
+          yield* database.db
+            .insert(SessionTerminalControlTable)
+            .values({
+              session_id: sessionID,
+              input_id: oldInput,
+              attempt: "attempt",
+              message_id: SessionMessage.ID.create(),
+              tool_call_id: "call",
+              producer_epoch: "epoch",
+              producer_key_id: "key",
+              context_reference: "context",
+              receipt_reference: "receipt",
+              evidence: "private verified fixture",
+              created: Date.now(),
+            })
+            .run()
+            .pipe(Effect.orDie)
+        } else {
+          yield* database.db
+            .insert(SessionTerminalInvocationTable)
+            .values({
+              session_id: sessionID,
+              input_id: oldInput,
+              invocation_id: "invocation",
+              context_reference: "context",
+              evidence: "private signed intent fixture",
+              created: Date.now(),
+            })
+            .run()
+            .pipe(Effect.orDie)
+        }
+        const scope = yield* Scope.make()
+        yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void))
+        const drained: Session.ID[] = []
+        const resumed = yield* Deferred.make<void>()
+        const context = yield* buildExecution(scope, ({ sessionID }) =>
+          Effect.sync(() => void drained.push(sessionID)).pipe(Effect.andThen(Deferred.succeed(resumed, undefined))),
+        )
+        const restart = Context.get(context, SessionRestart.Service)
+        const noticesBefore = notices.length
+        yield* restart.resumeSuspendedSessions
+        expect((yield* claims(database))[sessionID]).toBe(false)
+        expect(yield* attempts(database, sessionID)).toBe(0)
+        expect(drained).toEqual([])
+        expect(notices).toHaveLength(noticesBefore)
+        const table = kind === "terminal" ? SessionTerminalControlTable : SessionTerminalInvocationTable
+        expect(yield* database.db.select().from(table).where(eq(table.session_id, sessionID)).all()).toHaveLength(1)
+
+        const freshInput = SessionMessage.ID.create()
+        yield* admission.admit({
+          id: freshInput,
+          sessionID,
+          item: { type: "user", payload: { text: "Independent input" }, delivery: "queue" },
+        })
+        yield* SessionInbox.promote(database.db, bus, sessionID, "input")
+        yield* database.db
+          .update(SessionTable)
+          .set({ time_suspended: Date.now() })
+          .where(eq(SessionTable.id, sessionID))
+          .run()
+          .pipe(Effect.orDie)
+        yield* restart.resumeSuspendedSessions
+        yield* Deferred.await(resumed)
+        yield* Context.get(context, SessionExecution.Service).awaitIdle(sessionID)
+        expect(drained).toEqual([sessionID])
+        expect((yield* claims(database))[sessionID]).toBe(false)
+        expect(notices).toHaveLength(noticesBefore + 1)
+        expect(yield* database.db.select().from(table).where(eq(table.session_id, sessionID)).all()).toHaveLength(1)
+      }
+    }),
+  )
+
+  policyIt.effect(
+    "resumes independent pending input after a terminal barrier without publishing an old restart notice",
+    () =>
+      Effect.gen(function* () {
+        const database = yield* Database.Service
+        const bus = yield* Bus.Service
+        const admission = yield* SessionInbox.Service
+        for (const authorized of [true, false]) {
+          const sessionID = Session.ID.create()
+          const oldInput = SessionMessage.ID.create()
+          const newInput = SessionMessage.ID.create()
+          yield* seedSessions(database, [sessionID], { time_suspended: Date.now() })
+          yield* admission.admit({
+            id: oldInput,
+            sessionID,
+            item: { type: "user", payload: { text: "Old input" }, delivery: "queue" },
+          })
+          yield* SessionInbox.promote(database.db, bus, sessionID, "input")
+          // Admit a distinct actual input but leave it pending across recovery.
+          yield* admission.admit({
+            id: newInput,
+            sessionID,
+            item: { type: "user", payload: { text: "Independent input", capabilities: ["mcp"] }, delivery: "queue" },
+          })
+          if (!authorized) yield* SessionExecutionCapability.drop(sessionID, newInput)
+          else yield* SessionExecutionCapability.set(sessionID, { inputID: newInput, mcp: {}, revision: 1 })
+          yield* database.db
+            .insert(SessionTerminalInvocationTable)
+            .values({
+              session_id: sessionID,
+              input_id: oldInput,
+              invocation_id: "invocation",
+              context_reference: "context",
+              evidence: "private signed intent fixture",
+              created: Date.now(),
+            })
+            .run()
+            .pipe(Effect.orDie)
+          yield* database.db
+            .update(SessionTable)
+            .set({ context_policy: { version: 2 } })
+            .where(eq(SessionTable.id, sessionID))
+            .run()
+            .pipe(Effect.orDie)
+          yield* database.db
+            .insert(SessionLifecycleTable)
+            .values({ id: sessionID, context_policy: { version: 2 } })
+            .onConflictDoUpdate({ target: SessionLifecycleTable.id, set: { context_policy: { version: 2 } } })
+            .run()
+            .pipe(Effect.orDie)
+          const pending = yield* SessionInbox.list(database.db, sessionID)
+          const entered = yield* Deferred.make<void>()
+          let notices = 0
+          let checked = 0
+          let accepted = 0
+          const scope = yield* Scope.make()
+          yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void))
+          const context = yield* buildExecution(scope, () =>
+            Effect.gen(function* () {
+              const next = yield* SessionInbox.nextPromotable(database.db, sessionID, "input")
+              expect(next?.id).toBe(newInput)
+              const ready = yield* SessionExecutionCapability.ready(sessionID, newInput, ["mcp"])
+              checked++
+              yield* Deferred.succeed(entered, undefined)
+              if (!ready) return yield* Effect.die(new Error("Independent input authority is unavailable"))
+              accepted++
+            }),
+          )
+          yield* Context.get(context, SessionRestart.Service).resumeSuspendedSessions.pipe(
+            Effect.provideService(SessionPublicationAdmission.Service, {
+              accepts: (event) => {
+                if (event.type === SessionEvent.Synthetic.type) notices++
+                return false
+              },
+            }),
+          )
+          yield* Deferred.await(entered)
+          yield* Context.get(context, SessionExecution.Service).awaitIdle(sessionID)
+          expect(notices).toBe(0)
+          expect(checked).toBe(1)
+          expect(accepted).toBe(authorized ? 1 : 0)
+          expect((yield* claims(database))[sessionID]).toBe(false)
+          expect(yield* SessionInbox.list(database.db, sessionID)).toEqual(pending)
+          expect(
+            yield* database.db
+              .select()
+              .from(SessionTerminalInvocationTable)
+              .where(eq(SessionTerminalInvocationTable.session_id, sessionID))
+              .all(),
+          ).toHaveLength(1)
+        }
+      }),
   )
 
   it.effect("starts every claimed execution without waiting for earlier drains to finish", () =>

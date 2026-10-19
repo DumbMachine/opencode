@@ -63,25 +63,30 @@ const GENERATION_KEYS = new Set(Object.keys(GenerationOptions.fields))
 // attachments. This measures bytes only; it never rewrites a model message.
 export const withinInlineRequestLimit = (messages: readonly Message[]) => {
   let bytes = 0
-  for (const message of messages) for (const part of message.content) {
-    if (part.type === "media") {
-      const source = part.media.source
-      if (source.type === "bytes") bytes += source.data.byteLength
-      else if (source.type === "base64") bytes += Buffer.byteLength(source.data, "base64")
-      else return false
+  for (const message of messages)
+    for (const part of message.content) {
+      if (part.type === "media") {
+        const source = part.media.source
+        if (source.type === "bytes") bytes += source.data.byteLength
+        else if (source.type === "base64") bytes += Buffer.byteLength(source.data, "base64")
+        else return false
+      }
+      if (part.type === "tool-result" && part.result.type === "content")
+        for (const content of part.result.value) {
+          if (content.type !== "file") continue
+          const encoded = /^data:[^,]*;base64,([A-Za-z0-9+/]*={0,2})$/.exec(content.uri)?.[1]
+          if (encoded === undefined || encoded.length % 4 !== 0) return false
+          bytes += Buffer.byteLength(encoded, "base64")
+          if (
+            bytes > SessionInlineIdentity.MaximumRequestBytes ||
+            Buffer.from(encoded, "base64").toString("base64") !== encoded
+          )
+            return false
+        }
+      if (bytes > SessionInlineIdentity.MaximumRequestBytes) return false
     }
-    if (part.type === "tool-result" && part.result.type === "content") for (const content of part.result.value) {
-      if (content.type !== "file") continue
-      const encoded = /^data:[^,]*;base64,([A-Za-z0-9+/]*={0,2})$/.exec(content.uri)?.[1]
-      if (encoded === undefined || encoded.length % 4 !== 0) return false
-      bytes += Buffer.byteLength(encoded, "base64")
-      if (bytes > SessionInlineIdentity.MaximumRequestBytes || Buffer.from(encoded, "base64").toString("base64") !== encoded) return false
-    }
-    if (bytes > SessionInlineIdentity.MaximumRequestBytes) return false
-  }
   return true
 }
-
 
 /** Tool errors, plus the user declining a permission or dismissing a question. */
 export type ExecuteError = Tool.Error | Permission.DeclinedError | QuestionTool.CancelledError
@@ -603,6 +608,7 @@ export const layer = Layer.effect(
           ? undefined
           : current.pipe(
               Effect.andThen(transportCurrent),
+              Effect.andThen(disclosure?.writer?.assertExecution ?? Effect.void),
               Effect.andThen(
                 Effect.sync(() => {
                   if (Date.now() >= expiresAt) throw new Error("Execution context authorization is unavailable")
@@ -649,6 +655,9 @@ export const layer = Layer.effect(
               service: service!,
               signed: disclosure.signed,
               current: () => owner!.live() && earlier!() && installed!(),
+              observeTerminal: disclosure.writer?.observeTerminal,
+              prepareInvocation: disclosure.writer?.prepareInvocation,
+              completeInvocation: disclosure.writer?.completeInvocation,
             })
           : undefined
       return {

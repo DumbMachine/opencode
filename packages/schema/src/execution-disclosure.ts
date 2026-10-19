@@ -174,7 +174,7 @@ export const ToolResultProof = Schema.Struct({
   authorizationVersion: bounded(256),
   manifestBinding: Digest,
   audienceBinding: Digest,
-  mode: Schema.Literals(["complete", "actor-private-unknown"]),
+  mode: Schema.Literals(["complete", "actor-private-unknown", "terminal-control"]),
   complete: Schema.Boolean,
   issuedAt: Schema.Int,
   expiresAt: Schema.Int,
@@ -228,6 +228,6 @@ export const ToolPublicationProof = Schema.Struct({
   ...PublicationProof.fields,
   version: Schema.Literal(2),
   kind: ToolPublicationRequest.fields.kind,
-  mode: Schema.Literals(["complete", "actor-private-unknown"]),
+  mode: Schema.Literals(["complete", "actor-private-unknown", "terminal-control"]),
   complete: Schema.Boolean,
 }).annotate({ identifier: "ExecutionDisclosure.ToolPublicationProof" })
