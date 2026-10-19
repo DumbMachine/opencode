@@ -182,33 +182,34 @@ export const boundImages = (messages: LLMRequest["messages"]) => {
     if (media.source.type === "bytes") return Math.ceil(media.source.data.byteLength / 3) * 4
     return 0
   }
-  const imageBytes = messages.reduce(
-    (total, message) =>
-      total +
-      message.content.reduce((sum, part) => {
-        if (part.type === "media" && isImage(part.media.mediaType)) return sum + size(part.media)
-        if (part.type !== "tool-result" || part.result.type !== "content") return sum
-        return (
-          sum +
-          part.result.value.reduce(
-            (bytes: number, item: Content) =>
-              bytes + (item.type === "file" && isImage(item.mime) ? Buffer.byteLength(item.uri) : 0),
-            0,
-          )
-        )
-      }, 0),
-    0,
+  const sizes = messages.flatMap((message) =>
+    message.content.flatMap((part) => {
+      if (part.type === "media") return isImage(part.media.mediaType) ? [size(part.media)] : []
+      if (part.type !== "tool-result" || part.result.type !== "content") return []
+      return part.result.value.flatMap((item: Content) =>
+        item.type === "file" && isImage(item.mime) ? [Buffer.byteLength(item.uri)] : [],
+      )
+    }),
   )
-  if (imageBytes <= IMAGE_BYTES_TRIGGER) return messages
+  // Replay the images in order, dropping the oldest down to the target whenever the kept payload passes the trigger.
+  // A new image then moves the cut only every (trigger - target) bytes instead of on every request, so the replaced
+  // prefix, and with it the provider's prompt cache, stays the same between cuts.
+  let cut = 0
+  let kept = 0
+  for (const size of sizes) {
+    kept += size
+    if (kept <= IMAGE_BYTES_TRIGGER) continue
+    while (kept > IMAGE_BYTES_TARGET) kept -= sizes[cut++]!
+  }
+  if (cut === 0) return messages
 
-  let removed = 0
+  let index = 0
   return messages.map((message) =>
     Message.make({
       ...message,
       content: message.content.map((part) => {
-        if (part.type === "media" && isImage(part.media.mediaType) && imageBytes - removed > IMAGE_BYTES_TARGET) {
-          removed += size(part.media)
-          return Message.text(IMAGE_REMOVED)
+        if (part.type === "media" && isImage(part.media.mediaType)) {
+          return index++ < cut ? Message.text(IMAGE_REMOVED) : part
         }
         if (part.type !== "tool-result" || part.result.type !== "content") return part
         return {
@@ -216,9 +217,8 @@ export const boundImages = (messages: LLMRequest["messages"]) => {
           result: {
             ...part.result,
             value: part.result.value.map((item: Content) => {
-              if (item.type !== "file" || !isImage(item.mime) || imageBytes - removed <= IMAGE_BYTES_TARGET) return item
-              removed += Buffer.byteLength(item.uri)
-              return { type: "text" as const, text: IMAGE_REMOVED }
+              if (item.type !== "file" || !isImage(item.mime)) return item
+              return index++ < cut ? { type: "text" as const, text: IMAGE_REMOVED } : item
             }),
           },
         }
