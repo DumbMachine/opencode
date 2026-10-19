@@ -18,7 +18,7 @@ import { SessionModelTransport } from "../model-transport.js"
 import { SessionMessage } from "../message.js"
 import { SessionSchema } from "../schema.js"
 import { SessionStore } from "../store.js"
-import { SessionMessageTable } from "../sql.js"
+import { SessionMessageTable, SessionTable } from "../sql.js"
 import { SessionTitle } from "../title.js"
 import { toSessionError } from "../to-session-error.js"
 import { DrainResult, Service, type Interface } from "./index.js"
@@ -34,6 +34,7 @@ import { SessionStep } from "./step.js"
 import { ToolOutput } from "../../tool-output.js"
 import { Plugin } from "../../plugin.js"
 import { MAX_STEPS_PROMPT } from "./max-steps.js"
+import { NativeProducer } from "../../execution-producer.js"
 
 const CONTINUE_AFTER_INCOMPLETE_STREAM =
   "The previous response was interrupted. Continue from where you left off without repeating completed content."
@@ -267,7 +268,9 @@ const layer = Layer.effect(
       sessionID: SessionSchema.ID,
       selected: SessionContext.Selection,
     ) {
-      const preview = yield* context.load(selected)
+      const scope = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+        selected.session.contextPolicy?.version === 2 ? NativeProducer.managedPreparation(effect) : effect
+      const preview = yield* scope(context.load(selected))
       const captured = yield* SessionExecutionCapability.getWithSelection(
         sessionID,
         preview.input?.type === "user" ? preview.input.id : undefined,
@@ -284,29 +287,50 @@ const layer = Layer.effect(
         disclosureRevision: grant.revision,
         disclosureCurrent: captured.current,
       }
-      if (preview.session.contextPolicy) {
+      if (preview.session.contextPolicy?.version === 1) {
         if (grant.mcp !== undefined && Object.keys(grant.mcp).length !== 0)
           return yield* Effect.die(new Error("Session context policy requires empty tools"))
         return { ...preview, ...disclosure }
       }
       if (grant.mcp === undefined) return { ...preview, ...disclosure }
-      const executionMcp = yield* mcp.request(grant.mcp)
-      const next = yield* context.select(sessionID, executionMcp, {
-        input: preview.input,
-        selection: { ...selected, model: preview.model.ref },
-      })
+      if (grant.disclosure?.compositionVersion === 4 && !captured.current)
+        return yield* Effect.die(new Error("Execution context authorization is unavailable"))
+      const observed =
+        grant.disclosure?.compositionVersion === 4 && grant.revision !== undefined
+          ? yield* NativeProducer.captureCatalog({
+              service: grant.disclosure,
+              sessionID,
+              inputID: grant.inputID,
+              revision: grant.revision,
+              current: captured.current!,
+            }).run(scope(mcp.request(grant.mcp)))
+          : undefined
+      const executionMcp = observed?.value ?? (yield* mcp.request(grant.mcp))
+      const next = yield* scope(
+        context.select(sessionID, executionMcp, {
+          input: preview.input,
+          selection: { ...selected, model: preview.model.ref },
+        }),
+      )
       yield* InstructionState.prepare(db, bus, next.instructions, sessionID)
-      const loaded = yield* context.load(next)
+      const loaded = yield* scope(context.load(next))
       if (loaded.input?.id !== grant.inputID) return yield* Effect.interrupt
       yield* executionGrant(sessionID, [loaded.input], grant, loaded.messages)
-      return { ...loaded, ...disclosure }
+      return { ...loaded, ...disclosure, ...(observed ? { disclosureCatalog: observed.evidence } : {}) }
     })
 
     const prepareSelection = Effect.fn("SessionRunner.prepareSelection")(function* (
       sessionID: SessionSchema.ID,
       pending?: SessionMessage.User | SessionMessage.Synthetic,
     ) {
-      const selected = yield* context.select(sessionID, undefined, pending ? { input: pending } : undefined)
+      const session = yield* db
+        .select({ policy: SessionTable.context_policy })
+        .from(SessionTable)
+        .where(eq(SessionTable.id, sessionID))
+        .get()
+        .pipe(Effect.orDie)
+      const preparing = context.select(sessionID, undefined, pending ? { input: pending } : undefined)
+      const selected = yield* session?.policy?.version === 2 ? NativeProducer.managedPreparation(preparing) : preparing
       // Preserve chronological shared updates and leave blocked initial input pending.
       yield* InstructionState.prepare(db, bus, selected.instructions, sessionID)
       return selected
@@ -354,6 +378,7 @@ const layer = Layer.effect(
           disclosureComponents: loaded.disclosureComponents,
           disclosureMessages: loaded.messages,
           disclosureProvenance: loaded.disclosureProvenance,
+          disclosureCatalog: loaded.disclosureCatalog,
           inputID: loaded.input?.type === "user" ? loaded.input.id : undefined,
           agent: loaded.agent.id,
           model: loaded.model,
@@ -366,6 +391,8 @@ const layer = Layer.effect(
           toolChoice: stepLimitReached ? "none" : undefined,
           webSocket: "session",
         })
+        if (loaded.session.contextPolicy?.version === 2)
+          yield* prepared.publication?.settleInterrupted?.() ?? Effect.void
         const outcome = yield* steps.attempt({
           isLocationClosed: lifecycle.isClosed,
           sessionID,
@@ -454,6 +481,13 @@ const layer = Layer.effect(
     const settleStaleToolCalls = Effect.fn("SessionRunner.settleStaleToolCalls")(function* (
       sessionID: SessionSchema.ID,
     ) {
+      const session = yield* db
+        .select({ policy: SessionTable.context_policy })
+        .from(SessionTable)
+        .where(eq(SessionTable.id, sessionID))
+        .get()
+        .pipe(Effect.orDie)
+      if (session?.policy?.version === 2) return
       for (const message of yield* store.context(sessionID)) {
         if (message.type !== "assistant") continue
         for (const tool of message.content) {

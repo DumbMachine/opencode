@@ -125,10 +125,10 @@ export const make = Effect.gen(function* () {
             call: event,
             fiber: yield* Effect.uninterruptibleMask((restore) =>
               restore(executeTool(event)).pipe(
-                Effect.flatMap(toolOutput.truncate),
+                Effect.flatMap((result) => toolOutput.truncate(result, input.prepared.publication)),
                 Effect.flatMap((outcome) => publisher.toolExecution(event.id, event.name, outcome)),
                 Effect.catchTag("Tool.Error", (error) =>
-                  publisher.failTool(event.id, toSessionError(error), error.metadata).pipe(Effect.asVoid),
+                  publisher.failTool(event.id, toSessionError(error), error.metadata, error).pipe(Effect.asVoid),
                 ),
               ),
             ).pipe(Effect.forkScoped),

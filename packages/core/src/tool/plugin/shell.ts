@@ -100,6 +100,7 @@ const backgroundResult = (shellID: string, file: string) => ({
 })
 
 export const Plugin = {
+  provenance: { definitions: true },
   id: "opencode.tool.shell",
   effect: Effect.fn("ShellTool.Plugin")(function* (ctx: Context) {
     const sessions = yield* Session.Service

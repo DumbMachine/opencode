@@ -17,6 +17,8 @@ import { SessionLifecycle } from "./lifecycle.js"
 import { SessionInboxTable, SessionTable } from "./sql.js"
 import { SessionPublicationAdmission } from "./publication-admission.js"
 import { NativeProducer } from "../execution-producer.js"
+import { ToolEventPublication } from "../event/tool-publication.js"
+import { interruptedToolError } from "./tool-interruption.js"
 
 const modelDefinitions = new Map<string, Event.Definition>(
   [
@@ -52,6 +54,8 @@ interface Captured {
   readonly revision: number
   readonly bus: Bus.Interface
   readonly database: Database.Interface
+  readonly service: ExecutionDisclosure.Service
+  readonly pending?: ReturnType<typeof NativeProducer.capturePendingTools>
   readonly live: () => boolean
 }
 
@@ -77,6 +81,7 @@ export const capturePreflight = Effect.fnUntraced(
     if (!live()) return yield* Effect.die(unavailable())
     const prepareRequest = Effect.fnUntraced(
       function* (request: ExecutionDisclosure.ContextRequest) {
+        const pending = NativeProducer.capturePendingTools(request)
         const owned = Schema.decodeUnknownSync(ExecutionDisclosure.ContextRequest)(structuredClone(request))
         if (!live() || owned.sessionID !== sessionID || owned.inputID !== inputID || owned.kind !== "primary")
           return yield* Effect.die(unavailable())
@@ -85,7 +90,7 @@ export const capturePreflight = Effect.fnUntraced(
         if (prepared.publication && (!bus?.persistent || !database)) return yield* Effect.die(unavailable())
         const writer =
           prepared.publication && bus && database
-            ? yield* make({ prepared, state: { sessionID, inputID, revision, bus, database, live } })
+            ? yield* make({ prepared, state: { sessionID, inputID, revision, bus, database, live, service, pending } })
             : undefined
         return { proof: structuredClone(prepared.proof), signed: structuredClone(prepared.signed), writer }
       },
@@ -120,12 +125,15 @@ export const captureInput = Effect.fnUntraced(
       .where(eq(SessionTable.id, sessionID))
       .get()
       .pipe(Effect.orDie)
-    if (!session?.policy || (grant?.mcp !== undefined && Object.keys(grant.mcp).length !== 0))
+    if (
+      !session?.policy ||
+      (session.policy.version === 1 && grant?.mcp !== undefined && Object.keys(grant.mcp).length !== 0)
+    )
       return yield* Effect.die(unavailable())
     const owner = Option.getOrUndefined(yield* Effect.serviceOption(SessionRunCoordinator.Ownership))
     const live = () => installed() && (owner === undefined || owner.live())
     if (
-      service.publicationVersion !== 1 ||
+      service.publicationVersion !== session.policy.version ||
       !bus.persistent ||
       !live() ||
       !Number.isSafeInteger(revision) ||
@@ -137,12 +145,22 @@ export const captureInput = Effect.fnUntraced(
         const owned = Schema.decodeUnknownSync(SessionInbox.UserPayload)(
           JSON.parse(JSON.stringify(Schema.encodeUnknownSync(SessionInbox.UserPayload)(payload))),
         )
-        if ((service.compositionVersion !== 3 && owned.files?.length) || owned.agents?.length || owned.skills?.length)
+        if (
+          (service.compositionVersion !== 3 && service.compositionVersion !== 4 && owned.files?.length) ||
+          owned.agents?.length ||
+          owned.skills?.length
+        )
           return yield* Effect.die(unavailable())
         const contextDigest = SessionDisclosure.digest({ kind: "native-human-input-v1", payload: owned })
         const request =
-          service.compositionVersion === 2 || service.compositionVersion === 3
-            ? yield* NativeProducer.inputContext(sessionID, inputID, owned, service.compositionVersion === 3)
+          service.compositionVersion === 2 || service.compositionVersion === 3 || service.compositionVersion === 4
+            ? yield* NativeProducer.inputContext(
+                sessionID,
+                inputID,
+                owned,
+                service.compositionVersion === 3 || service.compositionVersion === 4,
+                service.compositionVersion === 4,
+              )
             : SessionDisclosure.makeRequest({
                 sessionID,
                 inputID,
@@ -159,7 +177,7 @@ export const captureInput = Effect.fnUntraced(
           ((service.compositionVersion === 2 || service.compositionVersion === 3) && !prepared.proof.complete)
         )
           return yield* Effect.die(unavailable())
-        return yield* make({ prepared, state: { sessionID, inputID, revision, bus, database, live } })
+        return yield* make({ prepared, state: { sessionID, inputID, revision, bus, database, live, service } })
       },
       Effect.catchCauseIf(
         (cause) => !Cause.hasInterrupts(cause),
@@ -290,7 +308,7 @@ const make = Effect.fnUntraced(function* (input: {
         ...(metadata === undefined ? {} : { metadata }),
       }
       const digest = SessionDisclosure.digest({
-        version: 1,
+        version: descriptor.version,
         kind,
         sessionID: context.sessionID,
         inputID: context.inputID,
@@ -422,7 +440,7 @@ const make = Effect.fnUntraced(function* (input: {
         if (!live()) return yield* Effect.die(unavailable())
         const permit = yield* authorizer.authorize({ unitID: id, unitDigest: digest })
         const expected = {
-          version: 1,
+          version: descriptor.version,
           purpose: "thread-publication",
           kind,
           issuer: context.issuer,
@@ -462,7 +480,310 @@ const make = Effect.fnUntraced(function* (input: {
       () => Effect.die(unavailable()),
     ),
   )
-  return Object.freeze({ prepare })
+  const control =
+    descriptor.version === 2 && context.kind === "primary"
+      ? NativeProducer.captureToolControl(input.state.service, input.prepared.signed)
+      : undefined
+  const valid = (permit: SessionPublication.Permit) => live() && permit.valid()
+  const check = (permit: SessionPublication.Permit) =>
+    Effect.sync(() => {
+      if (!valid(permit)) throw new AdmissionDenied()
+    })
+  const witness = Effect.fnUntraced(function* (
+    unit: {
+      id: Event.ID
+      digest: string
+      witnessID: Event.ID
+      created: number
+      sequence: number
+      operation: "tool-event" | "tool-spill"
+    },
+    permit: SessionPublication.Permit,
+  ) {
+    yield* check(permit)
+    const proof = permit.proof
+    const session = yield* database.db
+      .select({ directory: SessionTable.directory, workspaceID: SessionTable.workspace_id })
+      .from(SessionTable)
+      .where(eq(SessionTable.id, context.sessionID))
+      .get()
+      .pipe(Effect.orDie)
+    if (!session) return yield* Effect.die(unavailable())
+    return yield* ToolEventPublication.without(
+      bus.publishAllOnce([
+        [
+          SessionEvent.PublicationCommitted,
+          {
+            sessionID: context.sessionID,
+            inputID: context.inputID,
+            attempt: context.attempt,
+            contextReference: context.contextReference,
+            contextDigest: context.contextDigest,
+            componentsDigest: context.componentsDigest,
+            capabilityID: proof.capabilityID,
+            capabilityGeneration: proof.capabilityGeneration,
+            unitID: unit.id,
+            unitDigest: unit.digest,
+            receiptReference: proof.receiptReference,
+            authorizationVersion: proof.authorizationVersion,
+            manifestBinding: proof.manifestBinding,
+            audienceBinding: proof.audienceBinding,
+            sequence: unit.sequence,
+            batch: { operation: unit.operation, length: 1 },
+          },
+          {
+            id: unit.witnessID,
+            created: unit.created,
+            location: {
+              directory: AbsolutePath.make(session.directory),
+              ...(session.workspaceID ? { workspaceID: session.workspaceID } : {}),
+            },
+            commit: () =>
+              check(permit).pipe(
+                Effect.andThen(SessionLifecycle.activate(database.db, context.sessionID).pipe(Effect.orDie)),
+                Effect.andThen(check(permit)),
+              ),
+          },
+        ],
+      ]),
+    )
+  })
+  const authorize = Effect.fnUntraced(function* (unit: {
+    id: Event.ID
+    digest: string
+    witnessID: Event.ID
+    created: number
+    sequence: number
+    operation: "tool-event" | "tool-spill"
+    kind: "tool-output" | "tool-control" | "tool-spill"
+    projection?: ExecutionDisclosure.ToolPublicationRequest["projection"]
+  }) {
+    if (!live() || !control || descriptor.version !== 2) return yield* Effect.die(unavailable())
+    const permit = yield* ToolEventPublication.without(
+      authorizer.authorize({
+        unitID: unit.id,
+        unitDigest: unit.digest,
+        kind: unit.kind,
+        ...(unit.projection === undefined ? {} : { projection: unit.projection }),
+      }),
+    )
+    const expected = {
+      version: 2,
+      purpose: "thread-publication",
+      kind: unit.kind,
+      issuer: context.issuer,
+      audience: descriptor.audience,
+      organizationID: descriptor.organizationID,
+      threadID: descriptor.threadID,
+      sessionID: context.sessionID,
+      inputID: context.inputID,
+      attempt: context.attempt,
+      contextReference: context.contextReference,
+      contextDigest: context.contextDigest,
+      componentsDigest: context.componentsDigest,
+      capabilityID: descriptor.capabilityID,
+      capabilityGeneration: revision,
+      unitID: unit.id,
+      unitDigest: unit.digest,
+    }
+    if (
+      !valid(permit) ||
+      Object.entries(expected).some(([key, value]) => permit.proof[key as keyof typeof permit.proof] !== value)
+    )
+      return yield* Effect.die(unavailable())
+    yield* witness(unit, permit)
+    return permit
+  })
+  const authorizeEvent = Effect.fnUntraced(function* (
+    definition: Event.Definition,
+    event: Event.Payload,
+    source?: object,
+  ): Effect.fn.Return<ToolEventPublication.Admission & { readonly digest: string; readonly valid: () => boolean }> {
+    if (!control || !live()) return yield* Effect.die(unavailable())
+    const encoded = Schema.encodeUnknownSync(definition.data)(event.data) as Record<string, unknown>
+    if (
+      (typeof encoded.sessionID === "string" && encoded.sessionID !== context.sessionID) ||
+      (typeof encoded.form === "object" &&
+        encoded.form !== null &&
+        "sessionID" in encoded.form &&
+        encoded.form.sessionID !== context.sessionID)
+    )
+      return yield* Effect.die(unavailable())
+    const envelope = { ...event, data: encoded }
+    const envelopeDigest = SessionDisclosure.digest(envelope)
+    const sequence = nextSequence++,
+      witnessID = Event.ID.create()
+    if (!Number.isSafeInteger(sequence)) return yield* Effect.die(unavailable())
+    const kind = definition === SessionEvent.Tool.Success ? ("tool-output" as const) : ("tool-control" as const)
+    const digest = SessionDisclosure.digest({
+      version: 2,
+      kind,
+      sessionID: context.sessionID,
+      inputID: context.inputID,
+      contextReference: context.contextReference,
+      contextDigest: context.contextDigest,
+      componentsDigest: context.componentsDigest,
+      attempt: context.attempt,
+      sequence,
+      batch: { operation: "tool-event", length: 1, witnessID, events: [event.id] },
+      eventVersion: definition.durable?.version ?? 1,
+      event: envelope,
+    })
+    const projection =
+      (source ? NativeProducer.projectToolUnit(digest, source) : undefined) ??
+      control.project(definition, encoded, digest) ??
+      (yield* NativeProducer.projectCurrentToolUnit(digest)) ??
+      input.state.pending?.project(definition, encoded, digest) ??
+      control.unknown(definition, encoded, digest)
+    const permit = yield* authorize({
+      id: event.id,
+      digest,
+      witnessID,
+      created: event.created,
+      sequence,
+      operation: "tool-event",
+      kind,
+      projection,
+    })
+    const accepts = (actual: Event.Payload) =>
+      valid(permit) &&
+      actual.id === event.id &&
+      actual.type === definition.type &&
+      SessionDisclosure.digest({
+        id: actual.id,
+        created: actual.created,
+        type: actual.type,
+        data: Schema.encodeUnknownSync(definition.data)(actual.data),
+        location: actual.location,
+        ...(actual.metadata === undefined ? {} : { metadata: actual.metadata }),
+      }) === envelopeDigest
+    return {
+      digest,
+      valid: () => valid(permit),
+      check: check(permit),
+      provide: <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+        Effect.gen(function* () {
+          const previous = Option.getOrUndefined(yield* Effect.serviceOption(SessionPublicationAdmission.Service))
+          return yield* effect.pipe(
+            Effect.provideService(SessionPublicationAdmission.Service, {
+              accepts: (actual) => accepts(actual) || previous?.accepts(actual) === true,
+              publicationFor: (actual) =>
+                accepts(actual) ? permit.proof : (previous?.publicationFor?.(actual) ?? previous?.publication),
+            }),
+          )
+        }),
+    }
+  })
+  const prepareTool = Effect.fnUntraced(function* <D extends Event.Definition>(
+    definition: D,
+    data: Event.Data<D>,
+    source?: object,
+  ): Effect.fn.Return<Unit> {
+    // No caller aliases survive a clock or host wait.
+    const owned = Schema.decodeUnknownSync(definition.data)(
+      JSON.parse(JSON.stringify(Schema.encodeUnknownSync(definition.data)(data))),
+    )
+    const id = Event.ID.create(),
+      created = yield* Clock.currentTimeMillis
+    const session = yield* database.db
+      .select({ directory: SessionTable.directory, workspaceID: SessionTable.workspace_id })
+      .from(SessionTable)
+      .where(eq(SessionTable.id, context.sessionID))
+      .get()
+      .pipe(Effect.orDie)
+    if (!session) return yield* Effect.die(unavailable())
+    const event = {
+      id,
+      created,
+      type: definition.type,
+      data: owned,
+      location: {
+        directory: AbsolutePath.make(session.directory),
+        ...(session.workspaceID ? { workspaceID: session.workspaceID } : {}),
+      },
+    }
+    const admission = yield* ToolEventPublication.without(authorizeEvent(definition, event, source))
+    const publish = admission.provide(
+      ToolEventPublication.without(
+        Effect.gen(function* () {
+          yield* admission.check
+          if (definition.durable)
+            return yield* bus.publishAllOnce([
+              [definition, owned, { id, created, location: event.location, commit: () => admission.check }],
+            ])
+          yield* bus.publishPreparedEphemeral(definition, event, admission.valid)
+          return { inserted: true }
+        }),
+      ),
+    )
+    return Object.freeze({ id, digest: admission.digest, created, publish })
+  })
+  const prepareSpill = Effect.fnUntraced(function* (
+    spill: { readonly path: string; readonly content: string; readonly projection: object },
+    source: object,
+  ) {
+    const owned = structuredClone(spill)
+    const id = Event.ID.create(),
+      witnessID = Event.ID.create(),
+      created = yield* Clock.currentTimeMillis,
+      sequence = nextSequence++
+    if (!Number.isSafeInteger(sequence)) return yield* Effect.die(unavailable())
+    const digest = SessionDisclosure.digest({
+      version: 2,
+      kind: "tool-spill",
+      sessionID: context.sessionID,
+      inputID: context.inputID,
+      contextReference: context.contextReference,
+      contextDigest: context.contextDigest,
+      componentsDigest: context.componentsDigest,
+      attempt: context.attempt,
+      sequence,
+      spill: owned,
+    })
+    const projection = NativeProducer.projectToolUnit(digest, source)
+    const permit = yield* authorize({
+      id,
+      digest,
+      witnessID,
+      created,
+      sequence,
+      operation: "tool-spill",
+      kind: "tool-spill",
+      projection,
+    })
+    return { check: check(permit) }
+  })
+  const interruptions = new Map<string, Unit>()
+  const settleInterrupted = Effect.fnUntraced(function* () {
+    for (const target of input.state.pending?.targets ?? []) {
+      const key = target.messageID + "\0" + target.toolCallID
+      let unit = interruptions.get(key)
+      if (!unit) {
+        unit = yield* prepareTool(SessionEvent.Tool.Failed, {
+          sessionID: context.sessionID,
+          assistantMessageID: target.messageID,
+          id: target.toolCallID,
+          executed: target.executed,
+          error: interruptedToolError,
+        })
+        interruptions.set(key, unit)
+      }
+      yield* unit.publish
+    }
+  })
+  return Object.freeze({
+    prepare,
+    ...(control
+      ? {
+          prepareTool,
+          prepareSpill,
+          settleInterrupted,
+          authorizeEvent,
+          toolScope: <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+            ToolEventPublication.captured(effect, { authorize: authorizeEvent }),
+        }
+      : {}),
+  })
 })
 
 export type Writer = Effect.Success<ReturnType<typeof make>>

@@ -8,6 +8,8 @@ import { Global } from "@opencode/util/global"
 import { Effect, Stream } from "effect"
 import path from "path"
 import { Permission } from "../permission.js"
+import { ToolProvenance } from "../tool/provenance.js"
+import { NativeProducer } from "../execution-producer.js"
 
 const plan = Agent.ID.make("plan")
 
@@ -42,16 +44,25 @@ export const Plugin = define({
       })
     })
 
-    yield* ctx.tool.hook("execute.after", (event) => {
-      if (event.agent !== plan) return Effect.void
-      if (event.status !== "error") return Effect.void
-      if (event.tool !== "edit" && event.tool !== "write" && event.tool !== "patch") return Effect.void
-      if (!(event.error.error instanceof Permission.BlockedError)) return Effect.void
-      event.error = new ToolFailure({
-        message: `Cannot use ${event.tool} to modify files outside the Plan directory: ${directory}`,
-      })
-      return Effect.void
-    })
+    yield* ToolProvenance.compiled(
+      ctx.tool.hook("execute.after", (event) => {
+        if (event.agent !== plan) return Effect.void
+        if (event.status !== "error") return Effect.void
+        if (event.tool !== "edit" && event.tool !== "write" && event.tool !== "patch") return Effect.void
+        if (!(event.error.error instanceof Permission.BlockedError)) return Effect.void
+        return NativeProducer.unknownToolSource.pipe(
+          Effect.orDie,
+          Effect.andThen(
+            Effect.sync(() => {
+              event.error = new ToolFailure({
+                message: `Cannot use ${event.tool} to modify files outside the Plan directory: ${directory}`,
+              })
+            }),
+          ),
+        )
+      }),
+      { transforms: true },
+    )
 
     // Compaction and committed reverts can strip reminders while the session's agent stays
     // put. Reconcile per request, appending near the tail so the cached prefix stays warm.

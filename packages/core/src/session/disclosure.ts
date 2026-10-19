@@ -67,6 +67,11 @@ export const prepareRequest = (service: ExecutionDisclosure.Service, request: Ex
       if (new Set(config.keys.map((key) => key.id)).size !== config.keys.length) throw new Error()
       const input = Schema.decodeUnknownSync(ExecutionDisclosure.ContextRequest)(structuredClone(request))
       if (input.componentsDigest !== digest(input.components)) throw new Error()
+      if (
+        config.compositionVersion !== 4 &&
+        input.components.some((component) => (component.proof?.length ?? 0) > 4096)
+      )
+        throw new Error()
       const body = JSON.stringify(input)
       if (Buffer.byteLength(body) > 512 * 1024) throw new Error()
       const response = await fetch(endpoint, {

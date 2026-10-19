@@ -66,6 +66,7 @@ const ModelsOutput = Schema.Struct({
 })
 
 export const Plugin = {
+  provenance: { definitions: true },
   id: "opencode.tools",
   effect: Effect.fn("OpenCodeTools.Plugin")(function* (ctx: Context) {
     const hook = (event: SessionHooks["context"]) =>

@@ -141,6 +141,7 @@ export const connect = Effect.fnUntraced(function* (
     onChanged: () => changed[key](),
   })
 
+  const observedClients = new WeakSet<Client>()
   const initialize = Effect.fnUntraced(function* (transport: Transport) {
     const client = new Client(clientInfo, {
       capabilities: {
@@ -166,9 +167,11 @@ export const connect = Effect.fnUntraced(function* (
       )
     }
 
+    const observedTransport = yield* NativeProducer.catalogTransport(server, transport)
+    if (observedTransport !== transport) observedClients.add(client)
     yield* Effect.tryPromise({
       try: (signal) =>
-        client.connect(transport, { timeout: config.timeout?.startup ?? DEFAULT_STARTUP_TIMEOUT, signal }),
+        client.connect(observedTransport, { timeout: config.timeout?.startup ?? DEFAULT_STARTUP_TIMEOUT, signal }),
       catch: (error) => error,
     }).pipe(Effect.onError(() => Effect.promise(() => transport.close()).pipe(Effect.ignore)))
     return client
@@ -251,7 +254,9 @@ export const connect = Effect.fnUntraced(function* (
 
     return {
       modern: client.getProtocolEra() === "modern",
-      instructions: client.getInstructions()?.trim() || undefined,
+      instructions: observedClients.has(client)
+        ? client.getInstructions()
+        : client.getInstructions()?.trim() || undefined,
       tools: () =>
         request("list MCP tools", () => client.listTools(undefined, catalog)).pipe(Effect.map((r) => r.tools)),
       prompts: () =>

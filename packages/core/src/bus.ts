@@ -13,6 +13,7 @@ import { isDeepStrictEqual } from "node:util"
 import { Durable } from "@opencode/schema/durable-event-manifest"
 import { SessionEvent } from "@opencode/schema/session-event"
 import type { SessionID } from "@opencode/schema/session-id"
+import { ToolEventPublication } from "./event/tool-publication.js"
 import { AbsolutePath } from "@opencode/schema/schema"
 
 export type Subscriber<D extends Event.Definition = Event.Definition> = (event: Event.Payload<D>) => Effect.Effect<void>
@@ -489,6 +490,38 @@ export function configured(options?: Options) {
           commit?: PublishOptions["commit"],
         ) {
           return Effect.gen(function* () {
+            const capture = yield* ToolEventPublication.current
+            if (!capture) return yield* publishPhysical(definition, event, commit)
+            const schema = Schema.Struct({ data: definition.data })
+            const owned = freezeEnvelope({
+              ...event,
+              ...(event.metadata === undefined ? {} : { metadata: JSON.parse(JSON.stringify(event.metadata)) }),
+              ...(event.location === undefined ? {} : { location: structuredClone(event.location) }),
+              data: Schema.decodeUnknownSync(schema)(
+                JSON.parse(JSON.stringify(Schema.encodeUnknownSync(schema)({ data: event.data }))),
+              ).data,
+            }) as Event.Payload<D>
+            const admission = yield* capture
+              .authorize(definition, owned as Event.Payload)
+              .pipe(ToolEventPublication.without)
+            yield* admission.check
+            return yield* publishPhysical(
+              definition,
+              owned,
+              definition.durable
+                ? (seq) => admission.check.pipe(Effect.andThen(() => commit?.(seq) ?? Effect.void))
+                : undefined,
+              admission.check,
+            ).pipe(admission.provide)
+          })
+        }
+        function publishPhysical<D extends Event.Definition>(
+          definition: D,
+          event: Event.Payload<D>,
+          commit?: PublishOptions["commit"],
+          check: Effect.Effect<void> = Effect.void,
+        ) {
+          return Effect.gen(function* () {
             if (!definition.durable && commit)
               return yield* Effect.die(
                 new InvalidDurableEventError({
@@ -514,6 +547,7 @@ export function configured(options?: Options) {
             }
             const route = yield* prepareRoutes([event as Event.Payload])
             route()
+            yield* check
             yield* notify(event as Event.Payload, false)
             return event
           })
@@ -563,11 +597,19 @@ export function configured(options?: Options) {
                 JSON.parse(JSON.stringify(Schema.encodeUnknownSync(schema)(input))),
               ) as Event.Payload<D>,
             )
+            const capture = yield* ToolEventPublication.current
+            const admission = capture
+              ? yield* capture.authorize(definition, event as Event.Payload).pipe(ToolEventPublication.without)
+              : undefined
+            if (admission) yield* admission.check
             if (!admit()) return yield* Effect.die(new Error("Event publication is unavailable"))
             // A supplied location is the entire captured route; absence is
             // explicitly global. Do not reload a Session's owner after preflight.
             if (event.location) routes.set(event as Event.Payload, [event.location])
-            yield* notify(event as Event.Payload, false)
+            if (admission) yield* admission.check
+            yield* admission
+              ? admission.provide(notify(event as Event.Payload, false))
+              : notify(event as Event.Payload, false)
             return event
           })
         }
@@ -616,26 +658,28 @@ export function configured(options?: Options) {
                   message: "Once publication requires unique event IDs",
                 }),
               )
+            const capture = yield* ToolEventPublication.current
             // Detach every batch member before any routing/database wait. Caller
             // aliases must not change the transaction after a receipt is checked.
-            const owned = once
-              ? events.map(
-                  ([definition, data, options]) =>
-                    [
-                      definition,
-                      Schema.decodeUnknownSync(definition.data)(
-                        JSON.parse(JSON.stringify(Schema.encodeUnknownSync(definition.data)(data))),
-                      ),
-                      options === undefined
-                        ? undefined
-                        : {
-                            ...options,
-                            ...(options.metadata ? { metadata: JSON.parse(JSON.stringify(options.metadata)) } : {}),
-                            ...(options.location ? { location: structuredClone(options.location) } : {}),
-                          },
-                    ] as const,
-                )
-              : events
+            const owned =
+              once || capture !== undefined
+                ? events.map(
+                    ([definition, data, options]) =>
+                      [
+                        definition,
+                        Schema.decodeUnknownSync(definition.data)(
+                          JSON.parse(JSON.stringify(Schema.encodeUnknownSync(definition.data)(data))),
+                        ),
+                        options === undefined
+                          ? undefined
+                          : {
+                              ...options,
+                              ...(options.metadata ? { metadata: JSON.parse(JSON.stringify(options.metadata)) } : {}),
+                              ...(options.location ? { location: structuredClone(options.location) } : {}),
+                            },
+                      ] as const,
+                  )
+                : events
             const serviceLocation = Option.getOrUndefined(yield* Effect.serviceOption(Location.Service))
             const payloads = yield* Effect.forEach(owned, ([definition, data, options]) =>
               Effect.gen(function* () {
@@ -669,6 +713,17 @@ export function configured(options?: Options) {
                 }
               }),
             )
+            const admissions = yield* Effect.forEach(payloads, (item) =>
+              capture
+                ? capture.authorize(item.definition, item.event).pipe(ToolEventPublication.without)
+                : Effect.succeed(undefined),
+            )
+            for (const [index, admission] of admissions.entries()) {
+              if (!admission) continue
+              yield* admission.check
+              const commit = payloads[index].commit
+              payloads[index].commit = (seq) => admission.check.pipe(Effect.andThen(() => commit?.(seq) ?? Effect.void))
+            }
             const aggregateID = payloads[0].aggregateID
             if (payloads.some((item) => item.aggregateID !== aggregateID)) {
               return yield* Effect.die(
@@ -678,7 +733,7 @@ export function configured(options?: Options) {
                 }),
               )
             }
-            return yield* durableLocks.withLock(aggregateID)(
+            const physical = durableLocks.withLock(aggregateID)(
               Effect.uninterruptible(
                 Effect.gen(function* () {
                   const committed = yield* db
@@ -822,6 +877,10 @@ export function configured(options?: Options) {
                   return { inserted: true, events: committed.events as PublishResult<I> }
                 }),
               ),
+            )
+            return yield* admissions.reduce(
+              (effect, admission) => (admission ? admission.provide(effect) : effect),
+              physical,
             )
           })
         }

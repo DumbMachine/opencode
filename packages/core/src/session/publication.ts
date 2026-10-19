@@ -5,14 +5,19 @@ import { Effect, Schema } from "effect"
 import { ExecutionDisclosure } from "@opencode/schema/execution-disclosure"
 
 export interface Permit {
-  readonly proof: ExecutionDisclosure.PublicationProof
+  readonly proof: ExecutionDisclosure.PublicationProof | ExecutionDisclosure.ToolPublicationProof
   readonly signed: ExecutionDisclosure.SignedProof
   /** Rechecked at local commit; a successful RPC alone never admits output. */
   readonly valid: () => boolean
 }
 
 export interface Authorizer {
-  readonly authorize: (unit: { readonly unitID: string; readonly unitDigest: string }) => Effect.Effect<Permit>
+  readonly authorize: (unit: {
+    readonly unitID: string
+    readonly unitDigest: string
+    readonly kind?: ExecutionDisclosure.ToolPublicationRequest["kind"]
+    readonly projection?: ExecutionDisclosure.ToolPublicationRequest["projection"]
+  }) => Effect.Effect<Permit>
 }
 
 // Only SessionDisclosure.prepare calls this, after verifying ContextProof.
@@ -27,6 +32,7 @@ export const make = (
   const descriptor = captured.publication!
   const endpoint = new URL(descriptor.endpoint)
   if (
+    descriptor.version !== (service.publicationVersion ?? 1) ||
     endpoint.origin !== new URL(service.endpoint).origin ||
     endpoint.username ||
     endpoint.password ||
@@ -44,8 +50,8 @@ export const make = (
     authorize: (unit) =>
       Effect.tryPromise({
         try: async (signal) => {
-          const request = Schema.decodeUnknownSync(ExecutionDisclosure.PublicationRequest)({
-            version: 1,
+          const base = {
+            version: 1 as const,
             sessionID: captured.sessionID,
             inputID: captured.inputID,
             contextReference: captured.contextReference,
@@ -55,7 +61,16 @@ export const make = (
             kind: captured.kind === "input" ? "human-input" : "model-output",
             unitID: unit.unitID,
             unitDigest: unit.unitDigest,
-          })
+          }
+          const request =
+            service.publicationVersion === 2
+              ? Schema.decodeUnknownSync(ExecutionDisclosure.ToolPublicationRequest)({
+                  ...base,
+                  version: 2,
+                  kind: unit.kind ?? base.kind,
+                  ...(unit.projection === undefined ? {} : { projection: unit.projection }),
+                })
+              : Schema.decodeUnknownSync(ExecutionDisclosure.PublicationRequest)(base)
           const response = await fetch(endpoint, {
             method: "POST",
             redirect: "error",
@@ -98,11 +113,17 @@ export const make = (
           })
           if (!verify(null, Buffer.from(signed.payload, "utf8"), publicKey, Buffer.from(signed.signature, "base64url")))
             throw new Error()
-          const proof = Schema.decodeUnknownSync(Schema.fromJsonString(ExecutionDisclosure.PublicationProof))(
-            signed.payload,
-          )
+          const proof =
+            service.publicationVersion === 2
+              ? Schema.decodeUnknownSync(Schema.fromJsonString(ExecutionDisclosure.ToolPublicationProof))(
+                  signed.payload,
+                )
+              : Schema.decodeUnknownSync(Schema.fromJsonString(ExecutionDisclosure.PublicationProof))(signed.payload)
           if (
-            Object.entries(request).some(([key, value]) => proof[key as keyof typeof request] !== value) ||
+            Object.entries(request)
+              .filter(([key]) => key !== "projection")
+              .some(([key, value]) => proof[key as keyof typeof proof] !== value) ||
+            (proof.version === 2 && proof.complete !== (proof.mode === "complete")) ||
             proof.issuer !== service.issuer ||
             proof.audience !== descriptor.audience ||
             proof.organizationID !== descriptor.organizationID ||

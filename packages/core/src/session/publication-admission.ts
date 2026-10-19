@@ -15,7 +15,10 @@ export class Service extends Context.Service<
   Service,
   {
     readonly accepts: (event: Event.Payload) => boolean
-    readonly publication?: ExecutionDisclosure.PublicationProof
+    readonly publicationFor?: (
+      event: Event.Payload,
+    ) => ExecutionDisclosure.PublicationProof | ExecutionDisclosure.ToolPublicationProof | undefined
+    readonly publication?: ExecutionDisclosure.PublicationProof | ExecutionDisclosure.ToolPublicationProof
   }
 >()("@opencode/SessionPublicationAdmission") {}
 

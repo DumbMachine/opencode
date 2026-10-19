@@ -8,6 +8,8 @@ import type { ModelHookOptions } from "@opencode/plugin/effect/registration"
 import type { PermissionHooks } from "@opencode/plugin/effect/permission"
 import { Context, Effect, Layer, Scope } from "effect"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
+import { ToolProvenance } from "../tool/provenance.js"
+import { NativeProducer } from "../execution-producer.js"
 import { State } from "../state.js"
 
 export interface Domains {
@@ -30,7 +32,7 @@ interface Failures extends Record<keyof Domains, unknown> {
 }
 
 type Callback<Event, Error> = (event: Event) => Effect.Effect<void, Error>
-type Entry = { readonly callback: Function; readonly options?: ModelHookOptions }
+type Entry = { readonly callback: Function; readonly options?: ModelHookOptions; readonly compiled?: boolean }
 
 const eventProviderID = (event: unknown) => {
   if (typeof event !== "object" || event === null || !("model" in event)) return undefined
@@ -55,7 +57,10 @@ export interface Interface {
     domain: Domain,
     name: Name,
     event: Domains[Domain][Name],
-  ) => Effect.Effect<{ readonly event: Domains[Domain][Name]; readonly invoked: number }, Failures[Domain][Name]>
+  ) => Effect.Effect<
+    { readonly event: Domains[Domain][Name]; readonly invoked: number; readonly untracked?: number },
+    Failures[Domain][Name]
+  >
   readonly trigger: <Domain extends keyof Domains, Name extends keyof Domains[Domain] & keyof Failures[Domain]>(
     domain: Domain,
     name: Name,
@@ -76,7 +81,8 @@ const layer = Layer.effect(
         const scope = yield* Scope.Scope
         const id = key(domain, name)
         let active = true
-        const entry = { callback, options }
+        const producer = yield* ToolProvenance.registration
+        const entry = { callback, options, compiled: producer?.transforms === true }
         callbacks.set(id, [...(callbacks.get(id) ?? []), entry])
         const dispose = Effect.sync(() => {
           if (!active) return
@@ -93,13 +99,18 @@ const layer = Layer.effect(
     const triggerObserved: Interface["triggerObserved"] = Effect.fnUntraced(function* (domain, name, event) {
       const snapshot = callbacks.get(key(domain, name)) ?? []
       let invoked = 0
+      let untracked = 0
       for (const entry of snapshot) {
         if (entry.options?.providerID !== undefined && entry.options.providerID !== eventProviderID(event)) continue
         invoked++
+        if (!entry.compiled) {
+          yield* NativeProducer.requireToolBinding.pipe(Effect.orDie)
+          untracked++
+        }
         const result: Effect.Effect<void, Failures[typeof domain][typeof name]> = entry.callback(event)
         yield* result
       }
-      return Object.freeze({ event, invoked })
+      return Object.freeze({ event, invoked, untracked })
     })
     const trigger: Interface["trigger"] = (domain, name, event) =>
       triggerObserved(domain, name, event).pipe(Effect.map((result) => result.event))

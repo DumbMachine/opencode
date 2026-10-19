@@ -18,22 +18,25 @@ import { definition } from "../tool/runtime.js"
 const decodeJson = Schema.decodeUnknownOption(Schema.fromJsonString(Schema.Unknown))
 const maxDepth = 6
 
-export const Plugin = define({
-  id: "opencode.tool.input.repair",
-  effect: (ctx) =>
-    ctx.tool.hook("execute.before", (event) =>
-      Effect.gen(function* () {
-        // The outer Code Mode tool is built per snapshot rather than registered, so it cannot be
-        // looked up here. Its `{ code }` input is trivial; the tools it calls are repaired normally.
-        if (event.tool === "execute") return
-        const tool = (yield* ctx.tool.list()).find((tool) => tool.id === event.tool)
-        if (!tool) return
-        const schema = definition(tool).inputSchema
-        if (schema.type !== "object") return
-        event.input = repair(event.input, schema, schema, 0)
-      }),
-    ),
-})
+export const Plugin = {
+  provenance: { transforms: true },
+  ...define({
+    id: "opencode.tool.input.repair",
+    effect: (ctx) =>
+      ctx.tool.hook("execute.before", (event) =>
+        Effect.gen(function* () {
+          // The outer Code Mode tool is built per snapshot rather than registered, so it cannot be
+          // looked up here. Its `{ code }` input is trivial; the tools it calls are repaired normally.
+          if (event.tool === "execute") return
+          const tool = (yield* ctx.tool.list()).find((tool) => tool.id === event.tool)
+          if (!tool) return
+          const schema = definition(tool).inputSchema
+          if (schema.type !== "object") return
+          event.input = repair(event.input, schema, schema, 0)
+        }),
+      ),
+  }),
+}
 
 function repair(value: unknown, schema: JsonSchema.JsonSchema, root: JsonSchema.JsonSchema, depth: number): unknown {
   if (depth > maxDepth) return value

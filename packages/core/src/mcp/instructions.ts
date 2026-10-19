@@ -5,6 +5,7 @@ import { Context, Effect, Layer, Schema } from "effect"
 import { Permission } from "../permission.js"
 import { McpTool } from "../tool/mcp.js"
 import { Mcp } from "./index.js"
+import { NativeProducer } from "../execution-producer.js"
 import { Instructions } from "../instructions/index.js"
 
 const Summary = Schema.Struct({
@@ -40,7 +41,9 @@ const summaries = (
       const codemode = owned[0]?.codemode !== false
       if (codemode && !canExecute) return []
       if (
-        !owned.some((tool) => Permission.evaluate(McpTool.name(tool.server, tool.name), "*", permissions).effect !== "deny")
+        !owned.some(
+          (tool) => Permission.evaluate(McpTool.name(tool.server, tool.name), "*", permissions).effect !== "deny",
+        )
       )
         return []
       return [
@@ -115,13 +118,16 @@ export const layer = Layer.effect(
           concurrency: "unbounded",
         })
         const visible = summaries(instructions, tools, permissions)
-        return [
-          "These MCP servers exist only for the current request and replace the configured servers for this execution.",
-          "Call their tools directly. Do not assume they remain available afterward.",
-          visible.length === 0 ? "" : render(visible),
-        ]
-          .filter((part) => part.length > 0)
-          .join("\n")
+        return NativeProducer.recordCatalogInstructions(
+          execution,
+          [
+            "These MCP servers exist only for the current request and replace the configured servers for this execution.",
+            "Call their tools directly. Do not assume they remain available afterward.",
+            visible.length === 0 ? "" : render(visible),
+          ]
+            .filter((part) => part.length > 0)
+            .join("\n"),
+        )
       }),
     })
   }),

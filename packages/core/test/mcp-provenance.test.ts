@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test"
 import { createPublicKey, generateKeyPairSync, sign, verify } from "node:crypto"
 import { Server, WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/server"
-import { Effect, Exit, Schema } from "effect"
+import { Effect, Exit, Layer, Schema } from "effect"
 import { ExecutionDisclosure } from "@opencode/schema/execution-disclosure"
 import { ExecutionProducer } from "@opencode/schema/execution-producer"
 import { SessionID } from "@opencode/schema/session-id"
@@ -11,6 +11,13 @@ import { NativeProducer } from "@opencode/core/execution-producer"
 import { McpProvenance } from "@opencode/core/mcp/provenance"
 import { McpClient } from "@opencode/core/mcp/client"
 import { Hash } from "@opencode/util/hash"
+import { PluginHooks } from "@opencode/core/plugin/hooks"
+import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
+import { Agent } from "@opencode/schema/agent"
+import { Tool } from "@opencode/schema/tool"
+import { Tool as ToolRegistry } from "@opencode/core/tool"
+import { Image } from "@opencode/core/image"
+import { LayerNode } from "@opencode/util/effect/layer-node"
 import { hostEnvironmentLayer } from "./fixture/environment"
 
 const key = () => {
@@ -29,6 +36,7 @@ const key = () => {
 const contextKey = key()
 const resultKey = key()
 const publicationKey = key()
+const catalogKey = key()
 const fixture = (actor = "first") => {
   const now = Date.now()
   const service = ExecutionDisclosure.Service.make({
@@ -38,6 +46,7 @@ const fixture = (actor = "first") => {
     issuer: "fixture-host",
     audience: "model-context",
     keys: [contextKey.descriptor],
+    catalog: { version: 1, audience: "catalog", keys: [catalogKey.descriptor] },
   })
   const context = ExecutionDisclosure.ContextProof.make({
     version: 1,
@@ -471,4 +480,269 @@ test("rejects scope substitution, reserved collisions, cancellation and mutable 
       expect(dispatched).toBe(0)
     }),
   )
+})
+
+test("verifies raw initialize and paginated catalog responses before SDK conversion and preserves later tool calls", async () => {
+  const f = fixture()
+  const envelope = (actual: object, kind: "initialize" | "tools/list", cursor: string) => {
+    const raw = JSON.stringify(actual)
+    const now = Date.now()
+    const identity = f.context.publication!
+    const proof = ExecutionDisclosure.CatalogProof.make({
+      version: 1,
+      purpose: "native-mcp-catalog",
+      issuer: f.service.issuer,
+      audience: f.service.catalog!.audience,
+      organizationID: identity.organizationID,
+      threadID: identity.threadID,
+      sessionID: f.context.sessionID,
+      inputID: f.context.inputID,
+      capabilityID: identity.capabilityID,
+      capabilityGeneration: 1,
+      kind,
+      cursor,
+      responseRevision: Hash.sha256(raw),
+      receiptReference: Hash.sha256(kind + cursor),
+      authorizationVersion: "catalog-authorization",
+      manifestBinding: Hash.sha256("catalog-manifest"),
+      audienceBinding: Hash.sha256("catalog-audience"),
+      mode: "complete",
+      complete: true,
+      issuedAt: now,
+      expiresAt: now + 20_000,
+    })
+    return {
+      ...actual,
+      _meta: {
+        [McpProvenance.CatalogKey]: {
+          version: 1,
+          snapshot: Buffer.from(raw).toString("base64"),
+          proof: catalogKey.signed(JSON.stringify(proof)),
+        },
+      },
+    }
+  }
+  await Effect.runPromise(
+    Effect.scoped(
+      Effect.gen(function* () {
+        const local = yield* Effect.acquireRelease(
+          Effect.promise(async () => {
+            const protocol = new Server(
+              { name: "catalog", version: "1" },
+              {
+                capabilities: { tools: {} },
+                instructions: "  Preserve these instructions.\n",
+              },
+            )
+            protocol.setRequestHandler("tools/list", ({ params }) =>
+              Promise.resolve({
+                tools: [{ name: params?.cursor ? "second" : "first", inputSchema: { type: "object" as const } }],
+                ...(params?.cursor ? {} : { nextCursor: "second-page" }),
+              }),
+            )
+            protocol.setRequestHandler("tools/call", () =>
+              Promise.resolve({ content: [{ type: "text", text: "ordinary tool still works" }] }),
+            )
+            const transport = new WebStandardStreamableHTTPServerTransport({
+              sessionIdGenerator: () => crypto.randomUUID(),
+              enableJsonResponse: true,
+            })
+            await protocol.connect(transport)
+            const http = Bun.serve({
+              port: 0,
+              fetch: async (request) => {
+                const call =
+                  request.method === "POST"
+                    ? ((await request.clone().json()) as { method?: string; params?: { cursor?: string } })
+                    : undefined
+                const response = await transport.handleRequest(request)
+                if (call?.method !== "initialize" && call?.method !== "tools/list") return response
+                const packet = (await response.json()) as { result?: Record<string, unknown> }
+                if (!packet.result) return Response.json(packet, { status: response.status, headers: response.headers })
+                return Response.json(
+                  {
+                    ...packet,
+                    result: envelope(
+                      packet.result,
+                      call.method as "initialize" | "tools/list",
+                      call.params?.cursor ?? "",
+                    ),
+                  },
+                  { status: response.status, headers: response.headers },
+                )
+              },
+            })
+            return {
+              url: http.url.toString(),
+              close: async () => {
+                await http.stop(true)
+                await protocol.close()
+              },
+            }
+          }),
+          (server) => Effect.promise(server.close),
+        )
+        const captured = yield* NativeProducer.captureCatalog({
+          service: f.service,
+          sessionID: f.context.sessionID,
+          inputID: f.context.inputID,
+          revision: 1,
+          current: () => true,
+        }).run(
+          Effect.gen(function* () {
+            const connection = yield* McpClient.connect(
+              "catalog",
+              new ConfigMCP.Remote({ type: "remote", url: local.url, oauth: false }),
+              import.meta.dir,
+            ).pipe(Effect.provide(hostEnvironmentLayer))
+            expect(connection.instructions).toBe("  Preserve these instructions.\n")
+            expect((yield* connection.tools()).map((tool) => tool.name)).toEqual(["first", "second"])
+            return connection
+          }),
+        )
+        expect(captured.evidence.complete).toBeTrue()
+        expect(captured.evidence.observations.map((item) => [item.proof.kind, item.proof.cursor])).toEqual([
+          ["initialize", ""],
+          ["tools/list", ""],
+          ["tools/list", "second-page"],
+        ])
+        expect((yield* captured.value.callTool({ name: "first" })).content).toEqual([
+          { type: "text", text: "ordinary tool still works" },
+        ])
+        const observation = captured.evidence.observations[0]
+        expect(() =>
+          McpProvenance.catalog(
+            {
+              service: f.service,
+              sessionID: f.context.sessionID,
+              inputID: f.context.inputID,
+              revision: 2,
+              server: "catalog",
+              kind: "initialize",
+              cursor: "",
+            },
+            envelope(JSON.parse(observation.snapshot), "initialize", ""),
+          ),
+        ).toThrow()
+      }),
+    ),
+  )
+})
+
+test("retains typed transport failure evidence as incomplete and refuses unbound actor tools", async () => {
+  const f = fixture()
+  const capture = await Effect.runPromise(
+    NativeProducer.captureTools({ service: f.service, signed: f.signed, current: () => true }),
+  )
+  const failure = new Error("unverified remote private failure")
+  const identity = { messageID: f.invocation.messageID, toolCallID: "transport-error" }
+  const result = await Effect.runPromise(
+    capture
+      .run(
+        identity,
+        NativeProducer.dispatchMcp(
+          { server: "server-first", name: "echo", args: {}, sessionID: f.context.sessionID },
+          () => Effect.fail(failure),
+        ),
+      )
+      .pipe(Effect.exit),
+  )
+  expect(Exit.isFailure(result)).toBeTrue()
+  const fact = NativeProducer.projectToolUnit(Hash.sha256("terminal"), failure)
+  expect(fact).toBeDefined()
+  expect(JSON.parse(fact!.payload)).toMatchObject({ complete: false, parentReceipts: [] })
+  const denied = await Effect.runPromise(capture.run(identity, NativeProducer.requireToolBinding).pipe(Effect.exit))
+  expect(Exit.isFailure(denied)).toBeTrue()
+  await Effect.runPromise(NativeProducer.requireToolBinding)
+})
+
+test("refuses unbound CodeMode source access and plugin callbacks before invocation while ordinary hooks remain compatible", async () => {
+  const f = fixture()
+  const capture = await Effect.runPromise(
+    NativeProducer.captureTools({ service: f.service, signed: f.signed, current: () => true }),
+  )
+  const identity = { messageID: f.invocation.messageID, toolCallID: "hook-gate" }
+  let invoked = 0
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const hooks = yield* PluginHooks.Service
+      yield* hooks.register("tool", "execute.before", () =>
+        Effect.sync(() => {
+          invoked++
+        }),
+      )
+      const event = {
+        tool: "example",
+        sessionID: f.context.sessionID,
+        agent: Agent.ID.make("fixture"),
+        messageID: identity.messageID,
+        id: Tool.CallID.make(identity.toolCallID),
+        input: {},
+      }
+      expect(
+        Exit.isFailure(
+          yield* capture.run(identity, hooks.triggerObserved("tool", "execute.before", event)).pipe(Effect.exit),
+        ),
+      ).toBeTrue()
+      expect(invoked).toBe(0)
+      yield* hooks.triggerObserved("tool", "execute.before", event)
+      expect(invoked).toBe(1)
+      let resolved = 0
+      yield* hooks.register("tool", "resolve", () =>
+        Effect.sync(() => {
+          resolved++
+        }),
+      )
+      const resolve = { sessionID: f.context.sessionID, agent: Agent.ID.make("fixture"), tools: [], renames: [] }
+      expect(
+        Exit.isFailure(
+          yield* NativeProducer.managedPreparation(hooks.trigger("tool", "resolve", resolve)).pipe(Effect.exit),
+        ),
+      ).toBeTrue()
+      expect(resolved).toBe(0)
+      yield* hooks.trigger("tool", "resolve", resolve)
+      expect(resolved).toBe(1)
+      let physical = 0
+      expect(
+        Exit.isFailure(
+          yield* capture
+            .run(
+              identity,
+              NativeProducer.unknownToolSource.pipe(
+                Effect.andThen(
+                  Effect.sync(() => {
+                    physical++
+                  }),
+                ),
+              ),
+            )
+            .pipe(Effect.exit),
+        ),
+      ).toBeTrue()
+      expect(physical).toBe(0)
+    }).pipe(Effect.scoped, Effect.provide(AppNodeBuilder.build(PluginHooks.node))),
+  )
+})
+
+
+test("the canonical executor denies unbound native leaves inside CodeMode before execution", async () => {
+  const f = fixture()
+  let physical = 0
+  await Effect.runPromise(Effect.gen(function* () {
+    const tools = yield* ToolRegistry.Service
+    yield* tools.transform(editor => editor.add({ name: "ambient", description: "Unsupported actor binding", input: Schema.Struct({}),
+      execute: () => Effect.sync(() => { physical++; return { content: "ambient bytes" } }) }))
+    const snapshot = yield* tools.snapshot()
+    const capture = yield* NativeProducer.captureTools({ service: f.service, signed: f.signed, current: () => true })
+    const identity = { messageID: f.invocation.messageID, toolCallID: "nested-native" }
+    const request = { sessionID: f.context.sessionID, inputID: f.context.inputID, agent: Agent.ID.make("fixture"), messageID: identity.messageID,
+      call: { type: "tool-call" as const, id: identity.toolCallID, name: "execute", input: { code: "return await tools.ambient({})" } } }
+    const result = yield* capture.run(identity, snapshot.execute(request)).pipe(Effect.exit)
+    expect(physical).toBe(0)
+    expect(Exit.isFailure(result) || (Exit.isSuccess(result) && JSON.stringify(result.value).includes("Access needed"))).toBeTrue()
+    yield* snapshot.execute({ ...request, call: { ...request.call, id: "ordinary", input: { code: "return await tools.ambient({})" } } })
+    expect(physical).toBe(1)
+  }).pipe(Effect.scoped, Effect.provide(AppNodeBuilder.build(LayerNode.group([ToolRegistry.node, PluginHooks.node]), [
+    Image.node.replace(Layer.mock(Image.Service, { normalize: () => Effect.die("unused image normalization") })),
+  ]))))
 })

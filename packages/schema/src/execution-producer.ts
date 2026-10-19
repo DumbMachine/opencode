@@ -15,6 +15,10 @@ export const Contract = Schema.Literals([
   "model-request-only-plaintext-v1",
   "human-inline-identity-v1",
   "model-request-only-inline-v1",
+  "mcp-invocation-v1",
+  "mcp-result-projection-v1",
+  "tool-definitions-v1",
+  "model-tool-context-v1",
 ])
 
 export interface SignedFact extends Schema.Schema.Type<typeof SignedFact> {}
@@ -29,7 +33,7 @@ export const EnrollmentRequest = Schema.Struct({
   version: Schema.Literal(1),
   challenge: Schema.String.check(Schema.isPattern(/^[A-Za-z0-9_-]{43}$/)),
   audience: bounded(512),
-  contracts: Schema.Array(Contract).check(Schema.isMinLength(1), Schema.isMaxLength(5)).pipe(optional),
+  contracts: Schema.Array(Contract).check(Schema.isMinLength(1), Schema.isMaxLength(9)).pipe(optional),
 }).annotate({ identifier: "ExecutionProducer.EnrollmentRequest" })
 
 export interface EnrollmentProof extends Schema.Schema.Type<typeof EnrollmentProof> {}
@@ -41,7 +45,7 @@ export const EnrollmentProof = Schema.Struct({
   producerEpoch: bounded(128),
   bootNonce: Schema.String.check(Schema.isPattern(/^[A-Za-z0-9_-]{43}$/)).pipe(optional),
   key: VerificationKey,
-  contracts: Schema.Array(Contract).check(Schema.isMinLength(1), Schema.isMaxLength(5)),
+  contracts: Schema.Array(Contract).check(Schema.isMinLength(1), Schema.isMaxLength(9)),
   issuedAt: Schema.Int,
 }).annotate({ identifier: "ExecutionProducer.EnrollmentProof" })
 
@@ -190,3 +194,59 @@ export const McpInvocation = Schema.Struct({
   contextProofRevision: Digest,
   issuedAt: Schema.Int,
 }).annotate({ identifier: "ExecutionProducer.McpInvocation" })
+
+// Larger evidence is separately negotiated; legacy SignedFact remains 4096.
+export interface SignedToolFact extends Schema.Schema.Type<typeof SignedToolFact> {}
+export const SignedToolFact = Schema.Struct({
+  keyID: SignedFact.fields.keyID,
+  payload: bounded(16384),
+  signature: SignedFact.fields.signature,
+}).annotate({ identifier: "ExecutionProducer.SignedToolFact" })
+
+export interface ToolResultProjection extends Schema.Schema.Type<typeof ToolResultProjection> {}
+export const ToolResultProjection = Schema.Struct({
+  version: Schema.Literal(1),
+  purpose: Schema.Literal("native-tool-result-projection"),
+  contract: Schema.Literal("mcp-result-projection-v1"),
+  producerEpoch: bounded(128),
+  sessionID: SessionID,
+  inputID: SessionMessageID,
+  attempt: bounded(128),
+  messageID: SessionMessageID,
+  toolCallID: bounded(256),
+  projectionRevision: Digest,
+  parentReceipts: Schema.Array(Digest).check(Schema.isMaxLength(128)),
+  complete: Schema.Boolean,
+  issuedAt: Schema.Int,
+}).annotate({ identifier: "ExecutionProducer.ToolResultProjection" })
+
+export interface ToolDefinitions extends Schema.Schema.Type<typeof ToolDefinitions> {}
+export const ToolDefinitions = Schema.Struct({
+  version: Schema.Literal(1),
+  purpose: Schema.Literal("native-tool-definitions"),
+  contract: Schema.Literal("tool-definitions-v1"),
+  producerEpoch: bounded(128),
+  sessionID: SessionID,
+  inputID: SessionMessageID,
+  attempt: bounded(128),
+  kind: Schema.Literals(["tools", "instructions"]),
+  index: HumanProjection.fields.index,
+  projectionRevision: Digest,
+  parentReceipts: Schema.Array(Digest).check(Schema.isMaxLength(128)),
+  complete: Schema.Boolean,
+  issuedAt: Schema.Int,
+}).annotate({ identifier: "ExecutionProducer.ToolDefinitions" })
+
+export interface ToolComposition extends Schema.Schema.Type<typeof ToolComposition> {}
+export const ToolComposition = Schema.Struct({
+  ...RequestOnlyComposition.fields,
+  contract: Schema.Literal("model-tool-context-v1"),
+  toolCount: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0), Schema.isLessThanOrEqualTo(2048)),
+  complete: Schema.Boolean,
+}).annotate({ identifier: "ExecutionProducer.ToolComposition" })
+
+export interface ToolAssistantProjection extends Schema.Schema.Type<typeof ToolAssistantProjection> {}
+export const ToolAssistantProjection = Schema.Struct({
+  ...RequestOnlyAssistantProjection.fields,
+  contract: Schema.Literal("session-assistant-tool-context-v1"),
+}).annotate({ identifier: "ExecutionProducer.ToolAssistantProjection" })

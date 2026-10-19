@@ -223,15 +223,25 @@ export const make = Effect.fn("Session.make")(function* () {
             input.capabilities === undefined
           if (
             existing?.type === "user" &&
-            !!session.contextPolicy !== !!existing.payload.capabilities?.includes("publication-v1")
+            session.contextPolicy?.version !==
+              (existing.payload.capabilities?.includes("publication-v2")
+                ? 2
+                : existing.payload.capabilities?.includes("publication-v1")
+                  ? 1
+                  : undefined)
           )
             return yield* new PromptConflictError({ sessionID, messageID })
           if (
             !receiptOnly &&
-            ((session.contextPolicy !== undefined && input.disclosure?.publicationVersion !== 1) ||
+            ((session.contextPolicy !== undefined &&
+              input.disclosure?.publicationVersion !== session.contextPolicy.version) ||
               (session.contextPolicy === undefined &&
-                (input.disclosure?.publicationVersion === 1 || input.capabilities?.includes("publication-v1"))) ||
-              (session.contextPolicy !== undefined && input.mcp !== undefined && Object.keys(input.mcp).length !== 0) ||
+                (input.disclosure?.publicationVersion !== undefined ||
+                  input.capabilities?.includes("publication-v1") ||
+                  input.capabilities?.includes("publication-v2"))) ||
+              (session.contextPolicy?.version === 1 &&
+                input.mcp !== undefined &&
+                Object.keys(input.mcp).length !== 0) ||
               !SessionInputRequirements.supported(input.capabilities) ||
               !SessionInputRequirements.serviceSupported(input.disclosure) ||
               (input.disclosure !== undefined && input.mcpRevision === undefined))
@@ -252,6 +262,7 @@ export const make = Effect.fn("Session.make")(function* () {
                         ...(input.mcp === undefined ? [] : ["mcp"]),
                         ...(input.disclosure === undefined ? [] : ["disclosure"]),
                         ...(input.disclosure?.publicationVersion === 1 ? ["publication-v1"] : []),
+                        ...(input.disclosure?.publicationVersion === 2 ? ["publication-v2"] : []),
                       ]),
                     ],
                   },

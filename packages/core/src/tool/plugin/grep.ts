@@ -62,6 +62,7 @@ export const toModelContent = (matches: EncodedOutput, truncated = false) => {
 
 /** Grep leaf that defaults its filesystem root to the active Location. */
 export const Plugin = {
+  provenance: { definitions: true },
   id: "opencode.tool.grep",
   effect: Effect.fn("GrepTool.Plugin")(function* (ctx: Context) {
     const environment = yield* Environment.Service

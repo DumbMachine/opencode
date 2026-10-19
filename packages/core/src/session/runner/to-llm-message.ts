@@ -12,6 +12,7 @@ import { Option, Schema } from "effect"
 import { fileURLToPath } from "url"
 import { SessionMessage } from "../message.js"
 import { SessionProviderContext } from "../provider-context.js"
+import { interruptedToolError } from "../tool-interruption.js"
 import type { FileAttachment } from "@opencode/schema/prompt"
 
 const imageMimes = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"])
@@ -122,7 +123,11 @@ const toolCall = (tool: SessionMessage.AssistantTool, providerMetadata: Provider
     providerMetadata,
   })
 
-const toolResult = (tool: SessionMessage.AssistantTool, providerMetadata: ProviderMetadata | undefined) => {
+const toolResult = (
+  tool: SessionMessage.AssistantTool,
+  providerMetadata: ProviderMetadata | undefined,
+  pendingOutcome: boolean,
+) => {
   if (tool.state.status === "completed") {
     // TODO: Materialize remote and managed URIs before provider-history lowering.
     const content = tool.state.content
@@ -138,11 +143,14 @@ const toolResult = (tool: SessionMessage.AssistantTool, providerMetadata: Provid
       providerMetadata,
     })
   }
-  if (tool.state.status === "error") {
+  if (tool.state.status === "error" || pendingOutcome) {
     return ToolResultPart.make({
       id: tool.id,
       name: tool.name,
-      result: { error: tool.state.error, content: tool.state.content ?? [] },
+      result:
+        tool.state.status === "error"
+          ? { error: tool.state.error, content: tool.state.content ?? [] }
+          : { error: interruptedToolError, content: [] },
       resultType: "error",
       providerExecuted: tool.executed,
       providerMetadata,
@@ -150,7 +158,12 @@ const toolResult = (tool: SessionMessage.AssistantTool, providerMetadata: Provid
   }
 }
 
-const assistant = (message: SessionMessage.Assistant, model: Model.Ref, providerMetadataKey: string) => {
+const assistant = (
+  message: SessionMessage.Assistant,
+  model: Model.Ref,
+  providerMetadataKey: string,
+  pendingOutcome: boolean,
+) => {
   const sameProvider = String(message.model.providerID) === String(model.providerID)
   const sameModel = sameProvider && String(message.model.id) === String(model.id)
   const reuseProviderMetadata = sameModel && message.error === undefined
@@ -202,6 +215,7 @@ const assistant = (message: SessionMessage.Assistant, model: Model.Ref, provider
         : sameProvider && item.providerResultState !== undefined
           ? providerMetadata(providerMetadataKey, item.providerResultState)
           : undefined,
+      pendingOutcome,
     )
     return result ? [call, result] : [call]
   })
@@ -218,6 +232,7 @@ const assistant = (message: SessionMessage.Assistant, model: Model.Ref, provider
         reuseProviderMetadata
           ? providerMetadata(providerMetadataKey, item.providerResultState ?? item.providerState)
           : undefined,
+        pendingOutcome,
       ),
     )
     .filter((message) => message !== undefined)
@@ -252,6 +267,7 @@ function toLLMMessage(
   model: Model.Ref,
   providerMetadataKey: string,
   inlineIdentity: boolean,
+  pendingOutcome: boolean,
 ): Message[] {
   switch (message.type) {
     case "agent-switched":
@@ -306,7 +322,7 @@ function toLLMMessage(
         }),
       ]
     case "assistant":
-      return assistant(message, model, providerMetadataKey)
+      return assistant(message, model, providerMetadataKey, pendingOutcome)
     case "compaction":
       if (message.status !== "completed") return []
       // History selection only keeps native windows the target model can replay.
@@ -336,4 +352,5 @@ export const toLLMMessages = (
   model: Model.Ref,
   providerMetadataKey: string = model.providerID,
   inlineIdentity = false,
-) => messages.flatMap((message) => toLLMMessage(message, model, providerMetadataKey, inlineIdentity))
+  pendingOutcome = false,
+) => messages.flatMap((message) => toLLMMessage(message, model, providerMetadataKey, inlineIdentity, pendingOutcome))

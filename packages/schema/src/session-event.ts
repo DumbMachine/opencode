@@ -679,6 +679,8 @@ export const PublicationCommitted = Event.durable({
     batch: Schema.Union([
       Schema.Struct({ operation: Schema.Literal("durable-event"), length: Schema.Literal(2) }),
       Schema.Struct({ operation: Schema.Literal("ephemeral-event"), length: Schema.Literal(1) }),
+      Schema.Struct({ operation: Schema.Literal("tool-event"), length: Schema.Literal(1) }),
+      Schema.Struct({ operation: Schema.Literal("tool-spill"), length: Schema.Literal(1) }),
     ]),
   },
 })

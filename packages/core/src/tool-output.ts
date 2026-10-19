@@ -9,6 +9,8 @@ import { Global } from "@opencode/util/global"
 import { FileRetention } from "./file-retention.js"
 import { Identifier } from "./id/id.js"
 import { State } from "./state.js"
+import { NativeProducer } from "./execution-producer.js"
+import type { SessionPublicationWriter } from "./session/publication-writer.js"
 
 export const MAX_LINES = 2_000
 export const MAX_BYTES = 50 * 1024 // 50 KiB
@@ -27,7 +29,7 @@ export type Editor = {
 }
 
 export interface Interface extends State.Transformable<Editor> {
-  readonly truncate: (result: Result) => Effect.Effect<Result>
+  readonly truncate: (result: Result, publication?: SessionPublicationWriter.Writer) => Effect.Effect<Result>
   readonly cleanup: () => Effect.Effect<void>
 }
 
@@ -62,7 +64,7 @@ const layer = Layer.effect(
       }),
     })
 
-    const truncate = Effect.fnUntraced(function* (result: Result) {
+    const truncate = Effect.fnUntraced(function* (result: Result, publication?: SessionPublicationWriter.Writer) {
       if (result.metadata?.truncated !== undefined) return result
       const content = result.content
       const text = content.flatMap((item) => (item.type === "text" ? [item.text] : [])).join("\n")
@@ -71,7 +73,10 @@ const layer = Layer.effect(
       if (text.endsWith("\n")) lines.pop()
       const totalBytes = Buffer.byteLength(text, "utf-8")
       if (lines.length <= limits.maxLines && totalBytes <= limits.maxBytes)
-        return { ...result, metadata: { ...result.metadata, truncated: false } }
+        return NativeProducer.inheritToolResult(result, {
+          ...result,
+          metadata: { ...result.metadata, truncated: false },
+        })
 
       const kept: string[] = []
       let bytes = 0
@@ -82,8 +87,6 @@ const layer = Layer.effect(
         bytes += size
       }
       const file = path.join(directory, Identifier.ascending("tool"))
-      yield* fs.ensureDir(directory).pipe(Effect.orDie)
-      yield* fs.writeFileString(file, text).pipe(Effect.orDie)
       const shown = kept.length > 0 ? `lines 1-${kept.length}` : "0 lines"
       const marker = `[showing ${shown} of ${lines.length}; full output saved to ${file}]`
       const bounded: Tool.Content[] = []
@@ -108,11 +111,19 @@ const layer = Layer.effect(
         marked = true
       }
       if (!marked) bounded.push({ type: "text", text: marker })
-      return {
+      const normalized = NativeProducer.inheritToolResult(result, {
         ...result,
         content: bounded,
         metadata: { ...result.metadata, truncated: true, outputPath: file },
-      }
+      })
+      const admission = publication?.prepareSpill
+        ? yield* publication.prepareSpill({ path: file, content: text, projection: normalized }, result)
+        : undefined
+      if (admission) yield* admission.check
+      yield* fs.ensureDir(directory).pipe(Effect.orDie)
+      if (admission) yield* admission.check
+      yield* fs.writeFileString(file, text).pipe(Effect.orDie)
+      return normalized
     })
 
     return Service.of({

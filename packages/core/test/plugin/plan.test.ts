@@ -1,6 +1,7 @@
 import { describe, expect } from "bun:test"
 import { Message, ToolFailure } from "@opencode/ai"
-import { DateTime, Effect, Option, Stream, Types } from "effect"
+import { DateTime, Effect, Exit, Option, Stream, Types } from "effect"
+import { NativeProducer } from "@opencode/core/execution-producer"
 import type { SessionContext } from "@opencode/plugin/effect/session"
 import type { ToolHooks } from "@opencode/plugin/effect/tool"
 import { Agent } from "@opencode/core/agent"
@@ -296,6 +297,20 @@ describe("plan plugin mutations", () => {
         expect(event.error.message).toContain("outside the Plan directory")
         expect(event.error.message).toContain(planDirectory)
       }
+    }),
+  )
+
+  it.effect("rejects managed ambient-directory rewriting before changing the failure", () =>
+    Effect.gen(function* () {
+      const { toolHook } = yield* run()
+      const error = new ToolFailure({
+        message: "Original fixed failure",
+        error: new Permission.BlockedError({ rules: [], permission: "edit", resources: ["source.ts"] }),
+      })
+      const event = toolError("edit", error)
+      expect(Exit.isFailure(yield* NativeProducer.managedPreparation(toolHook(event)).pipe(Effect.exit))).toBeTrue()
+      expect(event.error).toBe(error)
+      expect(event.error.message).not.toContain(planDirectory)
     }),
   )
 

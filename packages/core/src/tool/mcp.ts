@@ -9,6 +9,8 @@ import { Bus } from "../bus.js"
 import { Mcp } from "../mcp/index.js"
 import { Permission } from "../permission.js"
 import { Tool } from "../tool.js"
+import { ToolProvenance } from "./provenance.js"
+import { SessionDisclosure } from "../session/disclosure.js"
 
 /**
  * Registry namespace and permission action names for MCP tools.
@@ -70,112 +72,118 @@ export const layer = Layer.effect(
       const found = yield* execution.tools()
       return found.map((tool): Tool.Info => {
         const schema = (tool.inputSchema ?? {}) as JsonSchema.JsonSchema
-        return {
-          name: tool.name,
-          options: { namespace: namespace(tool.server), codemode: tool.codemode !== false, group: "mcp" },
-          description: tool.description ?? "",
-          input: {
-            ...schema,
-            type: "object",
-            properties: schema.properties ?? {},
-            additionalProperties: false,
-          },
-          output: (tool.outputSchema ?? {}) as JsonSchema.JsonSchema,
-          execute: (input, context) =>
-            Effect.gen(function* () {
-              const args = (input ?? {}) as Record<string, unknown>
-              if (!tool.approvalBridge)
-                yield* permission.assert({
-                  action: name(tool.server, tool.name),
-                  resources: ["*"],
-                  save: ["*"],
-                  metadata: {},
-                  sessionID: context.sessionID,
-                  agent: context.agent,
-                  source: {
-                    type: "tool",
-                    messageID: context.messageID,
-                    ...(context.inputID === undefined ? {} : { inputID: context.inputID }),
-                    id: context.id,
-                  },
-                })
-              const call = (meta?: Readonly<Record<string, unknown>>) =>
-                execution
-                  .callTool({ server: tool.server, name: tool.name, args, meta, sessionID: context.sessionID })
-                  .pipe(
-                    Effect.catchTags({
-                      "MCP.NotFoundError": (error) =>
-                        new ToolFailure({ message: `MCP server "${error.server}" is not available` }),
-                      "MCP.ToolCallError": (error) => new ToolFailure({ message: error.message }),
-                    }),
-                  )
-              let result = yield* call()
-              const approval = tool.approvalBridge ? approvalRequest(result.meta) : undefined
-              if (
-                tool.approvalBridge &&
-                ((result.meta && APPROVAL_REQUEST_META in result.meta && !approval) ||
-                  (result.structured &&
-                    typeof result.structured === "object" &&
-                    "kind" in result.structured &&
-                    (result.structured as { kind?: unknown }).kind === "approval_required" &&
-                    !approval))
-              )
-                return yield* new ToolFailure({ message: "MCP approval response is missing a valid host continuation" })
-              if (approval) {
-                const permissionID = Permission.ID.create()
-                yield* permission.assert({
-                  id: permissionID,
-                  action: approval.action,
-                  resources: [...approval.resources],
-                  save: [],
-                  metadata: approval.metadata,
-                  sessionID: context.sessionID,
-                  agent: context.agent,
-                  source: {
-                    type: "tool",
-                    messageID: context.messageID,
-                    ...(context.inputID === undefined ? {} : { inputID: context.inputID }),
-                    id: context.id,
-                  },
-                })
-                result = yield* call({
-                  [APPROVAL_CONTINUATION_META]: {
-                    version: 1,
-                    runId: approval.runId,
-                    permissionId: permissionID,
-                    sessionId: context.sessionID,
-                    messageId: context.messageID,
-                    toolCallId: context.id,
-                  },
-                })
-              }
-              if (result.isError)
-                return yield* new ToolFailure({
-                  message:
-                    result.content
-                      .flatMap((part) => (part.type === "text" ? [part.text] : []))
-                      .join("\n")
-                      .trim() || "MCP tool returned an error",
-                })
-              const content = result.content.map((part) =>
-                part.type === "text"
-                  ? { type: "text" as const, text: part.text }
-                  : { type: "file" as const, uri: `data:${part.mimeType};base64,${part.data}`, mime: part.mimeType },
-              )
-              const text = content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n")
-              return {
-                output: result.structured ?? (text === "" ? null : text),
-                ...(result.meta === undefined ? {} : { metadata: { mcp: result.meta } }),
-                ...(content.length === 0 ? {} : { content }),
-              }
-            }).pipe(
-              Effect.mapError((error) =>
-                error instanceof ToolFailure
-                  ? error
-                  : new ToolFailure({ message: `Unable to execute ${name(tool.server, tool.name)}` }),
+        const { server: _server, codemode: _codemode, approvalBridge: _approvalBridge, ...rawDefinition } = tool
+        return ToolProvenance.catalogDefinition(
+          {
+            name: tool.name,
+            options: { namespace: namespace(tool.server), codemode: tool.codemode !== false, group: "mcp" },
+            description: tool.description ?? "",
+            input: {
+              ...schema,
+              type: "object",
+              properties: schema.properties ?? {},
+              additionalProperties: false,
+            },
+            output: (tool.outputSchema ?? {}) as JsonSchema.JsonSchema,
+            execute: (input, context) =>
+              Effect.gen(function* () {
+                const args = (input ?? {}) as Record<string, unknown>
+                if (!tool.approvalBridge)
+                  yield* permission.assert({
+                    action: name(tool.server, tool.name),
+                    resources: ["*"],
+                    save: ["*"],
+                    metadata: {},
+                    sessionID: context.sessionID,
+                    agent: context.agent,
+                    source: {
+                      type: "tool",
+                      messageID: context.messageID,
+                      ...(context.inputID === undefined ? {} : { inputID: context.inputID }),
+                      id: context.id,
+                    },
+                  })
+                const call = (meta?: Readonly<Record<string, unknown>>) =>
+                  execution
+                    .callTool({ server: tool.server, name: tool.name, args, meta, sessionID: context.sessionID })
+                    .pipe(
+                      Effect.catchTags({
+                        "MCP.NotFoundError": (error) =>
+                          new ToolFailure({ message: `MCP server "${error.server}" is not available` }),
+                        "MCP.ToolCallError": (error) => new ToolFailure({ message: error.message }),
+                      }),
+                    )
+                let result = yield* call()
+                const approval = tool.approvalBridge ? approvalRequest(result.meta) : undefined
+                if (
+                  tool.approvalBridge &&
+                  ((result.meta && APPROVAL_REQUEST_META in result.meta && !approval) ||
+                    (result.structured &&
+                      typeof result.structured === "object" &&
+                      "kind" in result.structured &&
+                      (result.structured as { kind?: unknown }).kind === "approval_required" &&
+                      !approval))
+                )
+                  return yield* new ToolFailure({
+                    message: "MCP approval response is missing a valid host continuation",
+                  })
+                if (approval) {
+                  const permissionID = Permission.ID.create()
+                  yield* permission.assert({
+                    id: permissionID,
+                    action: approval.action,
+                    resources: [...approval.resources],
+                    save: [],
+                    metadata: approval.metadata,
+                    sessionID: context.sessionID,
+                    agent: context.agent,
+                    source: {
+                      type: "tool",
+                      messageID: context.messageID,
+                      ...(context.inputID === undefined ? {} : { inputID: context.inputID }),
+                      id: context.id,
+                    },
+                  })
+                  result = yield* call({
+                    [APPROVAL_CONTINUATION_META]: {
+                      version: 1,
+                      runId: approval.runId,
+                      permissionId: permissionID,
+                      sessionId: context.sessionID,
+                      messageId: context.messageID,
+                      toolCallId: context.id,
+                    },
+                  })
+                }
+                if (result.isError)
+                  return yield* new ToolFailure({
+                    message:
+                      result.content
+                        .flatMap((part) => (part.type === "text" ? [part.text] : []))
+                        .join("\n")
+                        .trim() || "MCP tool returned an error",
+                  })
+                const content = result.content.map((part) =>
+                  part.type === "text"
+                    ? { type: "text" as const, text: part.text }
+                    : { type: "file" as const, uri: `data:${part.mimeType};base64,${part.data}`, mime: part.mimeType },
+                )
+                const text = content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n")
+                return {
+                  output: result.structured ?? (text === "" ? null : text),
+                  ...(result.meta === undefined ? {} : { metadata: { mcp: result.meta } }),
+                  ...(content.length === 0 ? {} : { content }),
+                }
+              }).pipe(
+                Effect.mapError((error) =>
+                  error instanceof ToolFailure
+                    ? error
+                    : new ToolFailure({ message: `Unable to execute ${name(tool.server, tool.name)}` }),
+                ),
               ),
-            ),
-        }
+          },
+          { execution, server: tool.server, tool: tool.name, revision: SessionDisclosure.digest(rawDefinition) },
+        )
       })
     })
 

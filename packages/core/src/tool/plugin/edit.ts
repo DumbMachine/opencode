@@ -107,6 +107,7 @@ const findLineOccurrences = (content: string, search: string) => {
 // TODO: Add LSP notification and diagnostics after LSP runtime exists.
 
 export const Plugin = {
+  provenance: { definitions: true },
   id: "opencode.tool.edit",
   effect: Effect.fn("EditTool.Plugin")(function* (ctx: Context) {
     const access = yield* FileAccess.Service

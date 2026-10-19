@@ -70,7 +70,11 @@ it.live("producer enrollment requires configured and authenticated native server
     expect(info.headers.get("x-opencode-context-policy")).toBe("1")
     expect(info.headers.get("x-opencode-context-composition")).toBe("2")
     expect(info.headers.get("x-opencode-context-inline-composition")).toBe("1")
-    expect(yield* Effect.promise(() => info.json())).toMatchObject({ contextInlineCompositionVersion: 1 })
+    expect(info.headers.get("x-opencode-context-tools-composition")).toBe("1")
+    expect(yield* Effect.promise(() => info.json())).toMatchObject({
+      contextInlineCompositionVersion: 1,
+      contextToolsCompositionVersion: 1,
+    })
     const contracts = [
       "human-plaintext-identity-v1",
       "model-plaintext-projection-v1",
@@ -84,6 +88,22 @@ it.live("producer enrollment requires configured and authenticated native server
       yield* Effect.promise(() => inline.json()),
     )
     expect(JSON.parse(enrolledInline.signed.payload).contracts).toEqual(contracts)
+    const toolContracts = [
+      ...contracts,
+      "mcp-invocation-v1",
+      "mcp-result-projection-v1",
+      "tool-definitions-v1",
+      "model-tool-context-v1",
+    ]
+    const tools = yield* Effect.promise(() =>
+      handler(request({ ...challenge, contracts: toolContracts }, "fixture-native-password")),
+    )
+    expect(tools.status).toBe(200)
+    const enrolledTools = Schema.decodeUnknownSync(ExecutionProducer.Enrollment)(
+      yield* Effect.promise(() => tools.json()),
+    )
+    expect(JSON.parse(enrolledTools.signed.payload).contracts).toEqual(toolContracts)
+    expect(proof.contracts).toEqual(["human-plaintext-identity-v1"])
     expect(info.headers.get("x-opencode-context-publication")).toBe("1")
   }).pipe(Effect.scoped),
 )

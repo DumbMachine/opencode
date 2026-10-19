@@ -52,6 +52,10 @@ export type ServerEnrollProducerInput = {
         | "model-request-only-plaintext-v1"
         | "human-inline-identity-v1"
         | "model-request-only-inline-v1"
+        | "mcp-invocation-v1"
+        | "mcp-result-projection-v1"
+        | "tool-definitions-v1"
+        | "model-tool-context-v1"
       >
     | undefined
 }
@@ -63,6 +67,7 @@ export type ServerEnrollProducerOperation<E = never> = (
 export type ServerInfoOutput = {
   readonly version: string
   readonly contextInlineCompositionVersion?: 1 | undefined
+  readonly contextToolsCompositionVersion?: 1 | undefined
   readonly pid: number
   readonly urls: ReadonlyArray<string>
   readonly paths: { readonly tmp: string }
@@ -226,7 +231,7 @@ export type SessionCreateInput = {
   readonly model?: Model.Ref | undefined
   readonly location?: Location.PublicRef | undefined
   readonly metadata?: Session.Metadata | undefined
-  readonly contextPolicy?: { readonly version: 1 } | undefined
+  readonly contextPolicy?: { readonly version: 1 | 2 } | undefined
   readonly permissions?: Permission.Ruleset | undefined
 }
 export type SessionCreateOutput = Session.Info
@@ -522,7 +527,7 @@ export type SessionLogOutput =
             readonly model?: Model.Ref | undefined
             readonly metadata?: Session.Metadata | undefined
             readonly permissions?: Permission.Ruleset | undefined
-            readonly contextPolicy?: { readonly version: 1 } | undefined
+            readonly contextPolicy?: { readonly version: 1 | 2 } | undefined
             readonly version: string
           }
         }
@@ -671,6 +676,8 @@ export type SessionLogOutput =
             readonly batch:
               | { readonly operation: "durable-event"; readonly length: 2 }
               | { readonly operation: "ephemeral-event"; readonly length: 1 }
+              | { readonly operation: "tool-event"; readonly length: 1 }
+              | { readonly operation: "tool-spill"; readonly length: 1 }
           }
         }
       | {

@@ -14405,11 +14405,11 @@
           },
           "publicationVersion": {
             "type": "number",
-            "enum": [1]
+            "enum": [1, 2]
           },
           "compositionVersion": {
             "type": "number",
-            "enum": [1, 2, 3]
+            "enum": [1, 2, 3, 4]
           },
           "issuer": {
             "type": "string",
@@ -14428,6 +14428,30 @@
             },
             "minItems": 1,
             "maxItems": 8
+          },
+          "catalog": {
+            "type": "object",
+            "properties": {
+              "version": {
+                "type": "number",
+                "enum": [1]
+              },
+              "audience": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              },
+              "keys": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ExecutionDisclosure.VerificationKey"
+                },
+                "minItems": 1,
+                "maxItems": 8
+              }
+            },
+            "required": ["version", "audience", "keys"],
+            "additionalProperties": false
           }
         },
         "required": ["version", "endpoint", "token", "issuer", "audience", "keys"],
@@ -14491,11 +14515,15 @@
                 "model-plaintext-projection-v1",
                 "model-request-only-plaintext-v1",
                 "human-inline-identity-v1",
-                "model-request-only-inline-v1"
+                "model-request-only-inline-v1",
+                "mcp-invocation-v1",
+                "mcp-result-projection-v1",
+                "tool-definitions-v1",
+                "model-tool-context-v1"
               ]
             },
             "minItems": 1,
-            "maxItems": 5
+            "maxItems": 9
           }
         },
         "required": ["version", "challenge", "audience"],
@@ -17841,6 +17869,10 @@
             "type": "number",
             "enum": [1]
           },
+          "contextToolsCompositionVersion": {
+            "type": "number",
+            "enum": [1]
+          },
           "pid": {
             "type": "integer",
             "minimum": 0
@@ -17894,7 +17926,7 @@
         "properties": {
           "version": {
             "type": "number",
-            "enum": [1]
+            "enum": [1, 2]
           }
         },
         "required": ["version"],

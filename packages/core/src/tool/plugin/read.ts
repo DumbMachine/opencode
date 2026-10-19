@@ -27,6 +27,7 @@ export const Input = LocationInput
 const Output = Schema.Union([ReadToolFileSystem.FileContent, ReadToolFileSystem.TextPage, ReadToolFileSystem.ListPage])
 
 export const Plugin = {
+  provenance: { definitions: true },
   id: "opencode.tool.read",
   effect: Effect.fn("ReadTool.Plugin")(function* (ctx: Context) {
     const reader = yield* ReadToolFileSystem.Service

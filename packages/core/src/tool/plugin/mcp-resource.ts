@@ -7,6 +7,7 @@ import { Mcp } from "../../mcp/index.js"
 import { Permission } from "../../permission.js"
 
 export const Plugin = {
+  provenance: { definitions: true },
   id: "opencode.tools.mcp-resources",
   effect: Effect.fn("McpResourceTools.Plugin")(function* (ctx: Context) {
     const mcp = yield* Mcp.Service

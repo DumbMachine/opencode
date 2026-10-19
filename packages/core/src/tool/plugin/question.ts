@@ -46,6 +46,7 @@ export const toModelContent = (questions: ReadonlyArray<Question.Prompt>, answer
 }
 
 export const Plugin = {
+  provenance: { definitions: true },
   id: "opencode.tool.question",
   effect: Effect.fn("QuestionTool.Plugin")(function* (ctx: Context) {
     const forms = yield* Form.Service

@@ -46,6 +46,8 @@ import { SessionDisclosure } from "./disclosure.js"
 import { SessionExecutionCapability } from "./execution-capability.js"
 import { SessionRunCoordinator } from "./run-coordinator.js"
 import { NativeProducer } from "../execution-producer.js"
+import { CodeModeInstructions } from "../codemode/instructions.js"
+import { CodeModeCatalog } from "../codemode/catalog.js"
 import { SessionPublicationWriter } from "./publication-writer.js"
 import type { SessionPublicationProvenance } from "./publication-provenance.js"
 import { Bus } from "../bus.js"
@@ -56,6 +58,30 @@ const IMAGE_BYTES_TARGET = 15 * 1024 * 1024 // 15 MiB
 const IMAGE_REMOVED =
   "[This image was removed to reduce the request size and is no longer visible. Do not make claims about its contents from memory. If needed, retrieve it again with an available tool or ask the user to attach it again.]"
 const GENERATION_KEYS = new Set(Object.keys(GenerationOptions.fields))
+
+// Tool history is part of the same physical request media budget as human
+// attachments. This measures bytes only; it never rewrites a model message.
+export const withinInlineRequestLimit = (messages: readonly Message[]) => {
+  let bytes = 0
+  for (const message of messages) for (const part of message.content) {
+    if (part.type === "media") {
+      const source = part.media.source
+      if (source.type === "bytes") bytes += source.data.byteLength
+      else if (source.type === "base64") bytes += Buffer.byteLength(source.data, "base64")
+      else return false
+    }
+    if (part.type === "tool-result" && part.result.type === "content") for (const content of part.result.value) {
+      if (content.type !== "file") continue
+      const encoded = /^data:[^,]*;base64,([A-Za-z0-9+/]*={0,2})$/.exec(content.uri)?.[1]
+      if (encoded === undefined || encoded.length % 4 !== 0) return false
+      bytes += Buffer.byteLength(encoded, "base64")
+      if (bytes > SessionInlineIdentity.MaximumRequestBytes || Buffer.from(encoded, "base64").toString("base64") !== encoded) return false
+    }
+    if (bytes > SessionInlineIdentity.MaximumRequestBytes) return false
+  }
+  return true
+}
+
 
 /** Tool errors, plus the user declining a permission or dismissing a question. */
 export type ExecuteError = Tool.Error | Permission.DeclinedError | QuestionTool.CancelledError
@@ -78,6 +104,7 @@ export interface Input {
   readonly disclosure?: ExecutionDisclosure.Service
   readonly disclosureRevision?: number
   readonly disclosureCurrent?: () => boolean
+  readonly disclosureCatalog?: NativeProducer.CatalogEvidence
   readonly disclosureComponents?: readonly ExecutionDisclosure.Component[]
   readonly disclosureMessages?: readonly SessionMessage.Info[]
   readonly disclosureProvenance?: readonly {
@@ -111,7 +138,17 @@ export const baseTranscript = (input: {
   return {
     providerMetadataKey,
     system: (input.contextPolicy
-      ? [input.instructions ?? ""]
+      ? [
+          input.instructions ?? "",
+          ...(input.contextPolicy.version === 2
+            ? [
+                input.tools.codeModeCatalog
+                  ? CodeModeInstructions.render(CodeModeCatalog.summarize(input.tools.codeModeCatalog))
+                  : "",
+                input.ephemeral ?? "",
+              ]
+            : []),
+        ]
       : [
           input.agent.system
             ? input.agent.system
@@ -123,7 +160,13 @@ export const baseTranscript = (input: {
     )
       .filter((part) => part.length > 0)
       .map(SystemPart.make),
-    messages: toLLMMessages(input.messages, input.model.ref, providerMetadataKey, input.compositionVersion === 3),
+    messages: toLLMMessages(
+      input.messages,
+      input.model.ref,
+      providerMetadataKey,
+      input.compositionVersion === 3 || input.compositionVersion === 4,
+      input.compositionVersion === 4,
+    ),
   }
 }
 
@@ -250,13 +293,17 @@ export const layer = Layer.effect(
     ) {
       const service = input.disclosure === undefined ? undefined : structuredClone(input.disclosure)
       const requestOnly = service?.compositionVersion === 2 || service?.compositionVersion === 3
+      const toolLane = service?.compositionVersion === 4
+      const inlineIdentity = service?.compositionVersion === 3 || toolLane
       if (requestOnly && !input.session.contextPolicy)
         return yield* Effect.die(new Error("Execution context authorization is unavailable"))
-      if (service?.compositionVersion === 3 && !SessionInlineIdentity.withinRequestLimit(input.messages))
-        return yield* Effect.die(new Error("Inline attachment history exceeds the 41943040 byte request limit"))
+      if (inlineIdentity && !withinInlineRequestLimit(input.messages))
+        return yield* Effect.die(new Error("Inline media is unsupported or exceeds the 41943040 byte request limit"))
       if (
-        (input.session.contextPolicy && (kind !== "primary" || service?.publicationVersion !== 1)) ||
-        (!input.session.contextPolicy && service?.publicationVersion === 1)
+        (input.session.contextPolicy &&
+          (kind !== "primary" || service?.publicationVersion !== input.session.contextPolicy.version)) ||
+        (!input.session.contextPolicy && service?.publicationVersion !== undefined) ||
+        (toolLane && input.session.contextPolicy?.version !== 2)
       )
         return yield* Effect.die(new Error("Execution publication authorization is unavailable"))
       if (!SessionInputRequirements.serviceSupported(service))
@@ -272,17 +319,32 @@ export const layer = Layer.effect(
         kind === "primary" &&
         inputID !== undefined &&
         input.disclosureMessages
-          ? NativeProducer.captureContext({
-              sessionID,
-              inputID,
-              model: model.ref,
-              providerMetadataKey: model.model.route.providerMetadataKey ?? model.model.provider,
-              messages: input.disclosureMessages,
-              components: input.disclosureComponents ?? [],
-              requestOnly: requestOnly
-                ? { provenance: input.disclosureProvenance ?? [], inlineIdentity: service?.compositionVersion === 3 }
-                : undefined,
-            })
+          ? toolLane
+            ? NativeProducer.captureToolContext({
+                sessionID,
+                inputID,
+                model: model.ref,
+                providerMetadataKey: model.model.route.providerMetadataKey ?? model.model.provider,
+                messages: input.disclosureMessages,
+                provenance: input.disclosureProvenance ?? [],
+                catalog: input.disclosureCatalog,
+                tools: input.tools ?? {
+                  definitions: [],
+                  execute: () => new Tool.Error({ message: "Tools unavailable" }),
+                },
+                system: input.system,
+              })
+            : NativeProducer.captureContext({
+                sessionID,
+                inputID,
+                model: model.ref,
+                providerMetadataKey: model.model.route.providerMetadataKey ?? model.model.provider,
+                messages: input.disclosureMessages,
+                components: input.disclosureComponents ?? [],
+                requestOnly: requestOnly
+                  ? { provenance: input.disclosureProvenance ?? [], inlineIdentity: service?.compositionVersion === 3 }
+                  : undefined,
+              })
           : undefined
       const revision = input.disclosureRevision
       const earlier = input.disclosureCurrent
@@ -304,7 +366,8 @@ export const layer = Layer.effect(
           throw new Error("Execution context authorization is unavailable")
       })
       const publicationCapture =
-        service !== undefined && (service.compositionVersion === 1 || service.publicationVersion === 1)
+        service !== undefined &&
+        (service.compositionVersion === 1 || service.publicationVersion === 1 || service.publicationVersion === 2)
           ? yield* SessionPublicationWriter.capturePreflight({
               sessionID,
               inputID: inputID!,
@@ -344,10 +407,7 @@ export const layer = Layer.effect(
       const supported = unsupportedParts(shaped.messages, model.capabilities)
       // Inline identity cannot endorse replacement text or drop earlier images.
       // Preserve the actual renderer bytes and reject unsupported modalities.
-      if (
-        service?.compositionVersion === 3 &&
-        SessionDisclosure.digest(supported) !== SessionDisclosure.digest(shaped.messages)
-      )
+      if (inlineIdentity && SessionDisclosure.digest(supported) !== SessionDisclosure.digest(shaped.messages))
         return yield* Effect.die(new Error("Execution context provenance is unavailable"))
       const base = LLM.request({
         model: model.model,
@@ -365,7 +425,7 @@ export const layer = Layer.effect(
         // TODO: Persist cache lineage so nested forks reuse the root session's cache key.
         promptCacheKey: /^ses_[0-9a-f]{64}$/.test(affinity) ? affinity.slice(4) : affinity,
         system: shaped.system,
-        messages: service?.compositionVersion === 3 ? shaped.messages : boundImages(supported),
+        messages: inlineIdentity ? shaped.messages : boundImages(supported),
         tools: Array.from(hooked, ([name, t]) => ({ ...t, name })),
         toolChoice: input.toolChoice,
         generation: Object.keys(generation).length === 0 ? undefined : generation,
@@ -583,6 +643,14 @@ export const layer = Layer.effect(
             )
           : undefined
 
+      const toolCapture =
+        toolLane && disclosure
+          ? yield* NativeProducer.captureTools({
+              service: service!,
+              signed: disclosure.signed,
+              current: () => owner!.live() && earlier!() && installed!(),
+            })
+          : undefined
       return {
         event: shaped,
         disclosure,
@@ -601,7 +669,14 @@ export const layer = Layer.effect(
         // catch them and turn a "no" into model-visible output. Recover them here as failures.
         executeTool: (call: Parameters<Prepared["executeTool"]>[0]) =>
           current.pipe(
-            Effect.andThen(() => tools.execute({ ...call, inputID, definitions: hooked })),
+            Effect.andThen(() => {
+              const execute = tools.execute({ ...call, inputID, definitions: hooked })
+              const identity = { messageID: call.messageID, toolCallID: call.call.id }
+              const guarded = disclosure?.writer?.toolScope ? disclosure.writer.toolScope(execute) : execute
+              return toolCapture
+                ? toolCapture.run(identity, guarded).pipe(Effect.map((result) => result.value))
+                : execute
+            }),
             Effect.catchCauseFilter(
               (cause) => {
                 const decline = cause.reasons.flatMap((r) =>
@@ -634,7 +709,9 @@ export const layer = Layer.effect(
             "context",
             input.agent,
             !!input.session.contextPolicy &&
-              (input.disclosure?.compositionVersion === 2 || input.disclosure?.compositionVersion === 3),
+              (input.disclosure?.compositionVersion === 2 ||
+                input.disclosure?.compositionVersion === 3 ||
+                input.disclosure?.compositionVersion === 4),
           ),
         ),
       compaction: (input) => prepare("compaction", input, agentHook("compaction", input.agent)),

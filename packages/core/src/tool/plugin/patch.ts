@@ -65,6 +65,7 @@ type Prepared =
     })
 
 export const Plugin = {
+  provenance: { definitions: true },
   id: "opencode.tool.patch",
   effect: Effect.fn("PatchTool.Plugin")(function* (ctx: Context) {
     const environment = yield* Environment.Service

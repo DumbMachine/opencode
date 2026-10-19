@@ -46,6 +46,7 @@ export interface Selection {
 export interface Loaded {
   readonly disclosure?: ExecutionDisclosure.Service
   readonly disclosureRevision?: number
+  readonly disclosureCatalog?: import("../execution-producer.js").NativeProducer.CatalogEvidence
   readonly disclosureCurrent?: () => boolean
   readonly disclosureComponents?: readonly ExecutionDisclosure.Component[]
   readonly disclosureProvenance?: readonly {
@@ -190,11 +191,12 @@ const layer = Layer.effect(
           agent: execution?.agent ?? session.agent ?? agent.id,
         })
       // Session permissions narrow discovery the same way they narrow the tool snapshot.
-      const permissions = session.contextPolicy
-        ? [{ action: "*", resource: "*", effect: "deny" as const }]
-        : Permission.merge(agent.info.permissions, session.permissions ?? [])
+      const permissions =
+        session.contextPolicy?.version === 1
+          ? [{ action: "*", resource: "*", effect: "deny" as const }]
+          : Permission.merge(agent.info.permissions, session.permissions ?? [])
       const executionTools =
-        executionMcp && !session.contextPolicy
+        executionMcp && session.contextPolicy?.version !== 1
           ? yield* Effect.gen(function* () {
               const discovered = yield* mcpTools.tools(executionMcp)
               const event = yield* hooks.trigger("tool", "resolve", {
@@ -219,7 +221,8 @@ const layer = Layer.effect(
         {
           tools: registry.snapshot(
             permissions,
-            executionTools ? { excludeGroups: ["mcp"], tools: executionTools } : undefined,
+            executionTools || session.contextPolicy?.version === 2
+              ? { excludeGroups: ["mcp"], ...(executionTools ? { tools: executionTools } : {}) } : undefined,
           ),
           shared: session.contextPolicy
             ? Effect.succeed({
@@ -235,14 +238,14 @@ const layer = Layer.effect(
               ? Effect.succeed(Instructions.empty)
               : mcpInstructions.load(permissions),
           ephemeral:
-            executionMcp && !session.contextPolicy
+            executionMcp && session.contextPolicy?.version !== 1
               ? mcpInstructions.ephemeral(executionMcp, permissions)
               : Effect.succeed(undefined),
         },
         { concurrency: "unbounded" },
       )
       if (
-        session.contextPolicy &&
+        session.contextPolicy?.version === 1 &&
         (loaded.tools.definitions.length !== 0 || loaded.tools.codeModeCatalog !== undefined)
       )
         return yield* Effect.die(new Error("Session context policy requires empty tools"))

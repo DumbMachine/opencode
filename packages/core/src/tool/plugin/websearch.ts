@@ -30,6 +30,7 @@ const Output = Schema.Struct({
   results: Schema.Array(WebSearch.Result),
 })
 export const Plugin = {
+  provenance: { definitions: true },
   id: "opencode.tool.websearch",
   effect: Effect.fn("WebSearchTool.Plugin")(function* (ctx: Context) {
     const permission = yield* Permission.Service

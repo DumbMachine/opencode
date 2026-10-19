@@ -49,7 +49,8 @@ export const prepare = Effect.fn("SessionPrompt.prepare")(function* (request: {
     agents: request.input.agents,
     skills: request.input.skills,
   })
-  const inlineIdentity = request.input.disclosure?.compositionVersion === 3
+  const inlineIdentity =
+    request.input.disclosure?.compositionVersion === 3 || request.input.disclosure?.compositionVersion === 4
   if (
     request.session.contextPolicy &&
     (original.agents?.length ||
@@ -64,6 +65,8 @@ export const prepare = Effect.fn("SessionPrompt.prepare")(function* (request: {
   return yield* Effect.gen(function* () {
     yield* Plugin.awaitActivation
     const hooks = yield* PluginHooks.Service
+    if (request.session.contextPolicy && (yield* hooks.has("session", "prompt")))
+      return yield* Effect.die(new Error("Session context policy does not support prompt transformations"))
     const observed = yield* hooks.triggerObserved("session", "prompt", {
       sessionID,
       messageID: inputID,

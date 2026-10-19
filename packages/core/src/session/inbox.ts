@@ -85,7 +85,14 @@ const requirePublicationPolicy = Effect.fnUntraced(function* (db: DatabaseServic
     .get()
     .pipe(Effect.orDie)
   if (!session) return yield* new NotFoundError({ sessionID: entry.sessionID })
-  if (!!session.policy !== !!entry.payload.capabilities?.includes("publication-v1"))
+  if (
+    (session.policy?.version ?? undefined) !==
+    (entry.payload.capabilities?.includes("publication-v2")
+      ? 2
+      : entry.payload.capabilities?.includes("publication-v1")
+        ? 1
+        : undefined)
+  )
     return yield* new LifecycleConflict({ id: entry.id })
 })
 
@@ -206,7 +213,8 @@ export const make = Effect.fn("SessionInbox.make")(function* () {
     if (
       !supportedItem(item) ||
       (item.type === "user" &&
-        item.payload.capabilities?.includes("publication-v1") &&
+        (item.payload.capabilities?.includes("publication-v1") ||
+          item.payload.capabilities?.includes("publication-v2")) &&
         request.publication === undefined)
     )
       return yield* new LifecycleConflict({ id: request.id })
@@ -314,8 +322,8 @@ export const make = Effect.fn("SessionInbox.make")(function* () {
             .get()
             .pipe(Effect.orDie)
           if (
-            !!session?.policy !== (input.disclosure?.publicationVersion === 1) ||
-            (session?.policy && input.mcp !== undefined && Object.keys(input.mcp).length !== 0)
+            (session?.policy?.version ?? undefined) !== input.disclosure?.publicationVersion ||
+            (session?.policy?.version === 1 && input.mcp !== undefined && Object.keys(input.mcp).length !== 0)
           )
             return yield* new LifecycleConflict({ id: input.id })
           const grant = { inputID: input.id, mcp: input.mcp, disclosure: input.disclosure, revision: input.revision }
@@ -596,10 +604,17 @@ const publish = Effect.fn("SessionInbox.publish")(function* (
         if (entry.type === "user") yield* SessionExecutionCapability.clearSelection(sessionID)
         const data = { sessionID, inboxID: entry.id }
         const published: Effect.Effect<void> =
-          entry.type === "user" && entry.payload.capabilities?.includes("publication-v1")
+          entry.type === "user" &&
+          (entry.payload.capabilities?.includes("publication-v1") ||
+            entry.payload.capabilities?.includes("publication-v2"))
             ? Effect.gen(function* () {
                 const grant = yield* SessionExecutionCapability.getInstalled(sessionID, entry.id)
-                if (!grant?.disclosure || grant.revision === undefined || grant.disclosure.publicationVersion !== 1)
+                if (
+                  !grant?.disclosure ||
+                  grant.revision === undefined ||
+                  grant.disclosure.publicationVersion !==
+                    (entry.payload.capabilities?.includes("publication-v2") ? 2 : 1)
+                )
                   return yield* Effect.die(new Error("Execution publication authorization is unavailable"))
                 const capture = yield* SessionPublicationWriter.captureInput({
                   sessionID,

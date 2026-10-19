@@ -101,6 +101,7 @@ const convert = (content: string, contentType: string, format: Format) => {
 }
 
 export const Plugin = {
+  provenance: { definitions: true },
   id: "opencode.tool.webfetch",
   effect: Effect.fn("WebFetchTool.Plugin")(function* (ctx: Context) {
     const http = yield* HttpClient.HttpClient

@@ -19,13 +19,18 @@ export const Service = Schema.Struct({
   endpoint: bounded(2048),
   token: bounded(16384),
   // Recognized requirement; admission/execution support is negotiated separately.
-  publicationVersion: Schema.Literal(1).pipe(optional),
+  publicationVersion: Schema.Literals([1, 2]).pipe(optional),
   // The installed host callback explicitly accepts partial producer evidence.
   // Absence preserves the original request shape for older installations.
-  compositionVersion: Schema.Literals([1, 2, 3]).pipe(optional),
+  compositionVersion: Schema.Literals([1, 2, 3, 4]).pipe(optional),
   issuer: bounded(512),
   audience: bounded(512),
   keys: Schema.Array(VerificationKey).check(Schema.isMinLength(1), Schema.isMaxLength(8)),
+  catalog: Schema.Struct({
+    version: Schema.Literal(1),
+    audience: bounded(512),
+    keys: Schema.Array(VerificationKey).check(Schema.isMinLength(1), Schema.isMaxLength(8)),
+  }).pipe(optional),
 }).annotate({ identifier: "ExecutionDisclosure.Service" })
 
 // References identify selected content; a hash alone supplies no authority or
@@ -43,7 +48,7 @@ export const Component = Schema.Struct({
   ]),
   id: bounded(256),
   revision: Digest,
-  proof: bounded(4096).pipe(optional),
+  proof: bounded(16384).pipe(optional),
 }).annotate({ identifier: "ExecutionDisclosure.Component" })
 
 export interface ContextRequest extends Schema.Schema.Type<typeof ContextRequest> {}
@@ -63,7 +68,7 @@ export const ContextRequest = Schema.Struct({
 // Signed inside ContextProof; never trusted from an unsigned response field.
 export interface PublicationService extends Schema.Schema.Type<typeof PublicationService> {}
 export const PublicationService = Schema.Struct({
-  version: Schema.Literal(1),
+  version: Schema.Literals([1, 2]),
   endpoint: bounded(2048),
   audience: bounded(512),
   keys: Schema.Array(VerificationKey).check(Schema.isMinLength(1), Schema.isMaxLength(8)),
@@ -182,3 +187,47 @@ export const ToolResultCarrier = Schema.Struct({
   snapshot: bounded(4 * Math.ceil((4 * 1024 * 1024) / 3)),
   proof: SignedProof,
 }).annotate({ identifier: "ExecutionDisclosure.ToolResultCarrier" })
+
+// Discovery is needed before the first model context. Its keys are installed
+// with the immutable input capability rather than obtained from ContextProof.
+export interface CatalogProof extends Schema.Schema.Type<typeof CatalogProof> {}
+export const CatalogProof = Schema.Struct({
+  version: Schema.Literal(1),
+  purpose: Schema.Literal("native-mcp-catalog"),
+  issuer: bounded(512),
+  audience: bounded(512),
+  organizationID: bounded(32),
+  threadID: bounded(64),
+  sessionID: SessionID,
+  inputID: SessionMessageID,
+  capabilityID: bounded(32),
+  capabilityGeneration: PublicationService.fields.capabilityGeneration,
+  kind: Schema.Literals(["initialize", "tools/list"]),
+  cursor: Schema.String.check(Schema.isMaxLength(2048)),
+  responseRevision: Digest,
+  receiptReference: Digest,
+  authorizationVersion: bounded(256),
+  manifestBinding: Digest,
+  audienceBinding: Digest,
+  mode: Schema.Literals(["complete", "actor-private-unknown"]),
+  complete: Schema.Boolean,
+  issuedAt: Schema.Int,
+  expiresAt: Schema.Int,
+}).annotate({ identifier: "ExecutionDisclosure.CatalogProof" })
+
+export interface ToolPublicationRequest extends Schema.Schema.Type<typeof ToolPublicationRequest> {}
+export const ToolPublicationRequest = Schema.Struct({
+  ...PublicationRequest.fields,
+  version: Schema.Literal(2),
+  kind: Schema.Literals(["model-output", "human-input", "tool-output", "tool-control", "tool-spill"]),
+  projection: ExecutionProducer.SignedToolFact.pipe(optional),
+}).annotate({ identifier: "ExecutionDisclosure.ToolPublicationRequest" })
+
+export interface ToolPublicationProof extends Schema.Schema.Type<typeof ToolPublicationProof> {}
+export const ToolPublicationProof = Schema.Struct({
+  ...PublicationProof.fields,
+  version: Schema.Literal(2),
+  kind: ToolPublicationRequest.fields.kind,
+  mode: Schema.Literals(["complete", "actor-private-unknown"]),
+  complete: Schema.Boolean,
+}).annotate({ identifier: "ExecutionDisclosure.ToolPublicationProof" })

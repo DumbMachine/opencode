@@ -17,6 +17,7 @@ import { KeyedMutex } from "../effect/keyed-mutex.js"
 import { Location } from "../location.js"
 import { waitForAbort } from "@opencode/util/process"
 import { State } from "../state.js"
+import { NativeProducer } from "../execution-producer.js"
 import type { McpClient } from "./client.js"
 
 export const ServerName = Schema.String.pipe(Schema.brand("MCP.ServerName"))
@@ -712,7 +713,7 @@ export const layer = (options?: Options) =>
             }),
           { concurrency: "unbounded" },
         )
-        return {
+        return Object.freeze({
           tools: () => Effect.succeed(connected.flatMap((entry) => entry.tools)),
           instructions: () =>
             Effect.succeed(
@@ -722,7 +723,9 @@ export const layer = (options?: Options) =>
             ),
           callTool: (input) => {
             const server = ServerName.make(input.server)
-            const entry = connected.find((item) => item.server === server && item.tools.some((tool) => tool.name === input.name))
+            const entry = connected.find(
+              (item) => item.server === server && item.tools.some((tool) => tool.name === input.name),
+            )
             if (!entry) return Effect.fail(new NotFoundError({ server }))
             return entry.call({
               name: input.name,
@@ -731,7 +734,7 @@ export const layer = (options?: Options) =>
               sessionID: input.sessionID,
             })
           },
-        } satisfies Execution
+        } satisfies Execution)
       })
 
       return Service.of({
@@ -773,11 +776,13 @@ export const layer = (options?: Options) =>
         // Reads report what is connected now; servers still starting contribute once they publish a change.
         request,
         tools: Effect.fn("MCP.tools")(function* () {
+          yield* NativeProducer.assertAmbientMcpAccess
           return Array.from(entries.values())
             .flatMap((entry) => entry.tools ?? [])
             .toSorted((a, b) => a.server.localeCompare(b.server) || a.name.localeCompare(b.name))
         }),
         callTool: Effect.fn("MCP.callTool")(function* (input) {
+          yield* NativeProducer.assertAmbientMcpAccess
           const target = yield* requireServer(input.server)
           yield* target.entry.startup.await
           if (!target.entry.client)
@@ -796,6 +801,7 @@ export const layer = (options?: Options) =>
           return { ...result, server: target.name, tool: input.name }
         }),
         instructions: Effect.fn("MCP.instructions")(function* () {
+          yield* NativeProducer.assertAmbientMcpAccess
           return Array.from(entries)
             .flatMap(([server, entry]) => {
               const instructions = entry.client?.instructions
@@ -805,11 +811,13 @@ export const layer = (options?: Options) =>
             .toSorted((a, b) => a.server.localeCompare(b.server))
         }),
         prompts: Effect.fn("MCP.prompts")(function* () {
+          yield* NativeProducer.assertAmbientMcpAccess
           return Array.from(entries.values())
             .flatMap((entry) => entry.prompts ?? [])
             .toSorted((a, b) => a.server.localeCompare(b.server) || a.name.localeCompare(b.name))
         }),
         prompt: Effect.fn("MCP.prompt")(function* (input) {
+          yield* NativeProducer.assertAmbientMcpAccess
           const target = yield* requireServer(input.server)
           yield* target.entry.startup.await
           if (!target.entry.client) return undefined
@@ -820,6 +828,7 @@ export const layer = (options?: Options) =>
           return { ...result, server: target.name, name: input.name }
         }),
         resourceCatalog: Effect.fn("MCP.resourceCatalog")(function* () {
+          yield* NativeProducer.assertAmbientMcpAccess
           const empty = ResourceCatalog.make({ resources: [], templates: [] })
           const catalogs = yield* Effect.forEach(
             Array.from(entries),
@@ -832,12 +841,14 @@ export const layer = (options?: Options) =>
           return mergeCatalogs(catalogs)
         }),
         resources: Effect.fn("MCP.resources")(function* (input) {
+          yield* NativeProducer.assertAmbientMcpAccess
           const target = yield* requireServer(input.server)
           yield* target.entry.startup.await
           if (!target.entry.client) return ResourceCatalog.make({ resources: [], templates: [] })
           return mergeCatalogs([yield* loadCatalog(target.name, target.entry, target.entry.client)])
         }),
         readResource: Effect.fn("MCP.readResource")(function* (input) {
+          yield* NativeProducer.assertAmbientMcpAccess
           const target = yield* requireServer(input.server)
           yield* target.entry.startup.await
           if (!target.entry.client) return undefined

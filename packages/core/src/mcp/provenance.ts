@@ -9,6 +9,7 @@ import { Hash } from "@opencode/util/hash"
 
 export const RequestKey = "access.execution.context"
 export const ResultKey = "access.execution.result"
+export const CatalogKey = "access.execution.catalog"
 export const MaximumSnapshot = 4 * 1024 * 1024
 const unavailable = () => new Error("MCP provenance authorization is unavailable")
 const unicode = (value: string) => Buffer.from(value, "utf8").toString("utf8") === value
@@ -235,7 +236,7 @@ export const result = <A>(capture: Capture, invocation: ExecutionProducer.McpInv
   )
     throw unavailable()
   const expected = parse(snapshot)
-  if (!record(expected) || Object.hasOwn(expected, ResultKey)) throw unavailable()
+  if (!record(expected)) throw unavailable()
   if (expected._meta !== undefined && (!record(expected._meta) || Object.hasOwn(expected._meta, ResultKey)))
     throw unavailable()
   const meta = Object.fromEntries(Object.entries(received._meta).filter(([key]) => key !== ResultKey))
@@ -244,4 +245,82 @@ export const result = <A>(capture: Capture, invocation: ExecutionProducer.McpInv
   if (!equal(expected, cleaned)) throw unavailable()
   // Full strict tree equality preserves the SDK result type at this boundary.
   return { result: own(cleaned) as A, proof: own(proof) as ExecutionDisclosure.ToolResultProof, signed, snapshot }
+}
+
+export interface CatalogObservation {
+  readonly server: string
+  readonly proof: ExecutionDisclosure.CatalogProof
+  readonly signed: ExecutionDisclosure.SignedProof
+  readonly snapshot: string
+}
+
+// Raw discovery pages are checked before SDK aggregation/filtering. Namespace
+// comes from installed native configuration, never a catalog-controlled field.
+export const catalog = <A>(
+  input: {
+    readonly service: ExecutionDisclosure.Service
+    readonly sessionID: ExecutionDisclosure.ContextProof["sessionID"]
+    readonly inputID: ExecutionDisclosure.ContextProof["inputID"]
+    readonly revision: number
+    readonly server: string
+    readonly kind: "initialize" | "tools/list"
+    readonly cursor: string
+  },
+  actual: A,
+) => {
+  const received = own(actual)
+  if (!record(received) || !record(received._meta) || !Object.hasOwn(received._meta, CatalogKey)) throw unavailable()
+  const carrier = decode(ExecutionDisclosure.ToolResultCarrier, received._meta[CatalogKey])
+  const bytes = Buffer.from(carrier.snapshot, "base64")
+  if (bytes.length > MaximumSnapshot || bytes.toString("base64") !== carrier.snapshot) throw unavailable()
+  const snapshot = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes)
+  const descriptor = input.service.catalog
+  if (
+    !descriptor ||
+    descriptor.audience === input.service.audience ||
+    new Set(descriptor.keys.map((key) => key.id)).size !== descriptor.keys.length ||
+    descriptor.keys.some((key) => input.service.keys.some((other) => key.publicKey === other.publicKey))
+  )
+    throw unavailable()
+  const signed = signedProof(carrier.proof, descriptor.keys)
+  const proof = decode(ExecutionDisclosure.CatalogProof, parse(signed.payload))
+  const now = Date.now()
+  if (
+    proof.issuer !== input.service.issuer ||
+    proof.audience !== descriptor.audience ||
+    proof.sessionID !== input.sessionID ||
+    proof.inputID !== input.inputID ||
+    proof.capabilityGeneration !== input.revision ||
+    proof.kind !== input.kind ||
+    proof.cursor !== input.cursor ||
+    proof.responseRevision !== Hash.sha256(bytes) ||
+    proof.complete !== (proof.mode === "complete") ||
+    !Number.isSafeInteger(proof.issuedAt) ||
+    !Number.isSafeInteger(proof.expiresAt) ||
+    proof.issuedAt > now + 30_000 ||
+    proof.expiresAt <= now ||
+    proof.expiresAt <= proof.issuedAt ||
+    proof.expiresAt - proof.issuedAt > 30_000 ||
+    now - proof.issuedAt > 30_000
+  )
+    throw unavailable()
+  const expected = parse(snapshot)
+  if (
+    !record(expected) ||
+    (expected._meta !== undefined && (!record(expected._meta) || Object.hasOwn(expected._meta, CatalogKey)))
+  )
+    throw unavailable()
+  const meta = Object.fromEntries(Object.entries(received._meta).filter(([key]) => key !== CatalogKey))
+  const cleaned = Object.fromEntries(Object.entries(received).filter(([key]) => key !== "_meta"))
+  if (Object.keys(meta).length || Object.hasOwn(expected, "_meta")) cleaned._meta = meta
+  if (!equal(expected, cleaned)) throw unavailable()
+  return {
+    result: own(cleaned) as A,
+    observation: Object.freeze({
+      server: input.server,
+      proof: own(proof) as ExecutionDisclosure.CatalogProof,
+      signed,
+      snapshot,
+    }),
+  }
 }

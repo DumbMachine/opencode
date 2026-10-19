@@ -80,6 +80,7 @@ import { ShellTool } from "../tool/plugin/shell.js"
 import { SkillTool } from "../tool/plugin/skill.js"
 import { SubagentTool } from "../tool/plugin/subagent.js"
 import { Tool } from "../tool.js"
+import { ToolProvenance } from "../tool/provenance.js"
 import { ToolOutput } from "../tool-output.js"
 import { WebFetchTool } from "../tool/plugin/webfetch.js"
 import { WebSearchTool } from "../tool/plugin/websearch.js"
@@ -209,12 +210,14 @@ export const requirements = LayerNode.group([
   WorktreeStrategies.node,
 ])
 
-export type InternalPlugin = Plugin<Requirements | Scope.Scope>
+export type InternalPlugin = Plugin<Requirements | Scope.Scope> & {
+  readonly provenance?: { readonly definitions?: boolean; readonly transforms?: boolean }
+}
 
 const pre = [
   ToolInputRepairPlugin.Plugin,
   ConfigWorktreePlugin.Plugin,
-  BrowserPlugin,
+  { ...BrowserPlugin, provenance: { definitions: true } },
   ConfigMcpPlugin.Plugin,
   McpCodeModeDefaultsPlugin.Plugin,
   WellKnownPlugin.Plugin,
@@ -279,7 +282,16 @@ export const list = Effect.fn("PluginInternal.list")(function* () {
     plugins.map(
       (plugin): Plugin => ({
         id: plugin.id,
-        effect: (host) => plugin.effect(host).pipe(Effect.provide(context)),
+        effect: (host) => {
+          const effect = plugin.effect(host).pipe(Effect.provide(context))
+          const provenance = "provenance" in plugin ? plugin.provenance : undefined
+          return typeof provenance === "object" && provenance !== null
+            ? ToolProvenance.compiled(effect, {
+                definitions: "definitions" in provenance && provenance.definitions === true,
+                transforms: "transforms" in provenance && provenance.transforms === true,
+              })
+            : effect
+        },
       }),
     )
   return {

@@ -13,6 +13,7 @@ import { Session } from "../../session.js"
 import { SessionSchema } from "../../session/schema.js"
 import { SubagentCompletion } from "../../session/subagent-completion.js"
 import { SubagentJob } from "../../session/subagent-job.js"
+import { ToolProvenance } from "../provenance.js"
 
 export const name = "subagent"
 
@@ -62,6 +63,7 @@ export const description = [
 ].join("\n")
 
 export const Plugin = {
+  provenance: { definitions: true },
   id: "opencode.tool.subagent",
   effect: Effect.fn("SubagentTool.Plugin")(function* (ctx: Context) {
     const sessions = yield* Session.Service
@@ -269,15 +271,18 @@ export const Plugin = {
       )
       .pipe(Effect.orDie)
 
-    yield* ctx.tool.hook("execute.before", (event) =>
-      Effect.sync(() => {
-        if (event.tool !== name || !Predicate.isObject(event.input)) return
-        if (event.input.model !== "" && event.input.sessionID !== "") return
-        const input = { ...event.input }
-        if (input.model === "") delete input.model
-        if (input.sessionID === "") delete input.sessionID
-        event.input = input
-      }),
+    yield* ToolProvenance.compiled(
+      ctx.tool.hook("execute.before", (event) =>
+        Effect.sync(() => {
+          if (event.tool !== name || !Predicate.isObject(event.input)) return
+          if (event.input.model !== "" && event.input.sessionID !== "") return
+          const input = { ...event.input }
+          if (input.model === "") delete input.model
+          if (input.sessionID === "") delete input.sessionID
+          event.input = input
+        }),
+      ),
+      { transforms: true },
     )
 
     const hook = (event: SessionHooks["context"]) =>

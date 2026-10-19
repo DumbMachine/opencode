@@ -7,6 +7,7 @@ export type ExecutionProducerSignedFact = { keyID: string; payload: string; sign
 export type ServerInfo = {
   version: string
   contextInlineCompositionVersion?: 1
+  contextToolsCompositionVersion?: 1
   pid: number
   urls: Array<string>
   paths: { tmp: string }
@@ -53,7 +54,7 @@ export type TokenUsageInfo = {
 
 export type SessionMetadata = { [x: string]: JsonValue }
 
-export type SessionContextPolicy = { version: 1 }
+export type SessionContextPolicy = { version: 1 | 2 }
 
 export type FileDiffInfo = {
   file: string
@@ -655,7 +656,11 @@ export type SessionPublicationCommitted = {
     manifestBinding: string
     audienceBinding: string
     sequence: number
-    batch: { operation: "durable-event"; length: 2 } | { operation: "ephemeral-event"; length: 1 }
+    batch:
+      | { operation: "durable-event"; length: 2 }
+      | { operation: "ephemeral-event"; length: 1 }
+      | { operation: "tool-event"; length: 1 }
+      | { operation: "tool-spill"; length: 1 }
   }
 }
 
@@ -2795,6 +2800,10 @@ export type ServerEnrollProducerInput = {
       | "model-request-only-plaintext-v1"
       | "human-inline-identity-v1"
       | "model-request-only-inline-v1"
+      | "mcp-invocation-v1"
+      | "mcp-result-projection-v1"
+      | "tool-definitions-v1"
+      | "model-tool-context-v1"
     >
   }["version"]
   readonly challenge: {
@@ -2807,6 +2816,10 @@ export type ServerEnrollProducerInput = {
       | "model-request-only-plaintext-v1"
       | "human-inline-identity-v1"
       | "model-request-only-inline-v1"
+      | "mcp-invocation-v1"
+      | "mcp-result-projection-v1"
+      | "tool-definitions-v1"
+      | "model-tool-context-v1"
     >
   }["challenge"]
   readonly audience: {
@@ -2819,6 +2832,10 @@ export type ServerEnrollProducerInput = {
       | "model-request-only-plaintext-v1"
       | "human-inline-identity-v1"
       | "model-request-only-inline-v1"
+      | "mcp-invocation-v1"
+      | "mcp-result-projection-v1"
+      | "tool-definitions-v1"
+      | "model-tool-context-v1"
     >
   }["audience"]
   readonly contracts?: {
@@ -2831,6 +2848,10 @@ export type ServerEnrollProducerInput = {
       | "model-request-only-plaintext-v1"
       | "human-inline-identity-v1"
       | "model-request-only-inline-v1"
+      | "mcp-invocation-v1"
+      | "mcp-result-projection-v1"
+      | "tool-definitions-v1"
+      | "model-tool-context-v1"
     >
   }["contracts"]
 }
@@ -3019,7 +3040,7 @@ export type SessionCreateInput = {
     readonly model?: { readonly id: string; readonly providerID: string; readonly variant?: string } | null
     readonly location?: { readonly directory: string } | null
     readonly metadata?: { readonly [x: string]: JsonValue } | null
-    readonly contextPolicy?: { readonly version: 1 }
+    readonly contextPolicy?: { readonly version: 1 | 2 }
     readonly permissions?: ReadonlyArray<{
       readonly action: string
       readonly resource: string
@@ -3033,7 +3054,7 @@ export type SessionCreateInput = {
     readonly model?: { readonly id: string; readonly providerID: string; readonly variant?: string } | null
     readonly location?: { readonly directory: string } | null
     readonly metadata?: { readonly [x: string]: JsonValue } | null
-    readonly contextPolicy?: { readonly version: 1 }
+    readonly contextPolicy?: { readonly version: 1 | 2 }
     readonly permissions?: ReadonlyArray<{
       readonly action: string
       readonly resource: string
@@ -3047,7 +3068,7 @@ export type SessionCreateInput = {
     readonly model?: { readonly id: string; readonly providerID: string; readonly variant?: string } | null
     readonly location?: { readonly directory: string } | null
     readonly metadata?: { readonly [x: string]: JsonValue } | null
-    readonly contextPolicy?: { readonly version: 1 }
+    readonly contextPolicy?: { readonly version: 1 | 2 }
     readonly permissions?: ReadonlyArray<{
       readonly action: string
       readonly resource: string
@@ -3061,7 +3082,7 @@ export type SessionCreateInput = {
     readonly model?: { readonly id: string; readonly providerID: string; readonly variant?: string } | null
     readonly location?: { readonly directory: string } | null
     readonly metadata?: { readonly [x: string]: JsonValue } | null
-    readonly contextPolicy?: { readonly version: 1 }
+    readonly contextPolicy?: { readonly version: 1 | 2 }
     readonly permissions?: ReadonlyArray<{
       readonly action: string
       readonly resource: string
@@ -3075,7 +3096,7 @@ export type SessionCreateInput = {
     readonly model?: { readonly id: string; readonly providerID: string; readonly variant?: string } | null
     readonly location?: { readonly directory: string } | null
     readonly metadata?: { readonly [x: string]: JsonValue } | null
-    readonly contextPolicy?: { readonly version: 1 }
+    readonly contextPolicy?: { readonly version: 1 | 2 }
     readonly permissions?: ReadonlyArray<{
       readonly action: string
       readonly resource: string
@@ -3089,7 +3110,7 @@ export type SessionCreateInput = {
     readonly model?: { readonly id: string; readonly providerID: string; readonly variant?: string } | null
     readonly location?: { readonly directory: string } | null
     readonly metadata?: { readonly [x: string]: JsonValue } | null
-    readonly contextPolicy?: { readonly version: 1 }
+    readonly contextPolicy?: { readonly version: 1 | 2 }
     readonly permissions?: ReadonlyArray<{
       readonly action: string
       readonly resource: string
@@ -3103,7 +3124,7 @@ export type SessionCreateInput = {
     readonly model?: { readonly id: string; readonly providerID: string; readonly variant?: string } | null
     readonly location?: { readonly directory: string } | null
     readonly metadata?: { readonly [x: string]: JsonValue } | null
-    readonly contextPolicy?: { readonly version: 1 }
+    readonly contextPolicy?: { readonly version: 1 | 2 }
     readonly permissions?: ReadonlyArray<{
       readonly action: string
       readonly resource: string
@@ -3117,7 +3138,7 @@ export type SessionCreateInput = {
     readonly model?: { readonly id: string; readonly providerID: string; readonly variant?: string } | null
     readonly location?: { readonly directory: string } | null
     readonly metadata?: { readonly [x: string]: JsonValue } | null
-    readonly contextPolicy?: { readonly version: 1 }
+    readonly contextPolicy?: { readonly version: 1 | 2 }
     readonly permissions?: ReadonlyArray<{
       readonly action: string
       readonly resource: string
@@ -3160,7 +3181,7 @@ export type SessionImportInput = {
       readonly title?: string
       readonly subpath?: string
       readonly metadata?: { readonly [x: string]: JsonValue }
-      readonly contextPolicy?: { readonly version: 1 }
+      readonly contextPolicy?: { readonly version: 1 | 2 }
       readonly permissions?: ReadonlyArray<{
         readonly action: string
         readonly resource: string
@@ -3486,7 +3507,7 @@ export type SessionImportInput = {
       readonly title?: string
       readonly subpath?: string
       readonly metadata?: { readonly [x: string]: JsonValue }
-      readonly contextPolicy?: { readonly version: 1 }
+      readonly contextPolicy?: { readonly version: 1 | 2 }
       readonly permissions?: ReadonlyArray<{
         readonly action: string
         readonly resource: string
@@ -3812,7 +3833,7 @@ export type SessionImportInput = {
       readonly title?: string
       readonly subpath?: string
       readonly metadata?: { readonly [x: string]: JsonValue }
-      readonly contextPolicy?: { readonly version: 1 }
+      readonly contextPolicy?: { readonly version: 1 | 2 }
       readonly permissions?: ReadonlyArray<{
         readonly action: string
         readonly resource: string
@@ -4213,11 +4234,16 @@ export type SessionPromptInput = {
       readonly version: 1
       readonly endpoint: string
       readonly token: string
-      readonly publicationVersion?: 1
-      readonly compositionVersion?: 1 | 2 | 3
+      readonly publicationVersion?: 1 | 2
+      readonly compositionVersion?: 1 | 2 | 3 | 4
       readonly issuer: string
       readonly audience: string
       readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+      readonly catalog?: {
+        readonly version: 1
+        readonly audience: string
+        readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+      }
     }
     readonly mcpRevision?: number
     readonly mcp?: {
@@ -4261,11 +4287,16 @@ export type SessionPromptInput = {
       readonly version: 1
       readonly endpoint: string
       readonly token: string
-      readonly publicationVersion?: 1
-      readonly compositionVersion?: 1 | 2 | 3
+      readonly publicationVersion?: 1 | 2
+      readonly compositionVersion?: 1 | 2 | 3 | 4
       readonly issuer: string
       readonly audience: string
       readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+      readonly catalog?: {
+        readonly version: 1
+        readonly audience: string
+        readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+      }
     }
     readonly mcpRevision?: number
     readonly mcp?: {
@@ -4309,11 +4340,16 @@ export type SessionPromptInput = {
       readonly version: 1
       readonly endpoint: string
       readonly token: string
-      readonly publicationVersion?: 1
-      readonly compositionVersion?: 1 | 2 | 3
+      readonly publicationVersion?: 1 | 2
+      readonly compositionVersion?: 1 | 2 | 3 | 4
       readonly issuer: string
       readonly audience: string
       readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+      readonly catalog?: {
+        readonly version: 1
+        readonly audience: string
+        readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+      }
     }
     readonly mcpRevision?: number
     readonly mcp?: {
@@ -4357,11 +4393,16 @@ export type SessionPromptInput = {
       readonly version: 1
       readonly endpoint: string
       readonly token: string
-      readonly publicationVersion?: 1
-      readonly compositionVersion?: 1 | 2 | 3
+      readonly publicationVersion?: 1 | 2
+      readonly compositionVersion?: 1 | 2 | 3 | 4
       readonly issuer: string
       readonly audience: string
       readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+      readonly catalog?: {
+        readonly version: 1
+        readonly audience: string
+        readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+      }
     }
     readonly mcpRevision?: number
     readonly mcp?: {
@@ -4405,11 +4446,16 @@ export type SessionPromptInput = {
       readonly version: 1
       readonly endpoint: string
       readonly token: string
-      readonly publicationVersion?: 1
-      readonly compositionVersion?: 1 | 2 | 3
+      readonly publicationVersion?: 1 | 2
+      readonly compositionVersion?: 1 | 2 | 3 | 4
       readonly issuer: string
       readonly audience: string
       readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+      readonly catalog?: {
+        readonly version: 1
+        readonly audience: string
+        readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+      }
     }
     readonly mcpRevision?: number
     readonly mcp?: {
@@ -4453,11 +4499,16 @@ export type SessionPromptInput = {
       readonly version: 1
       readonly endpoint: string
       readonly token: string
-      readonly publicationVersion?: 1
-      readonly compositionVersion?: 1 | 2 | 3
+      readonly publicationVersion?: 1 | 2
+      readonly compositionVersion?: 1 | 2 | 3 | 4
       readonly issuer: string
       readonly audience: string
       readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+      readonly catalog?: {
+        readonly version: 1
+        readonly audience: string
+        readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+      }
     }
     readonly mcpRevision?: number
     readonly mcp?: {
@@ -4501,11 +4552,16 @@ export type SessionPromptInput = {
       readonly version: 1
       readonly endpoint: string
       readonly token: string
-      readonly publicationVersion?: 1
-      readonly compositionVersion?: 1 | 2 | 3
+      readonly publicationVersion?: 1 | 2
+      readonly compositionVersion?: 1 | 2 | 3 | 4
       readonly issuer: string
       readonly audience: string
       readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+      readonly catalog?: {
+        readonly version: 1
+        readonly audience: string
+        readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+      }
     }
     readonly mcpRevision?: number
     readonly mcp?: {
@@ -4549,11 +4605,16 @@ export type SessionPromptInput = {
       readonly version: 1
       readonly endpoint: string
       readonly token: string
-      readonly publicationVersion?: 1
-      readonly compositionVersion?: 1 | 2 | 3
+      readonly publicationVersion?: 1 | 2
+      readonly compositionVersion?: 1 | 2 | 3 | 4
       readonly issuer: string
       readonly audience: string
       readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+      readonly catalog?: {
+        readonly version: 1
+        readonly audience: string
+        readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+      }
     }
     readonly mcpRevision?: number
     readonly mcp?: {
@@ -4597,11 +4658,16 @@ export type SessionPromptInput = {
       readonly version: 1
       readonly endpoint: string
       readonly token: string
-      readonly publicationVersion?: 1
-      readonly compositionVersion?: 1 | 2 | 3
+      readonly publicationVersion?: 1 | 2
+      readonly compositionVersion?: 1 | 2 | 3 | 4
       readonly issuer: string
       readonly audience: string
       readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+      readonly catalog?: {
+        readonly version: 1
+        readonly audience: string
+        readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+      }
     }
     readonly mcpRevision?: number
     readonly mcp?: {
@@ -4645,11 +4711,16 @@ export type SessionPromptInput = {
       readonly version: 1
       readonly endpoint: string
       readonly token: string
-      readonly publicationVersion?: 1
-      readonly compositionVersion?: 1 | 2 | 3
+      readonly publicationVersion?: 1 | 2
+      readonly compositionVersion?: 1 | 2 | 3 | 4
       readonly issuer: string
       readonly audience: string
       readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+      readonly catalog?: {
+        readonly version: 1
+        readonly audience: string
+        readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+      }
     }
     readonly mcpRevision?: number
     readonly mcp?: {
@@ -4693,11 +4764,16 @@ export type SessionPromptInput = {
       readonly version: 1
       readonly endpoint: string
       readonly token: string
-      readonly publicationVersion?: 1
-      readonly compositionVersion?: 1 | 2 | 3
+      readonly publicationVersion?: 1 | 2
+      readonly compositionVersion?: 1 | 2 | 3 | 4
       readonly issuer: string
       readonly audience: string
       readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+      readonly catalog?: {
+        readonly version: 1
+        readonly audience: string
+        readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+      }
     }
     readonly mcpRevision?: number
     readonly mcp?: {
@@ -4741,11 +4817,16 @@ export type SessionPromptInput = {
       readonly version: 1
       readonly endpoint: string
       readonly token: string
-      readonly publicationVersion?: 1
-      readonly compositionVersion?: 1 | 2 | 3
+      readonly publicationVersion?: 1 | 2
+      readonly compositionVersion?: 1 | 2 | 3 | 4
       readonly issuer: string
       readonly audience: string
       readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+      readonly catalog?: {
+        readonly version: 1
+        readonly audience: string
+        readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+      }
     }
     readonly mcpRevision?: number
     readonly mcp?: {
@@ -4795,11 +4876,16 @@ export type SessionCommandInput = {
       readonly version: 1
       readonly endpoint: string
       readonly token: string
-      readonly publicationVersion?: 1
-      readonly compositionVersion?: 1 | 2 | 3
+      readonly publicationVersion?: 1 | 2
+      readonly compositionVersion?: 1 | 2 | 3 | 4
       readonly issuer: string
       readonly audience: string
       readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+      readonly catalog?: {
+        readonly version: 1
+        readonly audience: string
+        readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+      }
     }
     readonly mcpRevision?: number
     readonly mcp?: {
@@ -4836,11 +4922,16 @@ export type SessionCommandInput = {
       readonly version: 1
       readonly endpoint: string
       readonly token: string
-      readonly publicationVersion?: 1
-      readonly compositionVersion?: 1 | 2 | 3
+      readonly publicationVersion?: 1 | 2
+      readonly compositionVersion?: 1 | 2 | 3 | 4
       readonly issuer: string
       readonly audience: string
       readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+      readonly catalog?: {
+        readonly version: 1
+        readonly audience: string
+        readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+      }
     }
     readonly mcpRevision?: number
     readonly mcp?: {
@@ -4877,11 +4968,16 @@ export type SessionCommandInput = {
       readonly version: 1
       readonly endpoint: string
       readonly token: string
-      readonly publicationVersion?: 1
-      readonly compositionVersion?: 1 | 2 | 3
+      readonly publicationVersion?: 1 | 2
+      readonly compositionVersion?: 1 | 2 | 3 | 4
       readonly issuer: string
       readonly audience: string
       readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+      readonly catalog?: {
+        readonly version: 1
+        readonly audience: string
+        readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+      }
     }
     readonly mcpRevision?: number
     readonly mcp?: {
@@ -4918,11 +5014,16 @@ export type SessionCommandInput = {
       readonly version: 1
       readonly endpoint: string
       readonly token: string
-      readonly publicationVersion?: 1
-      readonly compositionVersion?: 1 | 2 | 3
+      readonly publicationVersion?: 1 | 2
+      readonly compositionVersion?: 1 | 2 | 3 | 4
       readonly issuer: string
       readonly audience: string
       readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+      readonly catalog?: {
+        readonly version: 1
+        readonly audience: string
+        readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+      }
     }
     readonly mcpRevision?: number
     readonly mcp?: {
@@ -4959,11 +5060,16 @@ export type SessionCommandInput = {
       readonly version: 1
       readonly endpoint: string
       readonly token: string
-      readonly publicationVersion?: 1
-      readonly compositionVersion?: 1 | 2 | 3
+      readonly publicationVersion?: 1 | 2
+      readonly compositionVersion?: 1 | 2 | 3 | 4
       readonly issuer: string
       readonly audience: string
       readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+      readonly catalog?: {
+        readonly version: 1
+        readonly audience: string
+        readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+      }
     }
     readonly mcpRevision?: number
     readonly mcp?: {
@@ -5000,11 +5106,16 @@ export type SessionCommandInput = {
       readonly version: 1
       readonly endpoint: string
       readonly token: string
-      readonly publicationVersion?: 1
-      readonly compositionVersion?: 1 | 2 | 3
+      readonly publicationVersion?: 1 | 2
+      readonly compositionVersion?: 1 | 2 | 3 | 4
       readonly issuer: string
       readonly audience: string
       readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+      readonly catalog?: {
+        readonly version: 1
+        readonly audience: string
+        readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+      }
     }
     readonly mcpRevision?: number
     readonly mcp?: {
@@ -5041,11 +5152,16 @@ export type SessionCommandInput = {
       readonly version: 1
       readonly endpoint: string
       readonly token: string
-      readonly publicationVersion?: 1
-      readonly compositionVersion?: 1 | 2 | 3
+      readonly publicationVersion?: 1 | 2
+      readonly compositionVersion?: 1 | 2 | 3 | 4
       readonly issuer: string
       readonly audience: string
       readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+      readonly catalog?: {
+        readonly version: 1
+        readonly audience: string
+        readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+      }
     }
     readonly mcpRevision?: number
     readonly mcp?: {
@@ -5082,11 +5198,16 @@ export type SessionCommandInput = {
       readonly version: 1
       readonly endpoint: string
       readonly token: string
-      readonly publicationVersion?: 1
-      readonly compositionVersion?: 1 | 2 | 3
+      readonly publicationVersion?: 1 | 2
+      readonly compositionVersion?: 1 | 2 | 3 | 4
       readonly issuer: string
       readonly audience: string
       readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+      readonly catalog?: {
+        readonly version: 1
+        readonly audience: string
+        readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+      }
     }
     readonly mcpRevision?: number
     readonly mcp?: {
@@ -5123,11 +5244,16 @@ export type SessionCommandInput = {
       readonly version: 1
       readonly endpoint: string
       readonly token: string
-      readonly publicationVersion?: 1
-      readonly compositionVersion?: 1 | 2 | 3
+      readonly publicationVersion?: 1 | 2
+      readonly compositionVersion?: 1 | 2 | 3 | 4
       readonly issuer: string
       readonly audience: string
       readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+      readonly catalog?: {
+        readonly version: 1
+        readonly audience: string
+        readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+      }
     }
     readonly mcpRevision?: number
     readonly mcp?: {
@@ -5304,11 +5430,16 @@ export type SessionInboxRenewCapabilityInput = {
       readonly version: 1
       readonly endpoint: string
       readonly token: string
-      readonly publicationVersion?: 1
-      readonly compositionVersion?: 1 | 2 | 3
+      readonly publicationVersion?: 1 | 2
+      readonly compositionVersion?: 1 | 2 | 3 | 4
       readonly issuer: string
       readonly audience: string
       readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+      readonly catalog?: {
+        readonly version: 1
+        readonly audience: string
+        readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+      }
     } | null
     readonly revision?: number | null
     readonly claim?: string | null
@@ -5329,11 +5460,16 @@ export type SessionInboxRenewCapabilityInput = {
       readonly version: 1
       readonly endpoint: string
       readonly token: string
-      readonly publicationVersion?: 1
-      readonly compositionVersion?: 1 | 2 | 3
+      readonly publicationVersion?: 1 | 2
+      readonly compositionVersion?: 1 | 2 | 3 | 4
       readonly issuer: string
       readonly audience: string
       readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+      readonly catalog?: {
+        readonly version: 1
+        readonly audience: string
+        readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+      }
     } | null
     readonly revision?: number | null
     readonly claim?: string | null
@@ -5354,11 +5490,16 @@ export type SessionInboxRenewCapabilityInput = {
       readonly version: 1
       readonly endpoint: string
       readonly token: string
-      readonly publicationVersion?: 1
-      readonly compositionVersion?: 1 | 2 | 3
+      readonly publicationVersion?: 1 | 2
+      readonly compositionVersion?: 1 | 2 | 3 | 4
       readonly issuer: string
       readonly audience: string
       readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+      readonly catalog?: {
+        readonly version: 1
+        readonly audience: string
+        readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+      }
     } | null
     readonly revision?: number | null
     readonly claim?: string | null
@@ -5379,11 +5520,16 @@ export type SessionInboxRenewCapabilityInput = {
       readonly version: 1
       readonly endpoint: string
       readonly token: string
-      readonly publicationVersion?: 1
-      readonly compositionVersion?: 1 | 2 | 3
+      readonly publicationVersion?: 1 | 2
+      readonly compositionVersion?: 1 | 2 | 3 | 4
       readonly issuer: string
       readonly audience: string
       readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+      readonly catalog?: {
+        readonly version: 1
+        readonly audience: string
+        readonly keys: ReadonlyArray<{ readonly id: string; readonly algorithm: "Ed25519"; readonly publicKey: string }>
+      }
     } | null
     readonly revision?: number | null
     readonly claim?: string | null
