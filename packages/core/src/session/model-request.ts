@@ -543,7 +543,12 @@ export const layer = Layer.effect(
                 { kind: "prepared-context" as const, id: "logical-request", revision: contextDigest },
               ]
               const observed = producer
-                ? yield* producer.observe(request, shapedObservation.invoked + modelObservation.invoked, extra)
+                ? yield* producer.observe(
+                    request,
+                    shapedObservation.invoked +
+                      (toolLane ? (modelObservation.untracked ?? modelObservation.invoked) : modelObservation.invoked),
+                    extra,
+                  )
                 : undefined
               if (requestOnly && observed === undefined)
                 return yield* Effect.die(new Error("Execution context provenance is unavailable"))

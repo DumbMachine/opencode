@@ -235,6 +235,85 @@ describe("SessionExecution lifecycle", () => {
     })
   })
 
+  test("preserves accepted interruption reasons when cleanup replaces the interrupt with a defect", () => {
+    for (const reason of ["user", "inactivity", "shutdown"] as const)
+      for (const exit of [Exit.die(new Error("Sensitive cleanup detail")), Exit.succeed(undefined)])
+        expect(SessionExecution.terminal(exit, reason)).toEqual({ type: "interrupted", reason })
+    expect(SessionExecution.terminal(Exit.die(new Error("Denied without a stop")))).toEqual({
+      type: "failed",
+      error: { type: "unknown", message: "Denied without a stop" },
+    })
+  })
+
+  policyIt.effect("keeps accepted stops distinct from authorization failures after protected cleanup defects", () =>
+    Effect.gen(function* () {
+      const database = yield* Database.Service
+      const bus = yield* Bus.Service
+      const failures: SessionEvent.Execution.Failed[] = []
+      const interruptions: SessionEvent.Execution.Interrupted[] = []
+      yield* bus.project(SessionEvent.Execution.Failed, (event) => Effect.sync(() => void failures.push(event)))
+      yield* bus.project(SessionEvent.Execution.Interrupted, (event) =>
+        Effect.sync(() => void interruptions.push(event)),
+      )
+      for (const version of [1, 2] as const)
+        for (const control of [
+          { name: "stop", options: { reason: "user" as const } },
+          { name: "redirect", options: { reason: "user" as const, resume: true } },
+          { name: "inactivity", options: { reason: "inactivity" as const } },
+          { name: "authorization", options: undefined },
+        ]) {
+          const sessionID = Session.ID.create()
+          yield* seedSessions(database, [sessionID])
+          yield* database.db
+            .update(SessionTable)
+            .set({ context_policy: { version } })
+            .where(eq(SessionTable.id, sessionID))
+            .run()
+            .pipe(Effect.orDie)
+          yield* database.db
+            .insert(SessionLifecycleTable)
+            .values({ id: sessionID, context_policy: { version } })
+            .run()
+            .pipe(Effect.orDie)
+          const entered = yield* Deferred.make<void>(),
+            release = yield* Deferred.make<void>()
+          const scope = yield* Scope.make()
+          yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void))
+          const context = yield* buildExecution(scope, () =>
+            Effect.uninterruptible(
+              Effect.gen(function* () {
+                const ownership = Option.getOrThrow(yield* Effect.serviceOption(SessionRunCoordinator.Ownership))
+                expect(ownership.live()).toBe(true)
+                yield* Deferred.succeed(entered, undefined)
+                yield* Deferred.await(release)
+                expect(ownership.live()).toBe(control.options === undefined)
+                // Signed publication cleanup checks the revoked owner in an uninterruptible finalizer.
+                return yield* Effect.die(new Error("Sensitive cleanup detail"))
+              }),
+            ),
+          )
+          const execution = Context.get(context, SessionExecution.Service)
+          yield* execution.wake(sessionID)
+          yield* Deferred.await(entered)
+          expect((yield* claims(database))[sessionID]).toBe(true)
+          if (control.options) expect(yield* execution.interrupt(sessionID, control.options)).toBe(true)
+          yield* Deferred.succeed(release, undefined)
+          yield* execution.awaitIdle(sessionID)
+          expect((yield* claims(database))[sessionID]).toBe(false)
+          const failed = failures.filter((event) => event.data.sessionID === sessionID)
+          const interrupted = interruptions.filter((event) => event.data.sessionID === sessionID)
+          if (control.options) {
+            expect(failed).toHaveLength(0)
+            expect(interrupted.map((event) => event.data.reason)).toEqual([control.options.reason])
+          } else {
+            expect(interrupted).toHaveLength(0)
+            expect(failed.map((event) => event.data.error)).toEqual([SessionPublicationAdmission.rejectedExecution])
+          }
+        }
+      expect(JSON.stringify({ failures, interruptions })).not.toContain("Sensitive")
+    }),
+  )
+
   it.effect("the sweep only lists claimed top-level Sessions", () =>
     Effect.gen(function* () {
       const database = yield* Database.Service

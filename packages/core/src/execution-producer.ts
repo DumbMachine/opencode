@@ -19,6 +19,7 @@ import { type LLMRequest, SystemPart, ToolFailure } from "@opencode/ai"
 import { SessionPublicationProvenance } from "./session/publication-provenance.js"
 import { toLLMMessages } from "./session/runner/to-llm-message.js"
 import { Hash } from "@opencode/util/hash"
+import { SessionModelControls } from "./session/model-controls.js"
 import { SessionDisclosure } from "./session/disclosure.js"
 import { SessionInlineIdentity } from "./session/inline-identity.js"
 import { McpProvenance } from "./mcp/provenance.js"
@@ -1402,7 +1403,7 @@ export const captureToolContext = (input: {
     observe: (request: LLMRequest, invoked: number, _extra?: readonly ExecutionDisclosure.Component[]) =>
       Effect.sync(() => {
         const components: ExecutionDisclosure.Component[] = []
-        let complete = invoked === 0 && request.metadata === undefined && request.providerOptions === undefined
+        let complete = invoked === 0 && SessionModelControls.known(request)
         for (const [index, part] of request.messages.entries()) {
           const candidate = positions[index]
           const measured = SessionDisclosure.digest(part)

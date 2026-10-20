@@ -51,7 +51,7 @@ export const ProviderPlugins: PluginInternal.InternalPlugin[] = [
   OllamaPlugin,
   OpencodePlugin,
   SnowflakeCortexPlugin,
-  OpenAIPlugin,
+  { ...OpenAIPlugin, provenance: { transforms: true } },
   OpenRouterPlugin,
   PerplexityPlugin,
   PoePlugin,

@@ -1,6 +1,8 @@
 import { describe, expect } from "bun:test"
-import { LLM, LanguageModel, Message } from "@opencode/ai"
+import { LLM, LLMClient, LanguageModel, Message } from "@opencode/ai"
 import { OpenAIChat } from "@opencode/ai/protocols"
+import { RequestExecutor } from "@opencode/ai/route"
+import { SessionModelControls } from "@opencode/core/session/model-controls"
 import { compileRequest } from "@opencode/ai/route/client"
 import { ConfigProvider, Effect, Layer } from "effect"
 import { Headers } from "effect/unstable/http"
@@ -709,25 +711,83 @@ describe("ModelResolver", () => {
     }),
   )
 
-  it.effect("does not project OAuth account metadata into the request body", () =>
+  it.effect("isolates OAuth account metadata from native prepared model controls", () =>
+    Effect.gen(function* () {
+      const client = yield* LLMClient.Service
+      for (const packageName of ["@opencode/ai/providers/openai", Provider.aisdk("@ai-sdk/openai")]) {
+        const resolved = yield* ModelResolver.fromCatalogModel(
+          model(packageName, { settings: { baseURL: "https://openai.example/v1" }, headers: {}, body: {} }),
+          Credential.OAuth.make({
+            type: "oauth",
+            methodID: Integration.MethodID.make("device"),
+            access: "synthetic-access",
+            refresh: "synthetic-refresh",
+            expires: Date.now() + 60_000,
+            metadata: {
+              server: "https://console.example",
+              orgID: "synthetic-org",
+              accountID: "synthetic-account",
+              instructions: "Account metadata",
+            },
+          }),
+        )
+        const request = yield* client.prepareRequest!(LLM.request({ model: resolved, prompt: "Synthetic input" }))
+        expect(request.http?.body).toEqual({})
+        for (const key of ["server", "orgID", "accountID", "instructions"])
+          expect(request.providerOptions).not.toHaveProperty(key)
+        expect(SessionModelControls.known(request)).toBe(true)
+      }
+    }).pipe(Effect.provide(LLMClient.layer), Effect.provide(Layer.mock(RequestExecutor.Service)({}))),
+  )
+
+  it.effect("preserves key configuration and legacy key metadata raw-body compatibility", () =>
     Effect.gen(function* () {
       const resolved = yield* ModelResolver.fromCatalogModel(
-        model(Provider.aisdk("@ai-sdk/openai"), {
-          settings: { baseURL: "https://openai.example/v1" },
-          headers: {},
-          body: {},
+        model("@opencode/ai/providers/openai", { settings: { reasoningEffort: "low" }, headers: {}, body: {} }),
+        Credential.Key.make({
+          type: "key",
+          key: "synthetic-key",
+          configuration: { reasoningEffort: "high" },
+          metadata: { legacyPrivate: "Legacy body data" },
         }),
+      )
+      const client = yield* LLMClient.Service
+      const request = yield* client.prepareRequest!(LLM.request({ model: resolved, prompt: "Synthetic input" }))
+      expect(request.providerOptions?.reasoningEffort).toBe("high")
+      expect(request.http?.body).toEqual({ legacyPrivate: "Legacy body data" })
+      expect(SessionModelControls.known(request)).toBe(false)
+    }).pipe(Effect.provide(LLMClient.layer), Effect.provide(Layer.mock(RequestExecutor.Service)({}))),
+  )
+
+  it.effect("isolates OAuth account metadata before loading an external AISDK constructor", () =>
+    Effect.gen(function* () {
+      yield* ModelResolver.fromCatalogModel(
+        {
+          ...model(undefined, { settings: { routingOption: "Configured" }, body: {} }),
+          package: Provider.aisdk("@fixture/custom"),
+        },
         Credential.OAuth.make({
           type: "oauth",
           methodID: Integration.MethodID.make("device"),
-          access: "secret",
-          refresh: "refresh",
+          access: "synthetic-access",
+          refresh: "synthetic-refresh",
           expires: Date.now() + 60_000,
-          metadata: { server: "https://console.example", orgID: "org_123" },
+          metadata: { accountID: "synthetic-account", instructions: "Account metadata" },
         }),
+        {
+          loadAISDK: (runtime) =>
+            Effect.sync(() => {
+              expect(runtime.settings).toMatchObject({ routingOption: "Configured", apiKey: "synthetic-access" })
+              expect(runtime.settings).not.toHaveProperty("accountID")
+              expect(runtime.settings).not.toHaveProperty("instructions")
+              return LanguageModel.make({
+                id: runtime.modelID ?? runtime.id,
+                provider: runtime.providerID,
+                route: OpenAIChat.route,
+              })
+            }),
+        },
       )
-
-      expect(resolved.route.defaults.http?.body).toEqual({})
     }),
   )
 

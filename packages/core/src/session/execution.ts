@@ -59,8 +59,11 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/Se
 type InterruptReason = "user" | "shutdown" | "inactivity"
 
 export function terminal(exit: Exit.Exit<void, SessionRunner.RunError>, reason?: InterruptReason) {
+  // Accepted control revokes publication ownership before cleanup can finish.
+  // A cleanup defect must not replace that explicit interruption outcome.
+  if (reason !== undefined) return { type: "interrupted" as const, reason }
   if (Exit.isSuccess(exit)) return { type: "succeeded" as const }
-  if (Cause.hasInterrupts(exit.cause)) return { type: "interrupted" as const, reason: reason ?? "shutdown" }
+  if (Cause.hasInterrupts(exit.cause)) return { type: "interrupted" as const, reason: "shutdown" as const }
   const failure = Cause.squash(exit.cause)
   if (failure instanceof UserInterruptedError) return { type: "interrupted" as const, reason: "user" as const }
   return { type: "failed" as const, error: toSessionError(failure) }

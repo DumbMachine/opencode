@@ -206,7 +206,10 @@ const resolveCatalogModel = Effect.fn("ModelResolver.resolveCatalogModel")(funct
 ) {
   const resolved = prepareRuntimeModel(model, credential)
   const configuration = credential?.type === "key" ? credential.configuration : undefined
-  const configured = { ...resolved.settings, ...credential?.metadata, ...configuration }
+  // OAuth metadata is account state; plugins explicitly project required transport fields.
+  // Legacy key metadata remains a provider configuration/body compatibility input.
+  const metadata = credential?.type === "key" ? credential.metadata : undefined
+  const configured = { ...resolved.settings, ...metadata, ...configuration }
   if (Provider.isAISDK(resolved.package)) {
     const loadAISDK = dependencies?.loadAISDK
     if (!loadAISDK) return yield* unsupported(resolved)
@@ -214,7 +217,7 @@ const resolveCatalogModel = Effect.fn("ModelResolver.resolveCatalogModel")(funct
       resolved,
       Provider.mergeOverlay(resolved.settings, {
         ...nativeCredentialSettings(resolved.package ?? "", credential),
-        ...credential?.metadata,
+        ...metadata,
         ...configuration,
       }) ?? {},
     )
