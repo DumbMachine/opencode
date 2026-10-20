@@ -181,9 +181,11 @@ export const make = Effect.gen(function* () {
           yield* interruptTools
           return yield* Effect.failCause(streamed.cause)
         }
-        const joining = Effect.raceFirst(
-          restore(Fiber.awaitAll(toolRuns.map((run) => run.fiber))),
-          Deferred.await(terminalSignal).pipe(Effect.as([])),
+        const joining = restore(
+          Effect.raceFirst(
+            Fiber.awaitAll(toolRuns.map((run) => run.fiber)),
+            Deferred.await(terminalSignal).pipe(Effect.as([])),
+          ),
         ).pipe(Effect.exit)
         const joined = yield* settlement && Exit.isFailure(streamed)
           ? joining.pipe(

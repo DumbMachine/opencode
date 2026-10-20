@@ -268,7 +268,7 @@ const post = [
   ConfigSkillPlugin.Plugin,
   ConfigProviderPlugin.Plugin,
   ConfigWebSearchPlugin.Plugin,
-  ConfigPolicyPlugin.Plugin,
+  { ...ConfigPolicyPlugin.Plugin, provenance: { transforms: true } },
 ] as const satisfies readonly InternalPlugin[]
 
 // Repository config must not switch off policy enforcement or the Console connection that delivers
