@@ -114,46 +114,53 @@ export const layer = Layer.effect(
                       }),
                     )
                 let result = yield* call()
-                const approval = tool.approvalBridge ? approvalRequest(result.meta) : undefined
-                if (
-                  tool.approvalBridge &&
-                  ((result.meta && APPROVAL_REQUEST_META in result.meta && !approval) ||
-                    (result.structured &&
-                      typeof result.structured === "object" &&
-                      "kind" in result.structured &&
-                      (result.structured as { kind?: unknown }).kind === "approval_required" &&
-                      !approval))
-                )
-                  return yield* new ToolFailure({
-                    message: "MCP approval response is missing a valid host continuation",
-                  })
-                if (approval) {
-                  const permissionID = Permission.ID.create()
-                  yield* permission.assert({
-                    id: permissionID,
-                    action: approval.action,
-                    resources: [...approval.resources],
-                    save: [],
-                    metadata: approval.metadata,
-                    sessionID: context.sessionID,
-                    agent: context.agent,
-                    source: {
-                      type: "tool",
-                      messageID: context.messageID,
-                      ...(context.inputID === undefined ? {} : { inputID: context.inputID }),
-                      id: context.id,
-                    },
-                  })
-                  result = yield* call({
-                    [APPROVAL_CONTINUATION_META]: {
-                      version: 1,
-                      runId: approval.runId,
-                      permissionId: permissionID,
-                      sessionId: context.sessionID,
-                      messageId: context.messageID,
-                      toolCallId: context.id,
-                    },
-                  })
+                const seen = new Set<string>()
+                while (true) {
+                  const approval = tool.approvalBridge ? approvalRequest(result.meta) : undefined
+                  if (
+                    tool.approvalBridge &&
+                    ((result.meta && APPROVAL_REQUEST_META in result.meta && !approval) ||
+                      (result.structured &&
+                        typeof result.structured === "object" &&
+                        "kind" in result.structured &&
+                        (result.structured as { kind?: unknown }).kind === "approval_required" &&
+                        !approval))
+                  )
+                    return yield* new ToolFailure({
+                      message: "MCP approval response is missing a valid host continuation",
+                    })
+                  if (!approval) break
+                  if (seen.has(approval.runId))
+                    return yield* new ToolFailure({ message: "MCP repeated an already answered approval request" })
+                  seen.add(approval.runId)
+                  {
+                    const permissionID = Permission.ID.create()
+                    yield* permission.assert({
+                      id: permissionID,
+                      action: approval.action,
+                      resources: [...approval.resources],
+                      save: [],
+                      metadata: approval.metadata,
+                      sessionID: context.sessionID,
+                      agent: context.agent,
+                      source: {
+                        type: "tool",
+                        messageID: context.messageID,
+                        ...(context.inputID === undefined ? {} : { inputID: context.inputID }),
+                        id: context.id,
+                      },
+                    })
+                    result = yield* call({
+                      [APPROVAL_CONTINUATION_META]: {
+                        version: 1,
+                        runId: approval.runId,
+                        permissionId: permissionID,
+                        sessionId: context.sessionID,
+                        messageId: context.messageID,
+                        toolCallId: context.id,
+                      },
+                    })
+                  }
                 }
                 if (result.isError)
                   return yield* new ToolFailure({
