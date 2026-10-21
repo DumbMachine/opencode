@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test"
+import { describe, expect, spyOn, test } from "bun:test"
 import { AIError, TransportError } from "@opencode/ai"
 import { Database } from "@opencode/core/database/database"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
@@ -18,6 +18,8 @@ import { SessionRunCoordinator } from "@opencode/core/session/run-coordinator"
 import { SessionExecutionCapability } from "@opencode/core/session/execution-capability"
 import { SessionRestart } from "@opencode/core/session/execution/restart"
 import { UserInterruptedError } from "@opencode/core/session/error"
+import { Integration } from "@opencode/core/integration"
+import { SessionRunnerModel } from "@opencode/core/session/runner/model"
 import { SessionEvent } from "@opencode/core/session/event"
 import { SessionInbox } from "@opencode/core/session/inbox"
 import { SessionMessage } from "@opencode/core/session/message"
@@ -74,6 +76,14 @@ describe("SessionExecution lifecycle", () => {
           { ...SessionPublicationAdmission.rejectedExecution, status: 401 },
           { ...SessionPublicationAdmission.rejectedExecution, private: "Sensitive raw error" },
           { ...SessionPublicationAdmission.rejectedExecution, message: "Sensitive altered detail" },
+          ...[
+            SessionPublicationAdmission.rejectedProviderAuthentication,
+            SessionPublicationAdmission.rejectedModel,
+          ].flatMap((error) => [
+            { ...error, status: 401 },
+            { ...error, private: "Sensitive raw error" },
+            { ...error, message: "Sensitive altered detail" },
+          ]),
         ])
           expect(
             Exit.isFailure(yield* bus.publish(SessionEvent.Execution.Failed, { sessionID, error }).pipe(Effect.exit)),
@@ -130,6 +140,75 @@ describe("SessionExecution lifecycle", () => {
       expect(failures).toHaveLength(2)
       for (const failure of failures) expect(failure.data.error).toEqual(SessionPublicationAdmission.rejectedExecution)
       expect(JSON.stringify(failures)).not.toContain("Sensitive")
+    }),
+  )
+
+  policyIt.effect("reports provider login and model failures without publishing private details", () =>
+    Effect.gen(function* () {
+      const diagnostics: string[] = []
+      const previous = process.env.OPENCODE_EXECUTION_DIAGNOSTICS
+      process.env.OPENCODE_EXECUTION_DIAGNOSTICS = "1"
+      const stderr = spyOn(process.stderr, "write").mockImplementation((chunk) => {
+        if (typeof chunk === "string" && chunk.startsWith("opencode.execution.failed ")) diagnostics.push(chunk)
+        return true
+      })
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          stderr.mockRestore()
+          if (previous === undefined) delete process.env.OPENCODE_EXECUTION_DIAGNOSTICS
+          else process.env.OPENCODE_EXECUTION_DIAGNOSTICS = previous
+        }),
+      )
+      const database = yield* Database.Service
+      const bus = yield* Bus.Service
+      const failures: SessionEvent.Execution.Failed[] = []
+      yield* bus.project(SessionEvent.Execution.Failed, (event) => Effect.sync(() => void failures.push(event)))
+      for (const version of [1, 2] as const) {
+        for (const kind of ["authentication", "model"] as const) {
+          const sessionID = Session.ID.create()
+          yield* seedSessions(database, [sessionID])
+          yield* database.db
+            .update(SessionTable)
+            .set({ context_policy: { version } })
+            .where(eq(SessionTable.id, sessionID))
+            .run()
+            .pipe(Effect.orDie)
+          yield* database.db
+            .insert(SessionLifecycleTable)
+            .values({ id: sessionID, context_policy: { version } })
+            .run()
+            .pipe(Effect.orDie)
+          const scope = yield* Scope.make()
+          yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void))
+          const context = yield* buildExecution(scope, () =>
+            Effect.fail(
+              kind === "authentication"
+                ? new Integration.AuthorizationError({ cause: new Error("Sensitive rejected credential") })
+                : new SessionRunnerModel.ModelNotSelectedError({ sessionID }),
+            ),
+          )
+          const execution = Context.get(context, SessionExecution.Service)
+          expect(Exit.isFailure(yield* execution.resume(sessionID).pipe(Effect.exit))).toBe(true)
+          yield* execution.awaitIdle(sessionID)
+          expect((yield* claims(database))[sessionID]).toBe(false)
+          expect(failures.at(-1)?.data.error).toEqual(
+            kind === "authentication"
+              ? SessionPublicationAdmission.rejectedProviderAuthentication
+              : SessionPublicationAdmission.rejectedModel,
+          )
+        }
+      }
+      expect(failures).toHaveLength(4)
+      expect(JSON.stringify(failures)).not.toContain("Sensitive")
+      expect(diagnostics).toHaveLength(4)
+      expect(diagnostics.map((line) => JSON.parse(line.slice("opencode.execution.failed ".length)).category)).toEqual([
+        "provider.auth",
+        "provider.no-route",
+        "provider.auth",
+        "provider.no-route",
+      ])
+      expect(diagnostics.join("")).not.toContain("Sensitive")
+      expect(diagnostics.every((line) => line.length < 2048)).toBe(true)
     }),
   )
 

@@ -17,6 +17,7 @@ import { UserInterruptedError } from "./error.js"
 import { SessionExecutionCapability } from "./execution-capability.js"
 import { SessionInbox } from "./inbox.js"
 import { SessionPublicationAdmission } from "./publication-admission.js"
+import { SessionExecutionDiagnostics } from "./execution-diagnostics.js"
 
 export interface State {
   readonly active: boolean
@@ -140,6 +141,12 @@ export const layer = Layer.effect(
           sessionID,
           Effect.gen(function* () {
             const outcome = terminal(exit, reason)
+            if (outcome.type === "failed")
+              SessionExecutionDiagnostics.report(
+                sessionID,
+                outcome.error,
+                SessionExecutionCapability.selectedInput(sessionID),
+              )
             yield* SessionInbox.serialized(
               sessionID,
               Effect.gen(function* () {
@@ -170,7 +177,7 @@ export const layer = Layer.effect(
               SessionEvent.Execution.Failed,
               {
                 sessionID,
-                error: session?.contextPolicy ? SessionPublicationAdmission.rejectedExecution : outcome.error,
+                error: session?.contextPolicy ? SessionPublicationAdmission.failure(outcome.error) : outcome.error,
               },
               releaseOnCommit(sessionID),
             )

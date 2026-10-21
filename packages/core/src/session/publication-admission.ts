@@ -8,6 +8,7 @@ import { SessionEvent } from "@opencode/schema/session-event"
 import type { Database } from "../database/database.js"
 import { SessionLifecycleTable } from "./sql.js"
 import type { SessionSchema } from "./schema.js"
+import type { SessionError } from "@opencode/schema/session-error"
 
 // A capture-owned publisher supplies this local service only after verifying
 // host authority for its exact immutable unit. No request metadata carries it.
@@ -29,6 +30,24 @@ export const rejectedExecution = Object.freeze({
   message: "Execution stopped because authorization is unavailable.",
 })
 
+export const rejectedProviderAuthentication = Object.freeze({
+  type: "provider.auth",
+  message: "Your model provider login was rejected. Reconnect it and try again.",
+})
+
+export const rejectedModel = Object.freeze({
+  type: "provider.no-route",
+  message: "The selected model is unavailable. Choose another model and try again.",
+})
+
+// Retain only source-free failure categories. Provider messages may contain
+// credentials, request bodies, or content the reader is not allowed to see.
+export function failure(error: SessionError.Error) {
+  if (error.type === rejectedProviderAuthentication.type) return rejectedProviderAuthentication
+  if (error.type === rejectedModel.type) return rejectedModel
+  return rejectedExecution
+}
+
 // Called by the existing session projectors on their own transaction. It is
 // intentionally scoped to opted-in original sessions; the general Bus is unchanged.
 export const assert = Effect.fnUntraced(function* (
@@ -44,6 +63,7 @@ export const assert = Effect.fnUntraced(function* (
     .pipe(Effect.orDie)
   if (!retained?.policy) return
   const data = event.data as Record<string, unknown>
+  const error = data.error
   if (
     event.type === SessionEvent.Execution.Failed.type &&
     event.metadata === undefined &&
@@ -52,15 +72,16 @@ export const assert = Effect.fnUntraced(function* (
     Object.hasOwn(data, "error") &&
     data.sessionID === sessionID &&
     typeof data.sessionID === "string" &&
-    typeof data.error === "object" &&
-    data.error !== null &&
-    Object.keys(data.error).length === 2 &&
-    Object.hasOwn(data.error, "type") &&
-    Object.hasOwn(data.error, "message") &&
-    "type" in data.error &&
-    data.error.type === rejectedExecution.type &&
-    "message" in data.error &&
-    data.error.message === rejectedExecution.message
+    typeof error === "object" &&
+    error !== null &&
+    Object.keys(error).length === 2 &&
+    Object.hasOwn(error, "type") &&
+    Object.hasOwn(error, "message") &&
+    "type" in error &&
+    "message" in error &&
+    [rejectedExecution, rejectedProviderAuthentication, rejectedModel].some(
+      (allowed) => error.type === allowed.type && error.message === allowed.message,
+    )
   )
     return
   const admission = Option.getOrUndefined(yield* Effect.serviceOption(Service))
