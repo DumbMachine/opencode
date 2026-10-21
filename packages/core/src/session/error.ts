@@ -109,3 +109,13 @@ export class ExecutionCapabilityUnavailableError extends Schema.TaggedError<Exec
     return `Execution capability for input ${this.inputID} is unavailable; retry the prompt with a fresh grant`
   }
 }
+
+// This native-owned rejection carries no event payload or provider content.
+export class PublicationAdmissionError extends Schema.TaggedError<PublicationAdmissionError>()(
+  "Session.PublicationAdmissionError",
+  { eventType: Schema.String, reason: Schema.Literals(["service-missing", "event-rejected"]) },
+) {
+  override get message() {
+    return "Execution publication authorization is unavailable"
+  }
+}

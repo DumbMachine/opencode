@@ -6,6 +6,7 @@ import type { Event } from "@opencode/schema/event"
 import type { ExecutionDisclosure } from "@opencode/schema/execution-disclosure"
 import { SessionEvent } from "@opencode/schema/session-event"
 import type { Database } from "../database/database.js"
+import { PublicationAdmissionError } from "./error.js"
 import { SessionLifecycleTable } from "./sql.js"
 import type { SessionSchema } from "./schema.js"
 import type { SessionError } from "@opencode/schema/session-error"
@@ -86,5 +87,10 @@ export const assert = Effect.fnUntraced(function* (
     return
   const admission = Option.getOrUndefined(yield* Effect.serviceOption(Service))
   if (!admission?.accepts(event))
-    return yield* Effect.die(new Error("Execution publication authorization is unavailable"))
+    return yield* Effect.die(
+      new PublicationAdmissionError({
+        eventType: event.type,
+        reason: admission ? "event-rejected" : "service-missing",
+      }),
+    )
 })

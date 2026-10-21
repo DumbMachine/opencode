@@ -146,6 +146,7 @@ export const layer = Layer.effect(
                 sessionID,
                 outcome.error,
                 SessionExecutionCapability.selectedInput(sessionID),
+                Exit.isFailure(exit) ? Cause.squash(exit.cause) : undefined,
               )
             yield* SessionInbox.serialized(
               sessionID,

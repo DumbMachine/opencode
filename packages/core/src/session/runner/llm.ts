@@ -438,15 +438,21 @@ const layer = Layer.effect(
             retry.wait({
               decision: outcome.decision,
               error: outcome.error,
+              publication: prepared.publication,
               assistantMessageID,
             }),
           Continue: Effect.fnUntraced(function* (outcome) {
             yield* retry.wait({
               decision: outcome.decision,
               error: outcome.error,
+              publication: prepared.publication,
               assistantMessageID,
             })
-            yield* bus.publish(SessionEvent.Synthetic, { sessionID, text: CONTINUE_AFTER_INCOMPLETE_STREAM })
+            const data = { sessionID, text: CONTINUE_AFTER_INCOMPLETE_STREAM }
+            if (prepared.publication) {
+              const unit = yield* prepared.publication.prepare(SessionEvent.Synthetic, data)
+              yield* unit.publish
+            } else yield* bus.publish(SessionEvent.Synthetic, data)
             assistantMessageID = SessionMessage.ID.create()
           }),
           Compacted: Effect.fnUntraced(function* () {

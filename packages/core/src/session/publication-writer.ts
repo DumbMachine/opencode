@@ -35,6 +35,8 @@ const modelDefinitions = new Map<string, Event.Definition>(
     SessionEvent.Step.Streamed,
     SessionEvent.Step.Ended,
     SessionEvent.Step.Failed,
+    SessionEvent.RetryScheduled,
+    SessionEvent.Synthetic,
     SessionEvent.Text.Started,
     SessionEvent.Text.Delta,
     SessionEvent.Text.Ended,

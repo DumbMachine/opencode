@@ -5,6 +5,7 @@ import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { Bus } from "@opencode/core/bus"
 import { Database } from "@opencode/core/database/database"
+import { SessionRunnerRetry } from "@opencode/core/session/runner/retry"
 import { SessionPublicationWriter } from "@opencode/core/session/publication-writer"
 import { SessionPublicationProvenance } from "@opencode/core/session/publication-provenance"
 import { toLLMMessages } from "@opencode/core/session/runner/to-llm-message"
@@ -69,6 +70,7 @@ const fixture = Effect.fnUntraced(function* (options?: { readonly deferAssistant
     contextReference: string
     deadlines: Map<number, number>
     expired: Set<number>
+    respond?: () => Response
     request?: () => Effect.Effect<void>
     preflight?: () => Effect.Effect<void>
     mutate?: (proof: ExecutionDisclosure.PublicationProof) => ExecutionDisclosure.PublicationProof
@@ -84,6 +86,7 @@ const fixture = Effect.fnUntraced(function* (options?: { readonly deferAssistant
   const host = publicationHost({
     context: (proof) => ({ ...proof, contextReference: state.contextReference }),
     ttl: () => state.ttl,
+    respond: (proof) => state.respond?.() ?? Response.json(proof),
     observe: async (unit, authorization) => {
       expect(authorization).toBe("Bearer private-original-token")
       state.calls.push({ unitID: unit.unitID, unitDigest: unit.unitDigest })
@@ -295,6 +298,68 @@ function* verifyProjectionProvenance(f: Effect.Success<ReturnType<typeof fixture
 }
 
 describe("Exact native publication writer", () => {
+  it.effect("authorizes retry and continuation events through the captured writer", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture()
+      yield* f.database.db
+        .insert(SessionLifecycleTable)
+        .values({ id: f.sessionID, context_policy: { version: 2 } })
+        .run()
+        .pipe(Effect.orDie)
+      const writer = yield* f.make()
+      const retry = yield* SessionRunnerRetry.make(f.bus, f.sessionID)
+      yield* retry.wait({
+        decision: { retry: true, attempt: 2, delay: 0 },
+        assistantMessageID: f.assistantMessageID,
+        error: { type: "provider.internal", message: "Synthetic transient error", status: 503 },
+        publication: writer,
+      })
+      expect((yield* f.message())?.data).toHaveProperty("retry.attempt", 2)
+      const continuation = yield* writer.prepare(SessionEvent.Synthetic, {
+        sessionID: f.sessionID,
+        text: "Continue interrupted output",
+      })
+      yield* continuation.publish
+      expect(yield* f.witnesses()).toHaveLength(2)
+      expect(f.state.calls).toHaveLength(2)
+    }),
+  )
+
+  it.effect("never falls back to unadmitted retry publication after host denial", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture()
+      yield* f.database.db
+        .insert(SessionLifecycleTable)
+        .values({ id: f.sessionID, context_policy: { version: 2 } })
+        .run()
+        .pipe(Effect.orDie)
+      const writer = yield* f.make()
+      f.state.respond = () => new Response("Synthetic host denial", { status: 403 })
+      const retry = yield* SessionRunnerRetry.make(f.bus, f.sessionID)
+      let resumed = false
+      const result = yield* retry
+        .wait({
+          decision: { retry: true, attempt: 2, delay: 0 },
+          assistantMessageID: f.assistantMessageID,
+          error: { type: "provider.internal", message: "Synthetic transient error", status: 503 },
+          publication: writer,
+        })
+        .pipe(
+          Effect.tap(() =>
+            Effect.sync(() => {
+              resumed = true
+            }),
+          ),
+          Effect.exit,
+        )
+      expect(Exit.isFailure(result)).toBe(true)
+      expect(resumed).toBe(false)
+      expect((yield* f.message())?.data).not.toHaveProperty("retry")
+      expect(yield* f.witnesses()).toHaveLength(0)
+      expect(f.state.calls).toHaveLength(1)
+    }),
+  )
+
   it.effect("associates actual projected revisions and preserves unknown drift through native writes", () =>
     Effect.gen(function* () {
       for (let index = 0; index < 2; index++) {

@@ -11,6 +11,9 @@ import { SessionEvent } from "../event.js"
 import { SessionMessage } from "../message.js"
 import { SessionSchema } from "../schema.js"
 import { toSessionError } from "../to-session-error.js"
+import { SessionExecutionDiagnostics } from "../execution-diagnostics.js"
+import { SessionExecutionCapability } from "../execution-capability.js"
+import type { SessionPublicationWriter } from "../publication-writer.js"
 
 interface Input {
   readonly cause: AIError
@@ -144,16 +147,27 @@ export const make = (bus: Bus.Interface, sessionID: SessionSchema.ID) =>
       readonly decision: Decision
       readonly assistantMessageID: SessionMessage.ID
       readonly error: SessionError.Error
+      readonly publication?: SessionPublicationWriter.Writer
     }) =>
       Effect.gen(function* () {
+        SessionExecutionDiagnostics.reportRetry(
+          sessionID,
+          input.error,
+          input.decision.attempt,
+          SessionExecutionCapability.selectedInput(sessionID),
+        )
         const scheduled = yield* Clock.currentTimeMillis
-        yield* bus.publish(SessionEvent.RetryScheduled, {
+        const data = {
           sessionID,
           assistantMessageID: input.assistantMessageID,
           attempt: input.decision.attempt,
           at: scheduled + input.decision.delay,
           error: input.error,
-        })
+        }
+        if (input.publication) {
+          const unit = yield* input.publication.prepare(SessionEvent.RetryScheduled, data)
+          yield* unit.publish
+        } else yield* bus.publish(SessionEvent.RetryScheduled, data)
         const remaining = Math.max(0, scheduled + input.decision.delay - (yield* Clock.currentTimeMillis))
         yield* Effect.sleep(Duration.millis(remaining))
       })

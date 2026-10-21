@@ -143,6 +143,68 @@ describe("SessionExecution lifecycle", () => {
     }),
   )
 
+  policyIt.effect("reports the actual publication admission failure before sanitizing the UI event", () =>
+    Effect.gen(function* () {
+      const diagnostics: string[] = []
+      const previous = process.env.OPENCODE_EXECUTION_DIAGNOSTICS
+      process.env.OPENCODE_EXECUTION_DIAGNOSTICS = "1"
+      const stderr = spyOn(process.stderr, "write").mockImplementation((chunk) => {
+        if (typeof chunk === "string" && chunk.startsWith("opencode.execution.failed ")) diagnostics.push(chunk)
+        return true
+      })
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          stderr.mockRestore()
+          if (previous === undefined) delete process.env.OPENCODE_EXECUTION_DIAGNOSTICS
+          else process.env.OPENCODE_EXECUTION_DIAGNOSTICS = previous
+        }),
+      )
+      const database = yield* Database.Service
+      const bus = yield* Bus.Service
+      const sessionID = Session.ID.create()
+      yield* seedSessions(database, [sessionID])
+      yield* database.db
+        .update(SessionTable)
+        .set({ context_policy: { version: 2 } })
+        .where(eq(SessionTable.id, sessionID))
+        .run()
+        .pipe(Effect.orDie)
+      yield* database.db
+        .insert(SessionLifecycleTable)
+        .values({ id: sessionID, context_policy: { version: 2 } })
+        .run()
+        .pipe(Effect.orDie)
+      const failures: SessionEvent.Execution.Failed[] = []
+      yield* bus.project(SessionEvent.Execution.Failed, (event) => Effect.sync(() => void failures.push(event)))
+      const scope = yield* Scope.make()
+      yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void))
+      const context = yield* buildExecution(scope, () =>
+        bus
+          .publish(SessionEvent.RetryScheduled, {
+            sessionID,
+            assistantMessageID: SessionMessage.ID.create(),
+            attempt: 2,
+            at: 1,
+            error: { type: "provider.internal", message: "Sensitive provider detail", status: 503 },
+          })
+          .pipe(Effect.asVoid),
+      )
+      const execution = Context.get(context, SessionExecution.Service)
+      expect(Exit.isFailure(yield* execution.resume(sessionID).pipe(Effect.exit))).toBe(true)
+      yield* execution.awaitIdle(sessionID)
+      expect(diagnostics).toHaveLength(1)
+      expect(JSON.parse(diagnostics[0]!.slice("opencode.execution.failed ".length))).toMatchObject({
+        category: "authorization",
+        site: "session/publication-admission.ts:assert",
+        reason: "service-missing",
+        eventType: "session.retry.scheduled",
+      })
+      expect(diagnostics[0]).not.toContain("Sensitive")
+      expect(failures).toHaveLength(1)
+      expect(failures[0]!.data.error).toEqual(SessionPublicationAdmission.rejectedExecution)
+    }),
+  )
+
   policyIt.effect("reports provider login and model failures without publishing private details", () =>
     Effect.gen(function* () {
       const diagnostics: string[] = []

@@ -3,7 +3,7 @@ import { Tool } from "@opencode/schema/tool"
 import { SessionError } from "@opencode/schema/session-error"
 import { Permission } from "../permission.js"
 import { Integration } from "../integration.js"
-import { AgentNotFoundError, StepFailedError, UserInterruptedError } from "./error.js"
+import { AgentNotFoundError, StepFailedError, UserInterruptedError, PublicationAdmissionError } from "./error.js"
 import { SessionRunnerModel } from "./runner/model.js"
 
 export function toSessionError(cause: unknown): SessionError.Error {
@@ -39,6 +39,7 @@ export function toSessionError(cause: unknown): SessionError.Error {
       }
     }
   }
+  if (cause instanceof PublicationAdmissionError) return { type: "authorization", message: cause.message }
   if (cause instanceof Permission.BlockedError) return { type: "permission.rejected", message: cause.message }
   if (cause instanceof ToolFailure || cause instanceof Tool.Error) {
     if (cause.error === undefined) return { type: "tool.execution", message: cause.message }
