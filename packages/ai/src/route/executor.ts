@@ -20,18 +20,20 @@ const headerDetails = (headers: Headers.Headers) =>
 const normalizedHeaders = (headers: Headers.Headers) =>
   Object.fromEntries(Object.entries(headers).map(([key, value]) => [key.toLowerCase(), value]))
 
+const clampRetryAfterMs = (millis: number) => Math.min(Number.MAX_SAFE_INTEGER, Math.max(0, Math.ceil(millis)))
+
 const retryAfterMs = (headers: Record<string, string>) => {
   const millis = Number(headers["retry-after-ms"])
-  if (Number.isFinite(millis)) return Math.max(0, millis)
+  if (Number.isFinite(millis)) return clampRetryAfterMs(millis)
 
   const value = headers["retry-after"]
   if (!value) return undefined
 
   const seconds = Number(value)
-  if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000)
+  if (Number.isFinite(seconds)) return clampRetryAfterMs(seconds * 1000)
 
   const date = Date.parse(value)
-  if (!Number.isNaN(date)) return Math.max(0, date - Date.now())
+  if (!Number.isNaN(date)) return clampRetryAfterMs(date - Date.now())
   return undefined
 }
 
