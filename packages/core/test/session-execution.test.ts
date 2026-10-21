@@ -1,5 +1,5 @@
 import { describe, expect, spyOn, test } from "bun:test"
-import { AIError, TransportError } from "@opencode/ai"
+import { AIError, TransportError, QuotaExceededError } from "@opencode/ai"
 import { Database } from "@opencode/core/database/database"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { LayerNode } from "@opencode/util/effect/layer-node"
@@ -79,6 +79,7 @@ describe("SessionExecution lifecycle", () => {
           ...[
             SessionPublicationAdmission.rejectedProviderAuthentication,
             SessionPublicationAdmission.rejectedModel,
+            SessionPublicationAdmission.rejectedProviderQuota,
           ].flatMap((error) => [
             { ...error, status: 401 },
             { ...error, private: "Sensitive raw error" },
@@ -205,7 +206,7 @@ describe("SessionExecution lifecycle", () => {
     }),
   )
 
-  policyIt.effect("reports provider login and model failures without publishing private details", () =>
+  policyIt.effect("reports provider login, model and quota failures without publishing private details", () =>
     Effect.gen(function* () {
       const diagnostics: string[] = []
       const previous = process.env.OPENCODE_EXECUTION_DIAGNOSTICS
@@ -226,7 +227,7 @@ describe("SessionExecution lifecycle", () => {
       const failures: SessionEvent.Execution.Failed[] = []
       yield* bus.project(SessionEvent.Execution.Failed, (event) => Effect.sync(() => void failures.push(event)))
       for (const version of [1, 2] as const) {
-        for (const kind of ["authentication", "model"] as const) {
+        for (const kind of ["authentication", "model", "quota"] as const) {
           const sessionID = Session.ID.create()
           yield* seedSessions(database, [sessionID])
           yield* database.db
@@ -246,7 +247,9 @@ describe("SessionExecution lifecycle", () => {
             Effect.fail(
               kind === "authentication"
                 ? new Integration.AuthorizationError({ cause: new Error("Sensitive rejected credential") })
-                : new SessionRunnerModel.ModelNotSelectedError({ sessionID }),
+                : kind === "quota"
+                  ? new AIError({ reason: new QuotaExceededError({ message: "Sensitive provider quota detail" }) })
+                  : new SessionRunnerModel.ModelNotSelectedError({ sessionID }),
             ),
           )
           const execution = Context.get(context, SessionExecution.Service)
@@ -256,18 +259,22 @@ describe("SessionExecution lifecycle", () => {
           expect(failures.at(-1)?.data.error).toEqual(
             kind === "authentication"
               ? SessionPublicationAdmission.rejectedProviderAuthentication
-              : SessionPublicationAdmission.rejectedModel,
+              : kind === "quota"
+                ? SessionPublicationAdmission.rejectedProviderQuota
+                : SessionPublicationAdmission.rejectedModel,
           )
         }
       }
-      expect(failures).toHaveLength(4)
+      expect(failures).toHaveLength(6)
       expect(JSON.stringify(failures)).not.toContain("Sensitive")
-      expect(diagnostics).toHaveLength(4)
+      expect(diagnostics).toHaveLength(6)
       expect(diagnostics.map((line) => JSON.parse(line.slice("opencode.execution.failed ".length)).category)).toEqual([
         "provider.auth",
         "provider.no-route",
+        "provider.quota",
         "provider.auth",
         "provider.no-route",
+        "provider.quota",
       ])
       expect(diagnostics.join("")).not.toContain("Sensitive")
       expect(diagnostics.every((line) => line.length < 2048)).toBe(true)

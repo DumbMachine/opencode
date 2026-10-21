@@ -50,6 +50,7 @@ import { CodeModeInstructions } from "../codemode/instructions.js"
 import { CodeModeCatalog } from "../codemode/catalog.js"
 import { SessionPublicationWriter } from "./publication-writer.js"
 import type { SessionPublicationProvenance } from "./publication-provenance.js"
+import { ModelBudget } from "../model-budget.js"
 import { Bus } from "../bus.js"
 import { Database } from "../database/database.js"
 
@@ -474,6 +475,7 @@ export const layer = Layer.effect(
               try: () => SessionDisclosure.snapshot(bounded),
               catch: () => new Error("Execution context authorization is unavailable"),
             }).pipe(Effect.orDie)
+      if (modelHook.providerCostCovered) ModelBudget.coverProviderCost(request, modelHook.providerCostCovered.baseURL)
       // History selects native windows against the catalog route before hooks run. A newly installed
       // routing hook must not send an existing opaque window to another deployment; `prepare` has no
       // error channel, so like hook failures this surfaces as a defect.
@@ -522,10 +524,12 @@ export const layer = Layer.effect(
       // Untracked transport hooks can replace attested bytes after this seam.
       // Until they carry lineage, a required disclosure request cannot use them.
       const hasWebSocketHooks =
-        service !== undefined &&
+        (service !== undefined || modelHook.providerCostCovered !== undefined) &&
         ((yield* hooks.has("session", "experimental.ws.send", model.ref.providerID)) ||
           (yield* hooks.has("session", "experimental.ws.receive", model.ref.providerID)) ||
           (yield* hooks.has("session", "experimental.ws.handshake", model.ref.providerID)))
+      if (modelHook.providerCostCovered && (hasHttpHooks || hasWebSocketHooks))
+        return yield* Effect.die(new Error("Subscription billing does not support transport request rewrites"))
       if (service !== undefined && (hasHttpHooks || hasWebSocketHooks || inputID === undefined || kind !== "primary"))
         return yield* Effect.die(new Error("Execution context authorization is unavailable"))
       const disclosure =

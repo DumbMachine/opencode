@@ -66,6 +66,8 @@ export interface SessionModelRequest {
   readonly model: Model.Ref
   readonly kind: SessionRequestKind
   baseURL?: string
+  /** Provider adapter asserts that a subscription covers provider cost at this exact endpoint. */
+  providerCostCovered?: { readonly baseURL: string }
   /** Provider headers. Native x-opencode-session/input billing identities are reserved and restored after this hook. */
   headers: Record<string, string>
 }

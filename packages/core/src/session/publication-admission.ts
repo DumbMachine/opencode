@@ -41,11 +41,17 @@ export const rejectedModel = Object.freeze({
   message: "The selected model is unavailable. Choose another model and try again.",
 })
 
+export const rejectedProviderQuota = Object.freeze({
+  type: "provider.quota",
+  message: "AI usage limit reached. Check billing or contact support.",
+})
+
 // Retain only source-free failure categories. Provider messages may contain
 // credentials, request bodies, or content the reader is not allowed to see.
 export function failure(error: SessionError.Error) {
   if (error.type === rejectedProviderAuthentication.type) return rejectedProviderAuthentication
   if (error.type === rejectedModel.type) return rejectedModel
+  if (error.type === rejectedProviderQuota.type) return rejectedProviderQuota
   return rejectedExecution
 }
 
@@ -80,7 +86,7 @@ export const assert = Effect.fnUntraced(function* (
     Object.hasOwn(error, "message") &&
     "type" in error &&
     "message" in error &&
-    [rejectedExecution, rejectedProviderAuthentication, rejectedModel].some(
+    [rejectedExecution, rejectedProviderAuthentication, rejectedModel, rejectedProviderQuota].some(
       (allowed) => error.type === allowed.type && error.message === allowed.message,
     )
   )

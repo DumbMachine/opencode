@@ -776,6 +776,7 @@ it.effect("signs the exact budget-shaped request that reaches the real provider 
     })
     yield* Effect.addFinalizer(() => Effect.sync(() => host.server.stop(true)))
     const providerCaps: number[] = []
+    let coverCost = false
     let poisonBodyAtReserve = false
     let poisonedAtReserve = false
     const server = Bun.serve({
@@ -785,6 +786,7 @@ it.effect("signs the exact budget-shaped request that reaches the real provider 
         const path = new URL(req.url).pathname
         const body = (await req.json()) as Record<string, unknown>
         if (path === "/reserve" || path === "/complete" || path === "/cancel") {
+          if (path === "/reserve") expect(body.provider_cost_covered).toBe(coverCost ? true : undefined)
           if (path === "/reserve" && poisonBodyAtReserve) {
             poisonedAtReserve = true
             Object.assign(measured.defaults, {
@@ -837,6 +839,15 @@ it.effect("signs the exact budget-shaped request that reaches the real provider 
       Effect.provideService(LLMClient.Service, budget),
     )
     for (const maxTokens of [undefined, 5000, 32]) {
+      coverCost = maxTokens === 32
+      const billingHooks = yield* PluginHooks.Service
+      const costHook = coverCost
+        ? yield* billingHooks.register("session", "model.request", (event) =>
+            Effect.sync(() => {
+              event.providerCostCovered = { baseURL: server.url.origin + "/v1/" }
+            }),
+          )
+        : undefined
       const inputID = SessionMessage.ID.make("msg_budget_composition_" + String(maxTokens))
       const payload = yield* NativeProducer.prepareInput({
         sessionID: session.id,
@@ -884,6 +895,7 @@ it.effect("signs the exact budget-shaped request that reaches the real provider 
         messages: [Message.effort({ effort: "high" }), ...toLLMMessages([message], resolved.ref, "test")],
       })
       if (registration) yield* registration.dispose
+      if (costHook) yield* costHook.dispose
       expect(prepared.request.generation?.maxTokens).toBe(maxTokens === 32 ? 32 : 128)
       expect(prepared.request.generation?.temperature).toBe(0.4)
       expect(prepared.request.generation?.topP).toBe(0.8)

@@ -305,6 +305,7 @@ export const OpenAIPlugin = define({
           if (!chatgpt) return
           if (evt.baseURL && URL.canParse(evt.baseURL) && new URL(evt.baseURL).origin === "https://api.openai.com")
             evt.baseURL = codexBaseURL
+          if (evt.baseURL === codexBaseURL) evt.providerCostCovered = { baseURL: codexBaseURL }
           evt.headers.originator = "opencode"
           evt.headers["session-id"] = evt.sessionID
         }),

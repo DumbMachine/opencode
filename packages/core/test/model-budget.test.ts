@@ -13,6 +13,7 @@ import { LayerNode } from "@opencode/util/effect/layer-node"
 
 test("admission precedes provider execution and sends an enforced output limit", async () => {
   const events: string[] = []
+  let subscription = false
   let reject = false
   let completionFailures = 0
   let omitUsage = false
@@ -25,17 +26,19 @@ test("admission precedes provider execution and sends an enforced output limit",
       if (path === "/reserve" || path === "/complete" || path === "/cancel")
         expect(body.input_id).toBe("msg_budget_input")
       if (path === "/reserve") {
+        expect(body.provider_cost_covered).toBe(subscription ? true : undefined)
         expect(body.output_token_limit).toBe(128)
         expect(body.output_token_estimate).toBe(128)
         expect(body.input_token_estimate).toBeGreaterThanOrEqual(0)
         expect(body.input_token_estimate).toBeLessThan(Number(body.input_token_limit))
-        return new Response("{}", { status: reject ? 402 : 200 })
+        return new Response("{}", { status: reject && body.provider_cost_covered !== true ? 402 : 200 })
       }
       if (path === "/complete") {
         if (completionFailures-- > 0) return new Response("temporary outage", { status: 503 })
         expect(body.usage).toEqual({ input: 10, output: 3, reasoning: 0, cache_read: 0, cache_write: 0 })
         return Response.json({ ok: true })
       }
+      expect(body.provider_cost_covered).toBeUndefined()
       expect(body.max_completion_tokens).toBe(128)
       if (omitUsage) return new Response("data: [DONE]\n\n", { headers: { "content-type": "text/event-stream" } })
       return new Response(
@@ -60,6 +63,7 @@ test("admission precedes provider execution and sends an enforced output limit",
       prompt: "hello",
       generation: { maxTokens: 5000 },
     })
+    if (subscription) ModelBudget.coverProviderCost(request, server.url.origin + "/v1/")
     return yield* client.stream(request).pipe(Stream.runCollect)
   }).pipe(Effect.provide(layer))
   try {
@@ -77,6 +81,11 @@ test("admission precedes provider execution and sends an enforced output limit",
     reject = true
     await expect(Effect.runPromise(run)).rejects.toThrow()
     expect(events).toEqual(["/reserve"])
+    events.length = 0
+    subscription = true
+    omitUsage = false
+    await Effect.runPromise(run)
+    expect(events).toEqual(["/reserve", "/v1/chat/completions", "/complete"])
   } finally {
     server.stop(true)
   }
@@ -653,5 +662,74 @@ test("exported budget preparation cannot substitute a billing session or input",
         expect((yield* Effect.exit(budget.prepareRequest(request)))._tag).toBe("Failure")
       }
     }).pipe(Effect.provide(LayerNode.compile(KV.node))),
+  )
+})
+
+test("subscription coverage cancels without dispatch when the route changes during reserve", async () => {
+  const events: string[] = []
+  let reroute = () => {}
+  const server = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const path = new URL(req.url).pathname
+      events.push(path)
+      await req.json()
+      if (path === "/reserve") reroute()
+      return Response.json({ ok: true })
+    },
+  })
+  const layer = Layer.merge(
+    LayerNode.compile(KV.node),
+    LLMClient.layer.pipe(Layer.provide(RequestExecutor.layer.pipe(Layer.provide(FetchHttpClient.layer)))),
+  )
+  try {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const base = yield* LLMClient.Service
+        const client = ModelBudget.make(base, server.url.origin, "test", yield* KV.Service, 128)
+        const input = LLM.request({
+          model: OpenAIChat.route
+            .with({ endpoint: { baseURL: server.url.origin + "/subscription/" }, auth: Auth.bearer("test") })
+            .model({ id: "covered" }),
+          http: { headers: { "x-opencode-session": "ses_covered_route" } },
+          prompt: "synthetic",
+        })
+        ModelBudget.coverProviderCost(input, server.url.origin + "/subscription/")
+        reroute = () => {
+          Object.assign(input.model.route.endpoint, { baseURL: server.url.origin + "/paid/" })
+        }
+        const result = yield* client.stream(input).pipe(Stream.runDrain, Effect.exit)
+        expect(result._tag).toBe("Failure")
+        expect(events).toEqual(["/reserve", "/cancel"])
+      }).pipe(Effect.provide(layer)),
+    )
+  } finally {
+    server.stop(true)
+  }
+})
+
+test("subscription coverage rejects mismatched endpoints and HTTP rewrite hooks", async () => {
+  const layer = Layer.merge(
+    LayerNode.compile(KV.node),
+    LLMClient.layer.pipe(Layer.provide(RequestExecutor.layer.pipe(Layer.provide(FetchHttpClient.layer)))),
+  )
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const base = yield* LLMClient.Service
+      const client = ModelBudget.make(base, "http://127.0.0.1:1", "test", yield* KV.Service, 128)
+      const input = LLM.request({
+        model: OpenAIChat.route
+          .with({ endpoint: { baseURL: "https://subscription.example/v1/" } })
+          .model({ id: "covered" }),
+        http: { headers: { "x-opencode-session": "ses_covered_hooks" } },
+        prompt: "synthetic",
+      })
+      expect(() => ModelBudget.coverProviderCost(input, "https://paid.example/v1/")).toThrow("does not match")
+      ModelBudget.coverProviderCost(input, "https://subscription.example/v1/")
+      const result = yield* client
+        .stream(input, { http: () => Effect.die("unsupported rewrite must never execute") })
+        .pipe(Stream.runDrain, Effect.flip)
+      expect(result.message).toContain("does not support HTTP request rewrites")
+    }).pipe(Effect.provide(layer)),
   )
 })

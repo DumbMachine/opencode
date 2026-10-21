@@ -54,6 +54,7 @@ const request = Effect.fn(function* (providerID: Provider.ID, baseURL: string) {
   return {
     baseURL: event.baseURL,
     headers: event.headers,
+    providerCostCovered: event.providerCostCovered,
     hasHttpHooks:
       (yield* hooks.has("session", "http.request", providerID)) ||
       (yield* hooks.has("session", "http.response", providerID)),
@@ -150,6 +151,9 @@ describe("OpenAIPlugin", () => {
         "chatgpt-account-id": "acct_123",
         "x-codex-beta-features": "remote_compaction_v2",
       })
+      expect(direct.providerCostCovered).toEqual({ baseURL: "https://chatgpt.com/backend-api/codex" })
+      expect(custom.providerCostCovered).toBeUndefined()
+      expect(proxy.providerCostCovered).toBeUndefined()
       expect(direct.baseURL).toBe("https://chatgpt.com/backend-api/codex")
       expect(direct.headers).toMatchObject({ originator: "opencode", "session-id": "ses_test" })
       expect(direct.hasHttpHooks).toBe(false)
@@ -210,6 +214,7 @@ describe("OpenAIPlugin", () => {
       expect(model.settings?.transport).toBeUndefined()
       expect(direct.headers).not.toHaveProperty("originator")
       expect(direct.baseURL).toBe("https://api.openai.com/v1")
+      expect(direct.providerCostCovered).toBeUndefined()
       expect(provider.headers).not.toHaveProperty("x-codex-beta-features")
       expect(direct.hasHttpHooks).toBe(false)
       expect(provider.headers).not.toHaveProperty("originator")

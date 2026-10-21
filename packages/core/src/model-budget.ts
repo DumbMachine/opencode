@@ -38,6 +38,15 @@ const completion = Schema.Struct({
     cache_write: tokenCount,
   }),
 })
+// Native adapters bind coverage to an owned prepared request, never a serialized
+// header, model price override, tool argument, or mutable credential selection.
+const providerCoverage = new WeakMap<LLMRequest, string>()
+export function coverProviderCost(request: LLMRequest, baseURL: string) {
+  if (request.model.route.endpoint.baseURL !== baseURL)
+    throw failure("Provider billing coverage does not match the selected route")
+  providerCoverage.set(request, baseURL)
+}
+
 const journalPrefix = "model-budget:callbacks/"
 const sessionPrefix = (session: string) => `${journalPrefix}${encodeURIComponent(session)}/`
 const journalKey = (record: typeof completion.Type) => `${sessionPrefix(record.session_id)}${record.attempt_id}`
@@ -252,12 +261,17 @@ export const make = (client: LLMClientShape, endpoint: string, token: string, kv
         const session = unprepared.http?.headers?.["x-opencode-session"]
         const inputID = unprepared.http?.headers?.["x-opencode-input"]
         if (!session) return yield* failure("Model request has no billing session")
+        const coveredAt = providerCoverage.get(unprepared)
         const request = yield* prepareRequest(unprepared)
+        if (coveredAt !== undefined && request.model.route.endpoint.baseURL !== coveredAt)
+          return yield* failure("Provider billing coverage changed during preparation")
         if (
           request.http?.headers?.["x-opencode-session"] !== session ||
           request.http?.headers?.["x-opencode-input"] !== inputID
         )
           return yield* failure("Model request billing identity changed during preparation")
+        if (coveredAt !== undefined && options?.http)
+          return yield* failure("Subscription billing does not support HTTP request rewrites")
         if (request.tools.some((tool) => "native" in tool && tool.native !== undefined))
           return yield* failure("Provider-hosted tools require a separately priced budget")
         if (request.http?.body || request.model.defaults?.http?.body || request.model.route.defaults.http?.body)
@@ -289,6 +303,7 @@ export const make = (client: LLMClientShape, endpoint: string, token: string, kv
         )
         yield* send("/reserve", {
           ...attempt,
+          ...(coveredAt === undefined ? {} : { provider_cost_covered: true }),
           input_token_limit: input,
           output_token_limit: maxTokens,
           input_token_estimate: inputEstimate(request, input),
@@ -314,6 +329,27 @@ export const make = (client: LLMClientShape, endpoint: string, token: string, kv
         // Idempotent with the preflight shaping operation. A prepared request
         // reaches the provider with the same logical generation options.
         const bounded = request
+        let physical = request
+        const coverageCurrent = Effect.sync(() => {
+          if (
+            coveredAt !== undefined &&
+            (bounded.model.route.endpoint.baseURL !== coveredAt || physical.model.route.endpoint.baseURL !== coveredAt)
+          )
+            throw failure("Provider billing coverage changed before dispatch")
+        })
+        const beforeDispatch =
+          coveredAt === undefined
+            ? options?.beforeDispatch
+            : (options?.beforeDispatch ?? Effect.void).pipe(Effect.andThen(coverageCurrent))
+        const assertRequest =
+          coveredAt === undefined
+            ? options?.assertRequest
+            : (actual: LLMRequest) =>
+                Effect.gen(function* () {
+                  physical = actual
+                  yield* options?.assertRequest?.(actual) ?? Effect.void
+                  yield* coverageCurrent
+                })
         let completed = false
         let observed = false
         const complete = (usage: (typeof completion.Type)["usage"]) =>
@@ -328,13 +364,14 @@ export const make = (client: LLMClientShape, endpoint: string, token: string, kv
           // With a physical admission guard, its successful send boundary marks
           // dispatch. Refusal after reserve must retain the no-send cancellation.
           // Ordinary clients keep the existing conservative unknown-outcome rule.
-          if (!options?.beforeDispatch) state.dispatched++
+          if (!beforeDispatch) state.dispatched++
           return client.stream(
             bounded,
-            options?.beforeDispatch
+            beforeDispatch
               ? {
                   ...options,
-                  beforeDispatch: options.beforeDispatch.pipe(
+                  ...(assertRequest ? { assertRequest } : {}),
+                  beforeDispatch: beforeDispatch.pipe(
                     Effect.andThen(
                       Effect.sync(() => {
                         state.dispatched++
@@ -343,7 +380,7 @@ export const make = (client: LLMClientShape, endpoint: string, token: string, kv
                   ),
                   onNotSent: Effect.sync(() => {
                     state.dispatched = Math.max(0, state.dispatched - 1)
-                  }).pipe(Effect.andThen(options.onNotSent ?? Effect.void)),
+                  }).pipe(Effect.andThen(options?.onNotSent ?? Effect.void)),
                 }
               : options,
           )
