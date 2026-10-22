@@ -180,6 +180,22 @@ test("removes only the carrier and distinguishes absent, empty and populated met
     expect(() => McpProvenance.result(f.capture, f.invocation, f.respond(raw))).toThrow()
 })
 
+test("retains a complete signed withheld-output receipt without making it terminal control", () => {
+  for (const actor of ["first", "second"]) {
+    const f = fixture(actor)
+    const raw = JSON.stringify({
+      isError: true,
+      content: [{ type: "text", text: JSON.stringify({ output_withheld: true, safe_to_retry: false }) }],
+    })
+    const result = McpProvenance.result(f.capture, f.invocation, f.respond(raw))
+    expect(result.result).toEqual(JSON.parse(raw))
+    expect(result.proof.complete).toBeTrue()
+    expect(result.proof.mode).toBe("complete")
+    expect(result.proof.receiptReference).toBeTruthy()
+    expect(() => McpProvenance.result(fixture(actor + "-other").capture, f.invocation, f.respond(raw))).toThrow()
+  }
+})
+
 test("rejects duplicate keys, rounded numbers, invalid JSON and non-JSON SDK values", () => {
   const f = fixture()
   for (const number of [
@@ -559,7 +575,10 @@ test(`verifies raw catalog and negotiated SDK output validation for publication 
               })
             })
             protocol.setRequestHandler("tools/call", ({ params }) =>
-              Promise.resolve({
+              Promise.resolve(params.arguments?.mode === "withheld" ? {
+                isError: true,
+                content: [{ type: "text", text: "Output withheld; do not repeat a write." }],
+              } : {
                 content: [{ type: "text", text: "ordinary tool still works" }],
                 structuredContent: params.arguments?.mode === "terminal" ? { completed: true }
                   : params.arguments?.mode === "malformed" ? { value: 3 }
@@ -635,6 +654,12 @@ test(`verifies raw catalog and negotiated SDK output validation for publication 
         ])
         const terminal = yield* captured.value.callTool({ name: "first", args: { mode: "terminal" } }).pipe(Effect.exit)
         expect(Exit.isSuccess(terminal)).toBe(publicationVersion === 2)
+        const withheld = yield* captured.value.callTool({ name: "first", args: { mode: "withheld" } })
+        expect(withheld.isError).toBeTrue()
+        expect("structuredContent" in withheld).toBeFalse()
+        expect((yield* captured.value.callTool({ name: "first" })).content).toEqual([
+          { type: "text", text: "ordinary tool still works" },
+        ])
         for (const mode of ["malformed", "extra"]) {
           const invalid = yield* captured.value.callTool({ name: "first", args: { mode } }).pipe(Effect.exit)
           expect(Exit.isFailure(invalid)).toBeTrue()
