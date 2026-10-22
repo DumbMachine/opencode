@@ -2,7 +2,7 @@ export * as NativeProducer from "./execution-producer.js"
 
 import type { Transport } from "@modelcontextprotocol/client"
 import { generateKeyPairSync, randomUUID, sign } from "node:crypto"
-import { Cause, Context, Effect, Option, Schema } from "effect"
+import { Cause, Context, Effect, Option, Schema, Semaphore } from "effect"
 import { ExecutionProducer } from "@opencode/schema/execution-producer"
 import { SessionInbox } from "@opencode/schema/session-inbox"
 import { SessionID } from "@opencode/schema/session-id"
@@ -665,6 +665,9 @@ class ToolCapture extends Context.Service<
     readonly prepareInvocation?: (source: object) => Effect.Effect<void>
     readonly completeInvocation?: (source: object) => Effect.Effect<void>
     readonly terminal?: () => Effect.Effect<never>
+    readonly dispatch?: Semaphore.Semaphore
+    readonly terminalReady: () => boolean
+    readonly stopDispatch: () => void
     readonly reserve: () => void
     readonly observe: (observation: McpProvenance.Observation) => void
     readonly unknown: () => void
@@ -699,7 +702,13 @@ export const captureTools = (input: {
           let calls = 0
           let bytes = 0
           let complete = true
+          let dispatchFailed = false
           const observations: McpProvenance.Observation[] = []
+          const dispatch =
+            input.observeTerminal && input.prepareInvocation && input.completeInvocation &&
+            capture.context.publication?.version === 2
+              ? Semaphore.makeUnsafe(1)
+              : undefined
           const valid = () => active && current()
           const terminal = () => observations.find((item) => item.proof.mode === "terminal-control")
           return effect.pipe(
@@ -707,6 +716,13 @@ export const captureTools = (input: {
               capture,
               ...identity,
               valid,
+              dispatch,
+              // Only the first nested invocation can terminate this outer call:
+              // later invocations must not discard earlier unpublished results.
+              terminalReady: () => calls === 1,
+              stopDispatch: () => {
+                dispatchFailed = true
+              },
               prepareInvocation: input.prepareInvocation,
               completeInvocation: input.completeInvocation,
               ...(input.observeTerminal && input.prepareInvocation && input.completeInvocation
@@ -729,7 +745,7 @@ export const captureTools = (input: {
                   }
                 : {}),
               reserve: () => {
-                if (!valid() || stopped || terminal() || ++calls > 128)
+                if (!valid() || stopped || dispatchFailed || terminal() || ++calls > 128)
                   throw new Error("MCP provenance authorization is unavailable")
               },
               unknown: () => {
@@ -831,58 +847,65 @@ export const dispatchMcp = <A, E, R>(
   Effect.gen(function* () {
     const scope = Option.getOrUndefined(yield* Effect.serviceOption(ToolCapture))
     if (!scope) return yield* transport({ name: input.name, args: input.args ?? {}, meta: input.meta ?? {} })
-    scope.reserve()
-    if (
-      input.sessionID !== scope.capture.context.sessionID ||
-      Object.hasOwn(input.meta ?? {}, McpProvenance.RequestKey)
-    )
-      return yield* Effect.die(new Error("MCP provenance authorization is unavailable"))
-    const args = McpProvenance.own(input.args ?? {}) as Record<string, unknown>
-    const serialized = JSON.stringify(args)
-    if (Buffer.byteLength(serialized) > McpProvenance.MaximumSnapshot)
-      return yield* Effect.die(new Error("MCP provenance authorization is unavailable"))
-    const { invocation, signed } = processSigner().mcpInvocation({
-      sessionID: scope.capture.context.sessionID,
-      inputID: scope.capture.context.inputID,
-      attempt: scope.capture.context.attempt,
-      invocationID: randomUUID(),
-      ...(scope.terminal && scope.capture.context.publication?.version === 2 ? { terminalVersion: 1 as const } : {}),
-      messageID: scope.messageID,
-      toolCallID: scope.toolCallID,
-      server: input.server,
-      tool: input.name,
-      argumentsRevision: Hash.sha256(serialized),
-      contextReference: scope.capture.context.contextReference,
-      contextProofRevision: Hash.sha256(scope.capture.signed.payload),
-      issuedAt: Date.now(),
+    const dispatch = Effect.gen(function* () {
+      scope.reserve()
+      if (
+        input.sessionID !== scope.capture.context.sessionID ||
+        Object.hasOwn(input.meta ?? {}, McpProvenance.RequestKey)
+      )
+        return yield* Effect.die(new Error("MCP provenance authorization is unavailable"))
+      const args = McpProvenance.own(input.args ?? {}) as Record<string, unknown>
+      const serialized = JSON.stringify(args)
+      if (Buffer.byteLength(serialized) > McpProvenance.MaximumSnapshot)
+        return yield* Effect.die(new Error("MCP provenance authorization is unavailable"))
+      const { invocation, signed } = processSigner().mcpInvocation({
+        sessionID: scope.capture.context.sessionID,
+        inputID: scope.capture.context.inputID,
+        attempt: scope.capture.context.attempt,
+        invocationID: randomUUID(),
+        ...(scope.terminal && scope.terminalReady() && scope.capture.context.publication?.version === 2
+          ? { terminalVersion: 1 as const }
+          : {}),
+        messageID: scope.messageID,
+        toolCallID: scope.toolCallID,
+        server: input.server,
+        tool: input.name,
+        argumentsRevision: Hash.sha256(serialized),
+        contextReference: scope.capture.context.contextReference,
+        contextProofRevision: Hash.sha256(scope.capture.signed.payload),
+        issuedAt: Date.now(),
+      })
+      const meta = McpProvenance.own({
+        ...(input.meta ?? {}),
+        [McpProvenance.RequestKey]: { version: 1, context: scope.capture.signed, invocation: signed },
+      }) as Readonly<Record<string, unknown>>
+      const intent = Object.freeze({})
+      invocationIntents.set(intent, signed)
+      if (invocation.terminalVersion === 1) yield* scope.prepareInvocation!(intent)
+      if (!scope.valid()) return yield* Effect.die(new Error("MCP provenance authorization is unavailable"))
+      const raw = yield* transport({ name: input.name, args, meta }).pipe(
+        Effect.tapError(() => Effect.sync(() => scope.unknown())),
+      )
+      if (
+        scope.capture.context.mode === "actor-private-unknown" &&
+        raw !== null &&
+        typeof raw === "object" &&
+        (!("_meta" in raw) ||
+          raw._meta === undefined ||
+          (typeof raw._meta === "object" && raw._meta !== null && !Object.hasOwn(raw._meta, McpProvenance.ResultKey)))
+      ) {
+        scope.unknown()
+        return raw
+      }
+      const verified = McpProvenance.result(scope.capture, invocation, raw)
+      scope.observe({ invocation: signed, proof: verified.proof, signed: verified.signed, snapshot: verified.snapshot })
+      if (verified.proof.mode === "terminal-control") return yield* scope.terminal!()
+      if (invocation.terminalVersion === 1) yield* scope.completeInvocation!(intent)
+      return verified.result
     })
-    const meta = McpProvenance.own({
-      ...(input.meta ?? {}),
-      [McpProvenance.RequestKey]: { version: 1, context: scope.capture.signed, invocation: signed },
-    }) as Readonly<Record<string, unknown>>
-    const intent = Object.freeze({})
-    invocationIntents.set(intent, signed)
-    if (invocation.terminalVersion === 1) yield* scope.prepareInvocation!(intent)
-    if (!scope.valid()) return yield* Effect.die(new Error("MCP provenance authorization is unavailable"))
-    const raw = yield* transport({ name: input.name, args, meta }).pipe(
-      Effect.tapError(() => Effect.sync(() => scope.unknown())),
-    )
-    if (
-      scope.capture.context.mode === "actor-private-unknown" &&
-      raw !== null &&
-      typeof raw === "object" &&
-      (!("_meta" in raw) ||
-        raw._meta === undefined ||
-        (typeof raw._meta === "object" && raw._meta !== null && !Object.hasOwn(raw._meta, McpProvenance.ResultKey)))
-    ) {
-      scope.unknown()
-      return raw
-    }
-    const verified = McpProvenance.result(scope.capture, invocation, raw)
-    scope.observe({ invocation: signed, proof: verified.proof, signed: verified.signed, snapshot: verified.snapshot })
-    if (verified.proof.mode === "terminal-control") return yield* scope.terminal!()
-    if (invocation.terminalVersion === 1) yield* scope.completeInvocation!(intent)
-    return verified.result
+    return yield* scope.dispatch
+      ? scope.dispatch.withPermit(dispatch.pipe(Effect.tapCause(() => Effect.sync(scope.stopDispatch))))
+      : dispatch
   })
 
 const catalogExecutions = new WeakMap<object, CatalogEvidence>()

@@ -14,6 +14,8 @@ ${hasMoreTools ? `The catalog is partial. Inside \`execute\`, use \`search(...)\
 
 - ${searchSignature}` : "The catalog is complete. Do not guess tool names."}
 
+In managed sessions, run authorization-changing operations in separate \`execute\` calls, without other tool calls in the same code block. Results must be published before authorization changes; only the first nested MCP call can negotiate a terminal change. A terminal completion ends the current input. Never repeat an operation to recover a missing result or receipt.
+
 ## Available tools`
 
 export function render(catalog: CodeModeCatalog.Summary) {

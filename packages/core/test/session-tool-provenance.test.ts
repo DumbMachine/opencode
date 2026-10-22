@@ -756,14 +756,14 @@ it.live("commits one fixed terminal control batch atomically, preserves lineage 
   }),
 )
 
-it.live("verified terminal control stops a hanging provider and sibling tools without continuation", () =>
+it.live("verified terminal control stops a hanging provider before queued sibling execution", () =>
   Effect.gen(function* () {
     const f = yield* fixture()
     const prepared = yield* f.prepare()
     const writer = prepared.writer
     const llm = yield* TestLLM.Test
-    const siblingStarted = yield* Deferred.make<void>()
-    let siblingStopped = false
+    const siblingQueued = yield* Deferred.make<void>()
+    let siblingExecuted = false
     let dispatches = 0
     let retries = 0
     const capture = yield* NativeProducer.captureTools({
@@ -783,8 +783,8 @@ it.live("verified terminal control stops a hanging provider and sibling tools wi
     yield* llm.push(
       TestLLM.hangAfter(
         LLMEvent.stepStart({ index: 0 }),
-        LLMEvent.toolCall({ id: "sibling", name: "wait", input: {} }),
         LLMEvent.toolCall({ id: "finished", name: "remove", input: {} }),
+        LLMEvent.toolCall({ id: "sibling", name: "wait", input: {} }),
       ),
     )
     const steps = yield* SessionStep.make.pipe(Effect.provide(Layer.mock(Snapshot.Service)({})))
@@ -812,21 +812,28 @@ it.live("verified terminal control stops a hanging provider and sibling tools wi
             return { retry: false as const }
           }),
         prepared: {
-          publication: writer,
+          publication: {
+            ...writer,
+            prepareTool: (definition, data, source) => writer.prepareTool!(definition, data, source).pipe(
+              Effect.map((unit) => ({
+                ...unit,
+                publish: unit.publish.pipe(Effect.tap(() =>
+                  definition.type === SessionEvent.Tool.Called.type &&
+                    (data as Event.Data<typeof SessionEvent.Tool.Called>).id === "sibling"
+                    ? Deferred.succeed(siblingQueued, undefined) : Effect.void,
+                )),
+              })),
+            ),
+          },
           request: LLM.request({ model: model.model, prompt: "Run tools" }),
           retry: () => Effect.void,
           options: {},
           executeTool: (call) =>
             call.call.id === "sibling"
-              ? Deferred.succeed(siblingStarted, undefined).pipe(
+              ? Effect.sync(() => { siblingExecuted = true }).pipe(
                   Effect.andThen(Effect.never),
-                  Effect.onInterrupt(() =>
-                    Effect.sync(() => {
-                      siblingStopped = true
-                    }),
-                  ),
                 )
-              : Deferred.await(siblingStarted).pipe(
+              : Deferred.await(siblingQueued).pipe(
                   Effect.andThen(
                     capture.run(
                       { messageID: f.assistantMessageID, toolCallID: call.call.id },
@@ -850,7 +857,7 @@ it.live("verified terminal control stops a hanging provider and sibling tools wi
       })
       .pipe(Effect.timeout("5 seconds"))
     expect(outcome).toEqual(SessionStep.Outcome.Completed({ needsContinuation: false }))
-    expect(siblingStopped).toBeTrue()
+    expect(siblingExecuted).toBeFalse()
     expect(dispatches).toBe(1)
     expect(retries).toBe(0)
     expect(yield* llm.requests()).toHaveLength(1)
@@ -938,6 +945,46 @@ it.live("terminal publication rejects cancellation and ordinary permits without 
     expect(Exit.isFailure(yield* unit.publish.pipe(Effect.exit))).toBeTrue()
     expect((yield* f.witnesses()).length).toBe(witnesses)
     expect((yield* f.message())?.data).toEqual(before?.data)
+  }),
+)
+
+it.live("the writer rejects a previously prepared ordinary publication after terminal observation", () =>
+  Effect.gen(function* () {
+    const f = yield* fixture()
+    const prepared = yield* f.prepare()
+    const writer = prepared.writer
+    if (!writer.prepareTool) throw new Error("Missing tool writer")
+    yield* (yield* writer.prepare(SessionEvent.Step.Started, {
+      sessionID: f.sessionID, assistantMessageID: f.assistantMessageID, agent: Agent.ID.make("build"),
+      model: { id: Model.ID.make("fixture"), providerID: Provider.ID.make("fixture") }, started: 1,
+    })).publish
+    for (const id of ["ordinary", "finished"]) {
+      yield* startTool(f, writer, id)
+      yield* (yield* writer.prepareTool(SessionEvent.Tool.Called, {
+        sessionID: f.sessionID, assistantMessageID: f.assistantMessageID, id, input: {}, executed: false,
+      })).publish
+    }
+    const ordinary = yield* writer.prepareTool(SessionEvent.Tool.Success, {
+      sessionID: f.sessionID, assistantMessageID: f.assistantMessageID, id: "ordinary",
+      content: [{ type: "text", text: "Unpublished ordinary value" }], executed: false,
+    })
+    const capture = yield* NativeProducer.captureTools({
+      service: f.service, signed: prepared.signed, current: () => true,
+      prepareInvocation: writer.prepareInvocation, completeInvocation: writer.completeInvocation,
+      observeTerminal: writer.observeTerminal,
+    })
+    const terminal = yield* capture.run(
+      { messageID: f.assistantMessageID, toolCallID: "finished" },
+      NativeProducer.dispatchMcp({ sessionID: f.sessionID, server: "files", name: "change" }, (request) =>
+        Effect.sync(() => f.terminal(prepared.proof,
+          (request.meta[McpProvenance.RequestKey] as { invocation: ExecutionProducer.SignedFact }).invocation))),
+    ).pipe(Effect.exit)
+    if (Exit.isSuccess(terminal)) throw new Error("Expected terminal control")
+    expect(NativeProducer.terminalToolResult(terminal.cause)).toBeDefined()
+    const witnesses = (yield* f.witnesses()).length
+    expect(Exit.isFailure(yield* ordinary.publish.pipe(Effect.exit))).toBeTrue()
+    expect(yield* f.witnesses()).toHaveLength(witnesses)
+    expect(JSON.stringify((yield* f.message())?.data)).not.toContain("Unpublished ordinary value")
   }),
 )
 
@@ -1045,7 +1092,7 @@ it.live("an intent storage failure prevents the actual MCP transport", () =>
   }),
 )
 
-it.live("parallel ordinary responses clear only their exact durable invocation intents", () =>
+it.live("nested ordinary responses are ordered and only the first invocation negotiates terminal control", () =>
   Effect.gen(function* () {
     const f = yield* fixture()
     const prepared = yield* f.prepare()
@@ -1058,46 +1105,222 @@ it.live("parallel ordinary responses clear only their exact durable invocation i
       completeInvocation: writer.completeInvocation,
       observeTerminal: writer.observeTerminal,
     })
-    const ready = yield* Deferred.make<void>()
-    const firstDone = yield* Deferred.make<void>()
-    let received = 0
+    const terminalVersions: Array<number | undefined> = []
     const result = yield* capture.run(
       { messageID: f.assistantMessageID, toolCallID: "ordinary" },
       Effect.all(
         [0, 1].map((index) =>
           NativeProducer.dispatchMcp({ sessionID: f.sessionID, server: "files", name: "read" }, (request) =>
             Effect.gen(function* () {
-              received++
-              if (received === 2) yield* Deferred.succeed(ready, undefined)
-              yield* Deferred.await(ready)
-              if (index === 0)
-                expect(yield* f.database.db.select().from(SessionTerminalInvocationTable).all()).toHaveLength(2)
-              if (index === 1) {
-                yield* Deferred.await(firstDone)
-                const retained = yield* f.database.db.select().from(SessionTerminalInvocationTable).all()
-                expect(retained).toHaveLength(1)
-                expect(retained[0].invocation_id).toBe(
-                  JSON.parse(
-                    (request.meta[McpProvenance.RequestKey] as { invocation: ExecutionProducer.SignedFact }).invocation
-                      .payload,
-                  ).invocationID,
-                )
-              }
+               const invocation = JSON.parse(
+                 (request.meta[McpProvenance.RequestKey] as { invocation: ExecutionProducer.SignedFact }).invocation.payload,
+               ) as ExecutionProducer.McpInvocation
+               terminalVersions.push(invocation.terminalVersion)
+               const retained = yield* f.database.db.select().from(SessionTerminalInvocationTable).all()
+               expect(retained).toHaveLength(index === 0 ? 1 : 0)
+               if (index === 0) expect(retained[0].invocation_id).toBe(invocation.invocationID)
               return f.terminal(
                 prepared.proof,
                 (request.meta[McpProvenance.RequestKey] as { invocation: ExecutionProducer.SignedFact }).invocation,
                 false,
               )
             }),
-          ).pipe(Effect.tap(() => (index === 0 ? Deferred.succeed(firstDone, undefined) : Effect.void))),
+           ),
         ),
         { concurrency: "unbounded" },
       ),
     )
     expect(result.complete).toBeTrue()
+    expect(result.observations).toHaveLength(2)
+    expect(terminalVersions).toEqual([1, undefined])
     expect(yield* f.database.db.select().from(SessionTerminalInvocationTable).all()).toHaveLength(0)
     expect(yield* SessionHistory.terminalInput(f.database.db, f.sessionID, f.inputID)).toBeFalse()
   }),
+)
+
+for (const outcome of ["terminal", "failure", "cancelled"] as const) {
+  it.live(`nested ${outcome} prevents queued MCP transport without replay`, () =>
+    Effect.gen(function* () {
+      const f = yield* fixture()
+      const prepared = yield* f.prepare()
+      const started = yield* Deferred.make<void>()
+      const release = yield* Deferred.make<void>()
+      let dispatches = 0
+      const capture = yield* NativeProducer.captureTools({
+        service: f.service,
+        signed: prepared.signed,
+        current: () => f.state.active,
+        prepareInvocation: prepared.writer.prepareInvocation,
+        completeInvocation: prepared.writer.completeInvocation,
+        observeTerminal: prepared.writer.observeTerminal,
+      })
+      const running = yield* capture.run(
+        { messageID: f.assistantMessageID, toolCallID: "nested" },
+        Effect.all([0, 1].map((index) => NativeProducer.dispatchMcp(
+          { sessionID: f.sessionID, server: "files", name: "change", args: { index } },
+          (request) => Effect.gen(function* () {
+            dispatches++
+            yield* Deferred.succeed(started, undefined)
+            yield* Deferred.await(release)
+            if (outcome === "failure") return yield* Effect.fail(new Error("Transport outcome unknown"))
+            return f.terminal(prepared.proof,
+              (request.meta[McpProvenance.RequestKey] as { invocation: ExecutionProducer.SignedFact }).invocation)
+          }),
+        ).pipe(Effect.exit)), { concurrency: "unbounded" }),
+      ).pipe(Effect.exit, Effect.forkChild)
+      yield* Deferred.await(started)
+      expect(dispatches).toBe(1)
+      if (outcome === "cancelled") yield* Fiber.interrupt(running)
+      if (outcome !== "cancelled") yield* Deferred.succeed(release, undefined)
+      const result = yield* Fiber.join(running).pipe(Effect.exit, Effect.timeout("2 seconds"))
+      expect(dispatches).toBe(1)
+      // An uncertain dispatch retains its durable fence; cancellation never replays it.
+      expect(yield* SessionHistory.terminalInput(f.database.db, f.sessionID, f.inputID)).toBeTrue()
+      if (outcome === "terminal") {
+        if (Exit.isFailure(result) || Exit.isSuccess(result.value)) throw new Error("Expected terminal control")
+        expect(NativeProducer.terminalToolResult(result.value.cause)).toBeDefined()
+      }
+    }),
+  )
+}
+
+it.live("nested calls without terminal negotiation remain parallel", () =>
+  Effect.gen(function* () {
+    const f = yield* fixture()
+    const prepared = yield* f.prepare()
+    const ready = yield* Deferred.make<void>()
+    let dispatches = 0
+    const capture = yield* NativeProducer.captureTools({
+      service: f.service, signed: prepared.signed, current: () => true,
+    })
+    const result = yield* capture.run(
+      { messageID: f.assistantMessageID, toolCallID: "parallel" },
+      Effect.all([0, 1].map(() => NativeProducer.dispatchMcp(
+        { sessionID: f.sessionID, server: "files", name: "read" },
+        (request) => Effect.gen(function* () {
+          if (++dispatches === 2) yield* Deferred.succeed(ready, undefined)
+          yield* Deferred.await(ready)
+          const invocation = (request.meta[McpProvenance.RequestKey] as { invocation: ExecutionProducer.SignedFact }).invocation
+          expect(JSON.parse(invocation.payload).terminalVersion).toBeUndefined()
+          return f.terminal(prepared.proof, invocation, false)
+        }),
+      )), { concurrency: "unbounded" }),
+    ).pipe(Effect.timeout("2 seconds"))
+    expect(dispatches).toBe(2)
+    expect(result.complete).toBeTrue()
+    expect(result.observations).toHaveLength(2)
+  }),
+)
+
+it.live("terminal-capable steps in different sessions remain parallel", () =>
+  Effect.gen(function* () {
+    const fixtures = [yield* fixture(), yield* fixture()]
+    const llm = yield* TestLLM.Test
+    const ready = yield* Deferred.make<void>()
+    let dispatches = 0
+    for (const _ of fixtures) yield* llm.push(TestLLM.complete(
+      { reason: { normalized: "tool-calls" } },
+      LLMEvent.toolCall({ id: "ordinary", name: "read", input: {} }),
+    ))
+    const steps = yield* SessionStep.make.pipe(Effect.provide(Layer.mock(Snapshot.Service)({})))
+    const model = SessionRunnerModel.resolved(
+      LanguageModel.make({ id: "fixture", provider: "fixture", route: OpenAIChat.route }),
+      { capabilities: { tools: true, input: ["text"], output: ["text"] },
+        limit: { context: 100_000, output: 1000 }, cost: [] },
+    )
+    const outcomes = yield* Effect.all(fixtures.map((f) => Effect.gen(function* () {
+      const prepared = yield* f.prepare()
+      const capture = yield* NativeProducer.captureTools({
+        service: f.service, signed: prepared.signed, current: () => true,
+        prepareInvocation: prepared.writer.prepareInvocation, completeInvocation: prepared.writer.completeInvocation,
+        observeTerminal: prepared.writer.observeTerminal,
+      })
+      return yield* steps.attempt({
+        sessionID: f.sessionID, assistantMessageID: f.assistantMessageID, agent: Agent.ID.make("build"), model,
+        contextPolicy: { version: 2 }, isLocationClosed: () => false, recoverContinuation: false,
+        recoverOverflow: Effect.succeed(false), retry: () => Effect.succeed({ retry: false as const }),
+        prepared: {
+          publication: prepared.writer, request: LLM.request({ model: model.model, prompt: "Run tools" }),
+          retry: () => Effect.void, options: {},
+          executeTool: (call) => capture.run(
+            { messageID: f.assistantMessageID, toolCallID: call.call.id },
+            NativeProducer.dispatchMcp({ sessionID: f.sessionID, server: "files", name: "read" }, (request) =>
+              Effect.gen(function* () {
+                if (++dispatches === 2) yield* Deferred.succeed(ready, undefined)
+                yield* Deferred.await(ready)
+                return f.terminal(prepared.proof,
+                  (request.meta[McpProvenance.RequestKey] as { invocation: ExecutionProducer.SignedFact }).invocation, false)
+              })),
+          ).pipe(Effect.map((item) => item.value)),
+        },
+      })
+    })), { concurrency: "unbounded" }).pipe(Effect.timeout("3 seconds"))
+    expect(dispatches).toBe(2)
+    expect(outcomes).toEqual(fixtures.map(() => SessionStep.Outcome.Completed({ needsContinuation: true })))
+  }).pipe(Effect.provide(TestLLM.testLayer())),
+)
+
+it.live("cancelling a terminal-capable step interrupts active work without executing queued calls", () =>
+  Effect.gen(function* () {
+    const f = yield* fixture()
+    const prepared = yield* f.prepare()
+    const llm = yield* TestLLM.Test
+    const started = yield* Deferred.make<void>()
+    const queued = yield* Deferred.make<void>()
+    let dispatches = 0
+    let interrupted = false
+    const capture = yield* NativeProducer.captureTools({
+      service: f.service, signed: prepared.signed, current: () => true,
+      prepareInvocation: prepared.writer.prepareInvocation, completeInvocation: prepared.writer.completeInvocation,
+      observeTerminal: prepared.writer.observeTerminal,
+    })
+    yield* llm.push(TestLLM.hangAfter(
+      LLMEvent.stepStart({ index: 0 }),
+      LLMEvent.toolCall({ id: "active", name: "change", input: {} }),
+      LLMEvent.toolCall({ id: "queued", name: "change", input: {} }),
+    ))
+    const steps = yield* SessionStep.make.pipe(Effect.provide(Layer.mock(Snapshot.Service)({})))
+    const model = SessionRunnerModel.resolved(
+      LanguageModel.make({ id: "fixture", provider: "fixture", route: OpenAIChat.route }),
+      { capabilities: { tools: true, input: ["text"], output: ["text"] },
+        limit: { context: 100_000, output: 1000 }, cost: [] },
+    )
+    const running = yield* steps.attempt({
+      sessionID: f.sessionID, assistantMessageID: f.assistantMessageID, agent: Agent.ID.make("build"), model,
+      contextPolicy: { version: 2 }, isLocationClosed: () => false, recoverContinuation: false,
+      recoverOverflow: Effect.succeed(false), retry: () => Effect.succeed({ retry: false as const }),
+      prepared: {
+        publication: {
+          ...prepared.writer,
+          prepareTool: (definition, data, source) => prepared.writer.prepareTool!(definition, data, source).pipe(
+            Effect.map((unit) => ({
+              ...unit,
+              publish: unit.publish.pipe(Effect.tap(() =>
+                definition.type === SessionEvent.Tool.Called.type &&
+                  (data as Event.Data<typeof SessionEvent.Tool.Called>).id === "queued"
+                  ? Deferred.succeed(queued, undefined) : Effect.void)),
+            })),
+          ),
+        },
+        request: LLM.request({ model: model.model, prompt: "Run tools" }), retry: () => Effect.void, options: {},
+        executeTool: (call) => capture.run(
+          { messageID: f.assistantMessageID, toolCallID: call.call.id },
+          NativeProducer.dispatchMcp({ sessionID: f.sessionID, server: "files", name: "change" }, () =>
+            Effect.sync(() => { dispatches++ }).pipe(
+              Effect.andThen(Deferred.succeed(started, undefined)), Effect.andThen(Effect.never),
+              Effect.onInterrupt(() => Effect.sync(() => { interrupted = true })),
+            )),
+        ).pipe(Effect.map((item) => item.value)),
+      },
+    }).pipe(Effect.forkChild)
+    yield* Deferred.await(started)
+    yield* Deferred.await(queued)
+    yield* Fiber.interrupt(running).pipe(Effect.timeout("2 seconds"))
+    expect(Exit.hasInterrupts(yield* Fiber.await(running))).toBeTrue()
+    expect(interrupted).toBeTrue()
+    expect(dispatches).toBe(1)
+    expect(yield* SessionHistory.terminalInput(f.database.db, f.sessionID, f.inputID)).toBeTrue()
+  }).pipe(Effect.provide(TestLLM.testLayer())),
 )
 
 it.live("terminal control wins after provider completion rejects an ordinary boundary publication", () =>
@@ -1106,12 +1329,11 @@ it.live("terminal control wins after provider completion rejects an ordinary bou
     const prepared = yield* f.prepare()
     const writer = prepared.writer
     const llm = yield* TestLLM.Test
-    const siblingStarted = yield* Deferred.make<void>()
     const mutationStarted = yield* Deferred.make<void>()
     const releaseResult = yield* Deferred.make<void>()
     let mutationCommitted = false
     let streamedDenied = false
-    let siblingStopped = false
+    let siblingExecuted = false
     let dispatches = 0
     let retries = 0
     const capture = yield* NativeProducer.captureTools({
@@ -1137,8 +1359,8 @@ it.live("terminal control wins after provider completion rejects an ordinary bou
       Stream.concat(
         Stream.fromIterable([
           LLMEvent.stepStart({ index: 0 }),
-          LLMEvent.toolCall({ id: "sibling", name: "wait", input: {} }),
           LLMEvent.toolCall({ id: "finished", name: "remove", input: {} }),
+          LLMEvent.toolCall({ id: "sibling", name: "wait", input: {} }),
         ]),
         Stream.fromEffect(Deferred.await(mutationStarted)).pipe(
           Stream.flatMap(() =>
@@ -1181,17 +1403,10 @@ it.live("terminal control wins after provider completion rejects an ordinary bou
           options: {},
           executeTool: (call) =>
             call.call.id === "sibling"
-              ? Deferred.succeed(siblingStarted, undefined).pipe(
+              ? Effect.sync(() => { siblingExecuted = true }).pipe(
                   Effect.andThen(Effect.never),
-                  Effect.onInterrupt(() =>
-                    Effect.sync(() => {
-                      siblingStopped = true
-                    }),
-                  ),
                 )
-              : Deferred.await(siblingStarted).pipe(
-                  Effect.andThen(
-                    capture.run(
+              : capture.run(
                       { messageID: f.assistantMessageID, toolCallID: call.call.id },
                       NativeProducer.dispatchMcp(
                         { sessionID: f.sessionID, server: "files", name: "remove" },
@@ -1208,8 +1423,7 @@ it.live("terminal control wins after provider completion rejects an ordinary bou
                             )
                           }),
                       ),
-                    ),
-                  ),
+                    ).pipe(
                   Effect.map((value) => value.value),
                 ),
         },
@@ -1217,7 +1431,7 @@ it.live("terminal control wins after provider completion rejects an ordinary bou
       .pipe(Effect.timeout("5 seconds"))
     expect(outcome).toEqual(SessionStep.Outcome.Completed({ needsContinuation: false }))
     expect(streamedDenied).toBeTrue()
-    expect(siblingStopped).toBeTrue()
+    expect(siblingExecuted).toBeFalse()
     expect(dispatches).toBe(1)
     expect(retries).toBe(0)
     expect(yield* llm.requests()).toHaveLength(1)
@@ -1342,7 +1556,7 @@ for (const native of [false, true]) {
   )
 }
 
-it.live("terminal settles a sibling whose ordinary result publication was denied", () =>
+it.live("denied ordinary result publication stops queued terminal execution without replay", () =>
   Effect.gen(function* () {
     const f = yield* fixture()
     const prepared = yield* f.prepare()
@@ -1438,9 +1652,11 @@ it.live("terminal settles a sibling whose ordinary result publication was denied
                 ),
         },
       })
-      .pipe(Effect.timeout("5 seconds"))
-    expect(outcome).toEqual(SessionStep.Outcome.Completed({ needsContinuation: false }))
-    expect(dispatches).toBe(1)
+      .pipe(Effect.exit, Effect.timeout("5 seconds"))
+    expect(Exit.isFailure(outcome)).toBeTrue()
+    if (Exit.isSuccess(outcome)) throw new Error("Expected publication denial")
+    expect(String(Cause.squash(outcome.cause))).toContain("Ordinary result publication denied")
+    expect(dispatches).toBe(0)
     expect(retries).toBe(0)
     expect(yield* llm.requests()).toHaveLength(1)
     const events = yield* f.database.db
@@ -1450,16 +1666,12 @@ it.live("terminal settles a sibling whose ordinary result publication was denied
       .orderBy(EventTable.seq)
       .all()
       .pipe(Effect.orDie)
-    expect(events.slice(-4).map((event) => event.type)).toEqual([
-      "session.publication.committed.1",
-      "session.tool.success.2",
-      "session.tool.failed.2",
-      "session.step.ended.1",
-    ])
+    expect(events.filter((event) => event.type === "session.tool.success.2")).toHaveLength(0)
+    expect(yield* SessionHistory.terminalInput(f.database.db, f.sessionID, f.inputID)).toBeFalse()
   }).pipe(Effect.provide(TestLLM.testLayer())),
 )
 
-it.live("terminal preserves an ordinary sibling commit when its caller later fails", () =>
+it.live("an ordinary durable commit survives caller failure without starting a queued terminal mutation", () =>
   Effect.gen(function* () {
     const f = yield* fixture()
     const prepared = yield* f.prepare()
@@ -1563,7 +1775,7 @@ it.live("terminal preserves an ordinary sibling commit when its caller later fai
                 ),
         },
       })
-      .pipe(Effect.timeout("5 seconds"))
+      .pipe(Effect.exit, Effect.timeout("5 seconds"))
     const rowAfter = yield* SessionHistory.decodeMessageRow((yield* f.message())!)
     if (rowAfter.type !== "assistant") throw new Error("Missing canonical assistant")
     expect(
@@ -1571,8 +1783,8 @@ it.live("terminal preserves an ordinary sibling commit when its caller later fai
         (item) => item.type === "tool" && (item.state.status === "running" || item.state.status === "streaming"),
       ),
     ).toHaveLength(0)
-    expect(outcome).toEqual(SessionStep.Outcome.Completed({ needsContinuation: false }))
-    expect(dispatches).toBe(1)
+    expect(Exit.isFailure(outcome)).toBeTrue()
+    expect(dispatches).toBe(0)
     expect(retries).toBe(0)
     expect(yield* llm.requests()).toHaveLength(1)
     const events = yield* f.database.db
@@ -1582,11 +1794,7 @@ it.live("terminal preserves an ordinary sibling commit when its caller later fai
       .orderBy(EventTable.seq)
       .all()
       .pipe(Effect.orDie)
-    expect(events.slice(-3).map((event) => event.type)).toEqual([
-      "session.publication.committed.1",
-      "session.tool.success.2",
-      "session.step.ended.1",
-    ])
+    expect(events.filter((event) => event.type === "session.tool.success.2")).toHaveLength(1)
     const row = yield* SessionHistory.decodeMessageRow((yield* f.message())!)
     if (row.type !== "assistant") throw new Error("Missing canonical assistant")
     const sibling = row.content.find((item) => item.type === "tool" && item.id === "sibling")
@@ -1599,15 +1807,15 @@ it.live("terminal preserves an ordinary sibling commit when its caller later fai
   }).pipe(Effect.provide(TestLLM.testLayer())),
 )
 
-it.live("terminal rejects an already prepared sibling publication after verified control observation", () =>
+it.live("terminal execution waits through ordinary result publication and preserves the committed result", () =>
   Effect.gen(function* () {
     const f = yield* fixture()
     const prepared = yield* f.prepare()
     const writer = prepared.writer
     const llm = yield* TestLLM.Test
     const siblingStarted = yield* Deferred.make<void>()
-    const terminalObserved = yield* Deferred.make<void>()
-    let publicationDenied = false
+    const terminalQueued = yield* Deferred.make<void>()
+    const releasePublication = yield* Deferred.make<void>()
     let dispatches = 0
     let retries = 0
     const capture = yield* NativeProducer.captureTools({
@@ -1616,8 +1824,7 @@ it.live("terminal rejects an already prepared sibling publication after verified
       current: () => true,
       prepareInvocation: writer.prepareInvocation,
       completeInvocation: writer.completeInvocation,
-      observeTerminal: (source) =>
-        writer.observeTerminal!(source).pipe(Effect.tap(() => Deferred.succeed(terminalObserved, undefined))),
+      observeTerminal: writer.observeTerminal,
     })
     f.state.mutate = (proof) => {
       const projection = f.state.units.at(-1)?.projection
@@ -1641,7 +1848,7 @@ it.live("terminal rejects an already prepared sibling publication after verified
         cost: [],
       },
     )
-    const outcome = yield* steps
+    const running = yield* steps
       .attempt({
         sessionID: f.sessionID,
         assistantMessageID: f.assistantMessageID,
@@ -1668,18 +1875,19 @@ it.live("terminal rejects an already prepared sibling publication after verified
                   Effect.tap(() => Deferred.succeed(siblingStarted, undefined)),
                   Effect.map((unit) => ({
                     ...unit,
-                    publish: Effect.uninterruptible(
-                      Deferred.await(terminalObserved).pipe(Effect.andThen(unit.publish)),
-                    ).pipe(
-                      Effect.tapCause(() =>
-                        Effect.sync(() => {
-                          publicationDenied = true
-                        }),
-                      ),
-                    ),
+                    publish: Deferred.await(releasePublication).pipe(Effect.andThen(unit.publish)),
                   })),
                 )
-              return writer.prepareTool!(definition, data, source)
+              return writer.prepareTool!(definition, data, source).pipe(
+                Effect.map((unit) => ({
+                  ...unit,
+                  publish: unit.publish.pipe(Effect.tap(() =>
+                    definition.type === SessionEvent.Tool.Called.type &&
+                      (data as Event.Data<typeof SessionEvent.Tool.Called>).id === "finished"
+                      ? Deferred.succeed(terminalQueued, undefined) : Effect.void,
+                  )),
+                })),
+              )
             },
           },
           request: LLM.request({ model: model.model, prompt: "Run tools" }),
@@ -1695,9 +1903,13 @@ it.live("terminal rejects an already prepared sibling publication after verified
                       NativeProducer.dispatchMcp(
                         { sessionID: f.sessionID, server: "files", name: "remove" },
                         (request) =>
-                          Effect.sync(() => {
-                            dispatches++
-                            return f.terminal(
+                           Effect.gen(function* () {
+                             dispatches++
+                             const row = yield* SessionHistory.decodeMessageRow((yield* f.message())!).pipe(Effect.orDie)
+                             if (row.type !== "assistant") throw new Error("Missing assistant")
+                             expect(row.content.find((item) => item.type === "tool" && item.id === "sibling"))
+                               .toMatchObject({ state: { status: "completed" } })
+                             return f.terminal(
                               prepared.proof,
                               (request.meta[McpProvenance.RequestKey] as { invocation: ExecutionProducer.SignedFact })
                                 .invocation,
@@ -1710,7 +1922,12 @@ it.live("terminal rejects an already prepared sibling publication after verified
                 ),
         },
       })
-      .pipe(Effect.timeout("5 seconds"))
+      .pipe(Effect.forkChild)
+    yield* Deferred.await(siblingStarted).pipe(Effect.timeout("5 seconds"))
+    yield* Deferred.await(terminalQueued).pipe(Effect.timeout("5 seconds"))
+    expect(dispatches).toBe(0)
+    yield* Deferred.succeed(releasePublication, undefined)
+    const outcome = yield* Fiber.join(running).pipe(Effect.timeout("5 seconds"))
     const rowAfter = yield* SessionHistory.decodeMessageRow((yield* f.message())!)
     if (rowAfter.type !== "assistant") throw new Error("Missing canonical assistant")
     expect(
@@ -1719,7 +1936,6 @@ it.live("terminal rejects an already prepared sibling publication after verified
       ),
     ).toHaveLength(0)
     expect(outcome).toEqual(SessionStep.Outcome.Completed({ needsContinuation: false }))
-    expect(publicationDenied).toBeTrue()
     expect(dispatches).toBe(1)
     expect(retries).toBe(0)
     expect(yield* llm.requests()).toHaveLength(1)
@@ -1730,11 +1946,12 @@ it.live("terminal rejects an already prepared sibling publication after verified
       .orderBy(EventTable.seq)
       .all()
       .pipe(Effect.orDie)
-    expect(events.slice(-4).map((event) => event.type)).toEqual([
+    expect(events.slice(-3).map((event) => event.type)).toEqual([
       "session.publication.committed.1",
       "session.tool.success.2",
-      "session.tool.failed.2",
       "session.step.ended.1",
     ])
+    const success = events.filter((event) => event.type === "session.tool.success.2")
+    expect(success.map((event) => event.data.id)).toEqual(["sibling", "finished"])
   }).pipe(Effect.provide(TestLLM.testLayer())),
 )
