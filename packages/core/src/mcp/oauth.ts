@@ -18,6 +18,7 @@ import {
 import { OAuthMetadataSchema, OpenIdProviderDiscoveryMetadataSchema } from "@modelcontextprotocol/core"
 import { Cause, Deferred, Effect } from "effect"
 import { ConfigMCP } from "@opencode/schema/config/mcp"
+import { noTimeoutFetch } from "@opencode/util/no-timeout-fetch"
 import { Credential } from "../credential.js"
 import { OauthCallbackPage } from "../oauth/page.js"
 import type { Integration } from "../integration.js"
@@ -35,8 +36,9 @@ const refreshKey = (url: string | URL, init: RequestInit | undefined) => {
 }
 
 // Bun's and Node's fetch types both apply here and the SDK's FetchLike wants Bun's Response, so the
-// overload is picked by annotation and clone() is pinned to the type it was called on.
-const base: FetchLike = fetch
+// overload is picked by annotation and clone() is pinned to the type it was called on. A tool call
+// can stay silent for minutes, so Bun's idle deadline is off; the MCP execution timeout still applies.
+const base: FetchLike = noTimeoutFetch
 const share = (pending: ReturnType<FetchLike>) => pending.then((response) => response.clone() as typeof response)
 
 const send: FetchLike = (url, init) => {
