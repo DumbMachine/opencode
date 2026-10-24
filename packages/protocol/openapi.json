@@ -8876,6 +8876,16 @@
                         "type": "null"
                       }
                     ]
+                  },
+                  "evidence": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 "required": ["decision"],
@@ -16189,12 +16199,6 @@
           },
           "codemode": {
             "type": "boolean"
-          },
-          "approval_bridge": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
           },
           "timeout": {
             "type": "object",

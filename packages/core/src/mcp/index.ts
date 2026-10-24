@@ -71,7 +71,6 @@ export class RequestConnectError extends Schema.TaggedError<RequestConnectError>
 }) {}
 
 export interface ExecutionTool extends Tool {
-  readonly approvalBridge?: boolean
 }
 
 /** MCP servers that exist only for one prompt execution. */
@@ -84,6 +83,7 @@ export interface Execution {
     readonly args?: Record<string, unknown>
     readonly meta?: Readonly<Record<string, unknown>>
     readonly sessionID?: Session.ID
+    readonly permission?: McpClient.PermissionGate
   }) => Effect.Effect<ToolResult, NotFoundError | ToolCallError>
 }
 
@@ -135,6 +135,7 @@ export interface Interface extends State.Transformable<Editor> {
     readonly name: string
     readonly args?: Record<string, unknown>
     readonly sessionID?: Session.ID
+    readonly permission?: McpClient.PermissionGate
   }) => Effect.Effect<ToolResult, NotFoundError | ToolCallError>
   readonly instructions: () => Effect.Effect<ServerInstructions[]>
   readonly prompts: () => Effect.Effect<Prompt[]>
@@ -680,7 +681,6 @@ export const layer = (options?: Options) =>
                     }),
                 ),
               )
-              const bridged = new Set(config.approval_bridge ?? [])
               return {
                 server,
                 instructions: connection.instructions,
@@ -689,7 +689,6 @@ export const layer = (options?: Options) =>
                     ...tool,
                     server,
                     codemode: config.codemode,
-                    approvalBridge: bridged.has("*") || bridged.has(tool.name),
                   }),
                 ),
                 call: (input: {
@@ -697,6 +696,7 @@ export const layer = (options?: Options) =>
                   readonly args?: Record<string, unknown>
                   readonly meta?: Readonly<Record<string, unknown>>
                   readonly sessionID?: Session.ID
+    readonly permission?: McpClient.PermissionGate
                 }) =>
                   connection.callTool(input).pipe(
                     Effect.mapError(
@@ -732,6 +732,7 @@ export const layer = (options?: Options) =>
               args: input.args,
               meta: input.meta,
               sessionID: input.sessionID,
+              permission: input.permission,
             })
           },
         } satisfies Execution)

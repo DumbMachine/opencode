@@ -4254,7 +4254,6 @@ export type SessionPromptInput = {
         readonly headers?: { readonly [x: string]: string }
         readonly oauth?: false
         readonly codemode?: boolean
-        readonly approval_bridge?: ReadonlyArray<string>
         readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
       }
     }
@@ -4307,7 +4306,6 @@ export type SessionPromptInput = {
         readonly headers?: { readonly [x: string]: string }
         readonly oauth?: false
         readonly codemode?: boolean
-        readonly approval_bridge?: ReadonlyArray<string>
         readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
       }
     }
@@ -4360,7 +4358,6 @@ export type SessionPromptInput = {
         readonly headers?: { readonly [x: string]: string }
         readonly oauth?: false
         readonly codemode?: boolean
-        readonly approval_bridge?: ReadonlyArray<string>
         readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
       }
     }
@@ -4413,7 +4410,6 @@ export type SessionPromptInput = {
         readonly headers?: { readonly [x: string]: string }
         readonly oauth?: false
         readonly codemode?: boolean
-        readonly approval_bridge?: ReadonlyArray<string>
         readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
       }
     }
@@ -4466,7 +4462,6 @@ export type SessionPromptInput = {
         readonly headers?: { readonly [x: string]: string }
         readonly oauth?: false
         readonly codemode?: boolean
-        readonly approval_bridge?: ReadonlyArray<string>
         readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
       }
     }
@@ -4519,7 +4514,6 @@ export type SessionPromptInput = {
         readonly headers?: { readonly [x: string]: string }
         readonly oauth?: false
         readonly codemode?: boolean
-        readonly approval_bridge?: ReadonlyArray<string>
         readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
       }
     }
@@ -4572,7 +4566,6 @@ export type SessionPromptInput = {
         readonly headers?: { readonly [x: string]: string }
         readonly oauth?: false
         readonly codemode?: boolean
-        readonly approval_bridge?: ReadonlyArray<string>
         readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
       }
     }
@@ -4625,7 +4618,6 @@ export type SessionPromptInput = {
         readonly headers?: { readonly [x: string]: string }
         readonly oauth?: false
         readonly codemode?: boolean
-        readonly approval_bridge?: ReadonlyArray<string>
         readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
       }
     }
@@ -4678,7 +4670,6 @@ export type SessionPromptInput = {
         readonly headers?: { readonly [x: string]: string }
         readonly oauth?: false
         readonly codemode?: boolean
-        readonly approval_bridge?: ReadonlyArray<string>
         readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
       }
     }
@@ -4731,7 +4722,6 @@ export type SessionPromptInput = {
         readonly headers?: { readonly [x: string]: string }
         readonly oauth?: false
         readonly codemode?: boolean
-        readonly approval_bridge?: ReadonlyArray<string>
         readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
       }
     }
@@ -4784,7 +4774,6 @@ export type SessionPromptInput = {
         readonly headers?: { readonly [x: string]: string }
         readonly oauth?: false
         readonly codemode?: boolean
-        readonly approval_bridge?: ReadonlyArray<string>
         readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
       }
     }
@@ -4837,7 +4826,6 @@ export type SessionPromptInput = {
         readonly headers?: { readonly [x: string]: string }
         readonly oauth?: false
         readonly codemode?: boolean
-        readonly approval_bridge?: ReadonlyArray<string>
         readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
       }
     }
@@ -4896,7 +4884,6 @@ export type SessionCommandInput = {
         readonly headers?: { readonly [x: string]: string }
         readonly oauth?: false
         readonly codemode?: boolean
-        readonly approval_bridge?: ReadonlyArray<string>
         readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
       }
     }
@@ -4942,7 +4929,6 @@ export type SessionCommandInput = {
         readonly headers?: { readonly [x: string]: string }
         readonly oauth?: false
         readonly codemode?: boolean
-        readonly approval_bridge?: ReadonlyArray<string>
         readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
       }
     }
@@ -4988,7 +4974,6 @@ export type SessionCommandInput = {
         readonly headers?: { readonly [x: string]: string }
         readonly oauth?: false
         readonly codemode?: boolean
-        readonly approval_bridge?: ReadonlyArray<string>
         readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
       }
     }
@@ -5034,7 +5019,6 @@ export type SessionCommandInput = {
         readonly headers?: { readonly [x: string]: string }
         readonly oauth?: false
         readonly codemode?: boolean
-        readonly approval_bridge?: ReadonlyArray<string>
         readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
       }
     }
@@ -5080,7 +5064,6 @@ export type SessionCommandInput = {
         readonly headers?: { readonly [x: string]: string }
         readonly oauth?: false
         readonly codemode?: boolean
-        readonly approval_bridge?: ReadonlyArray<string>
         readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
       }
     }
@@ -5126,7 +5109,6 @@ export type SessionCommandInput = {
         readonly headers?: { readonly [x: string]: string }
         readonly oauth?: false
         readonly codemode?: boolean
-        readonly approval_bridge?: ReadonlyArray<string>
         readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
       }
     }
@@ -5172,7 +5154,6 @@ export type SessionCommandInput = {
         readonly headers?: { readonly [x: string]: string }
         readonly oauth?: false
         readonly codemode?: boolean
-        readonly approval_bridge?: ReadonlyArray<string>
         readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
       }
     }
@@ -5218,7 +5199,6 @@ export type SessionCommandInput = {
         readonly headers?: { readonly [x: string]: string }
         readonly oauth?: false
         readonly codemode?: boolean
-        readonly approval_bridge?: ReadonlyArray<string>
         readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
       }
     }
@@ -5264,7 +5244,6 @@ export type SessionCommandInput = {
         readonly headers?: { readonly [x: string]: string }
         readonly oauth?: false
         readonly codemode?: boolean
-        readonly approval_bridge?: ReadonlyArray<string>
         readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
       }
     }
@@ -5423,7 +5402,6 @@ export type SessionInboxRenewCapabilityInput = {
         readonly headers?: { readonly [x: string]: string }
         readonly oauth?: false
         readonly codemode?: boolean
-        readonly approval_bridge?: ReadonlyArray<string>
         readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
       }
     } | null
@@ -5453,7 +5431,6 @@ export type SessionInboxRenewCapabilityInput = {
         readonly headers?: { readonly [x: string]: string }
         readonly oauth?: false
         readonly codemode?: boolean
-        readonly approval_bridge?: ReadonlyArray<string>
         readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
       }
     } | null
@@ -5483,7 +5460,6 @@ export type SessionInboxRenewCapabilityInput = {
         readonly headers?: { readonly [x: string]: string }
         readonly oauth?: false
         readonly codemode?: boolean
-        readonly approval_bridge?: ReadonlyArray<string>
         readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
       }
     } | null
@@ -5513,7 +5489,6 @@ export type SessionInboxRenewCapabilityInput = {
         readonly headers?: { readonly [x: string]: string }
         readonly oauth?: false
         readonly codemode?: boolean
-        readonly approval_bridge?: ReadonlyArray<string>
         readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
       }
     } | null
@@ -6969,11 +6944,18 @@ export type PermissionReplyInput = {
   readonly decision: {
     readonly decision: "once" | "always" | "reject"
     readonly message?: string | undefined
+    readonly evidence?: string | undefined
   }["decision"]
   readonly message?: {
     readonly decision: "once" | "always" | "reject"
     readonly message?: string | undefined
+    readonly evidence?: string | undefined
   }["message"]
+  readonly evidence?: {
+    readonly decision: "once" | "always" | "reject"
+    readonly message?: string | undefined
+    readonly evidence?: string | undefined
+  }["evidence"]
 }
 
 export type PermissionReplyOutput = void

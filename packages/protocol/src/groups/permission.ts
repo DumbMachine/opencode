@@ -122,6 +122,7 @@ export const makePermissionGroup = <
         payload: Schema.Struct({
           decision: Permission.Reply,
           message: Schema.String.pipe(Schema.optional),
+          evidence: Schema.String.pipe(Schema.optional),
         }),
         success: HttpApiSchema.NoContent,
         error: [SessionNotFoundError, PermissionNotFoundError],

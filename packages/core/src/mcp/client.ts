@@ -90,6 +90,14 @@ export interface ElicitationHandler {
 }
 
 /** Handle over a connected MCP server that keeps the SDK `Client` out of the rest of core. */
+export const PermissionResolution = Schema.Struct({
+  id: Schema.String,
+  effect: Schema.Literals(["allow", "ask", "deny"]), action: Schema.String,
+  resources: Schema.Array(Schema.String), evidence: Schema.String,
+})
+export type PermissionResolution = typeof PermissionResolution.Type
+export type PermissionGate = (request: PermissionResolution) => Effect.Effect<string | undefined, Error>
+
 export interface Connection {
   /** True when the connection negotiated revision 2026-07-28 or later; false is the initialize handshake. */
   readonly modern: boolean
@@ -109,6 +117,7 @@ export interface Connection {
     readonly args?: Record<string, unknown>
     readonly meta?: Readonly<Record<string, unknown>>
     readonly sessionID?: Session.ID
+    readonly permission?: PermissionGate
   }) => Effect.Effect<CallToolResult, Error>
   readonly onClose: (callback: () => void) => void
   readonly onSessionExpired: (callback: () => void) => void
@@ -295,6 +304,21 @@ export const connect = Effect.fnUntraced(function* (
               { signal, timeout: execution, onprogress: () => {} },
             ),
           ),
+          input.permission ? (owned) => Effect.gen(function* () {
+            if (config.type !== "remote") return yield* Effect.fail(new Error("Permission resolution requires a remote MCP endpoint"))
+            const response = yield* request("resolve MCP permission", async (signal) => {
+              const response = await fetch(config.url.replace(/\/$/, "") + "/permission", {
+                method: "POST", headers: { ...config.headers, "Content-Type": "application/json" },
+                body: JSON.stringify({ name: owned.name, arguments: owned.args, _meta: owned.meta }),
+                signal, redirect: "error",
+              })
+              if (!response.ok) throw new Error("MCP permission resolution failed")
+              return Schema.decodeUnknownSync(PermissionResolution)(await response.json())
+            })
+            const evidence = yield* input.permission!(response)
+            if (!evidence) return yield* Effect.fail(new Error("MCP permission decision is unavailable"))
+            return { "access.dev/permission-evidence": evidence }
+          }) : undefined,
         ).pipe(Effect.map(toCallToolResult)),
       onClose: (callback) => {
         client.onclose = callback

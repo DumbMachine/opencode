@@ -18,37 +18,6 @@ import { SessionDisclosure } from "../session/disclosure.js"
 export const namespace = (server: string) => server.replace(/[^a-zA-Z0-9_-]/g, "_")
 export const name = (server: string, tool: string) => `${namespace(server)}_${tool.replace(/[^a-zA-Z0-9_-]/g, "_")}`
 
-const APPROVAL_REQUEST_META = "access.dev/approval"
-const APPROVAL_CONTINUATION_META = "access.dev/approval-continuation"
-
-interface ApprovalRequest {
-  readonly version: 1
-  readonly runId: string
-  readonly action: string
-  readonly resources: ReadonlyArray<string>
-  readonly metadata: Record<string, unknown>
-}
-
-function approvalRequest(meta: Readonly<Record<string, unknown>> | undefined): ApprovalRequest | undefined {
-  const value = meta?.[APPROVAL_REQUEST_META]
-  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined
-  const request = value as Record<string, unknown>
-  if (
-    request.version !== 1 ||
-    typeof request.runId !== "string" ||
-    request.runId.trim() === "" ||
-    typeof request.action !== "string" ||
-    request.action.trim() === "" ||
-    !Array.isArray(request.resources) ||
-    !request.resources.every((resource) => typeof resource === "string") ||
-    !request.metadata ||
-    typeof request.metadata !== "object" ||
-    Array.isArray(request.metadata)
-  )
-    return undefined
-  return request as unknown as ApprovalRequest
-}
-
 export interface Interface {
   /** Wait for the initial MCP tool registration to settle. */
   readonly flush: Effect.Effect<void>
@@ -72,7 +41,7 @@ export const layer = Layer.effect(
       const found = yield* execution.tools()
       return found.map((tool): Tool.Info => {
         const schema = (tool.inputSchema ?? {}) as JsonSchema.JsonSchema
-        const { server: _server, codemode: _codemode, approvalBridge: _approvalBridge, ...rawDefinition } = tool
+        const { server: _server, codemode: _codemode, ...rawDefinition } = tool
         return ToolProvenance.catalogDefinition(
           {
             name: tool.name,
@@ -88,7 +57,7 @@ export const layer = Layer.effect(
             execute: (input, context) =>
               Effect.gen(function* () {
                 const args = (input ?? {}) as Record<string, unknown>
-                if (!tool.approvalBridge)
+                if (tool._meta?.["access.dev/permission-gate"] !== true)
                   yield* permission.assert({
                     action: name(tool.server, tool.name),
                     resources: ["*"],
@@ -103,65 +72,24 @@ export const layer = Layer.effect(
                       id: context.id,
                     },
                   })
-                const call = (meta?: Readonly<Record<string, unknown>>) =>
-                  execution
-                    .callTool({ server: tool.server, name: tool.name, args, meta, sessionID: context.sessionID })
-                    .pipe(
-                      Effect.catchTags({
-                        "MCP.NotFoundError": (error) =>
-                          new ToolFailure({ message: `MCP server "${error.server}" is not available` }),
-                        "MCP.ToolCallError": (error) => new ToolFailure({ message: error.message }),
-                      }),
-                    )
-                let result = yield* call()
-                const seen = new Set<string>()
-                while (true) {
-                  const approval = tool.approvalBridge ? approvalRequest(result.meta) : undefined
-                  if (
-                    tool.approvalBridge &&
-                    ((result.meta && APPROVAL_REQUEST_META in result.meta && !approval) ||
-                      (result.structured &&
-                        typeof result.structured === "object" &&
-                        "kind" in result.structured &&
-                        (result.structured as { kind?: unknown }).kind === "approval_required" &&
-                        !approval))
-                  )
-                    return yield* new ToolFailure({
-                      message: "MCP approval response is missing a valid host continuation",
-                    })
-                  if (!approval) break
-                  if (seen.has(approval.runId))
-                    return yield* new ToolFailure({ message: "MCP repeated an already answered approval request" })
-                  seen.add(approval.runId)
-                  {
-                    const permissionID = Permission.ID.create()
-                    yield* permission.assert({
-                      id: permissionID,
-                      action: approval.action,
-                      resources: [...approval.resources],
-                      save: [],
-                      metadata: approval.metadata,
-                      sessionID: context.sessionID,
-                      agent: context.agent,
-                      source: {
-                        type: "tool",
-                        messageID: context.messageID,
-                        ...(context.inputID === undefined ? {} : { inputID: context.inputID }),
-                        id: context.id,
-                      },
-                    })
-                    result = yield* call({
-                      [APPROVAL_CONTINUATION_META]: {
-                        version: 1,
-                        runId: approval.runId,
-                        permissionId: permissionID,
-                        sessionId: context.sessionID,
-                        messageId: context.messageID,
-                        toolCallId: context.id,
-                      },
-                    })
-                  }
-                }
+                const result = yield* execution.callTool({
+                  server: tool.server, name: tool.name, args, sessionID: context.sessionID,
+                  ...(tool._meta?.["access.dev/permission-gate"] === true ? {
+                    permission: (request) => {
+                      if (request.effect === "deny") return new ToolFailure({ message: "Permission denied; no action was executed" })
+                      if (request.effect === "allow") return Effect.succeed(request.evidence)
+                      return permission.decide({
+                        id: Permission.ID.create(request.id), action: name(tool.server, tool.name), resources: [...request.resources], save: [], required: true,
+                        metadata: { permissionEvidence: request.evidence, tool: tool.name, request: args },
+                        sessionID: context.sessionID, agent: context.agent,
+                        source: { type: "tool", messageID: context.messageID, ...(context.inputID === undefined ? {} : { inputID: context.inputID }), id: context.id },
+                      })
+                    },
+                  } : {}),
+                }).pipe(Effect.catchTags({
+                  "MCP.NotFoundError": (error) => new ToolFailure({ message: `MCP server "${error.server}" is not available` }),
+                  "MCP.ToolCallError": (error) => new ToolFailure({ message: error.message }),
+                }))
                 if (result.isError)
                   return yield* new ToolFailure({
                     message:

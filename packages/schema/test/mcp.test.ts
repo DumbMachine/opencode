@@ -47,11 +47,13 @@ describe("request-scoped MCP", () => {
     })
   })
 
-  test("preserves request-only approval bridge selection", () => {
+  test("drops the removed request-only approval bridge selection", () => {
     const decoded = Schema.decodeUnknownSync(Mcp.RequestServers)({
       tenant: { type: "remote", url: "https://mcp.example.test", approval_bridge: ["*"] },
     })
-    expect(decoded.tenant?.approval_bridge).toEqual(["*"])
+    expect(Schema.encodeSync(Mcp.RequestServers)(decoded)).toEqual({
+      tenant: { type: "remote", url: "https://mcp.example.test" },
+    })
   })
 
   test("rejects local processes and persisted OAuth configuration", () => {

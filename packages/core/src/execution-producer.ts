@@ -830,7 +830,7 @@ export const captureTools = (input: {
 
 // Called only around the actual SDK dispatch, after mutable tool hooks and
 // validation. Own and measure exactly the arguments subsequently serialized.
-export const dispatchMcp = <A, E, R>(
+export const dispatchMcp = <A, E, R, P = never>(
   input: {
     readonly server: string
     readonly name: string
@@ -843,9 +843,11 @@ export const dispatchMcp = <A, E, R>(
     readonly args: Record<string, unknown>
     readonly meta: Readonly<Record<string, unknown>>
   }) => Effect.Effect<A, E, R>,
+  authorize?: (request: { readonly name: string; readonly args: Record<string, unknown>; readonly meta: Readonly<Record<string, unknown>> }) => Effect.Effect<Readonly<Record<string, unknown>>, P>,
 ) =>
   Effect.gen(function* () {
     const scope = Option.getOrUndefined(yield* Effect.serviceOption(ToolCapture))
+    if (!scope && authorize) return yield* Effect.die(new Error("Permission requires an authenticated input"))
     if (!scope) return yield* transport({ name: input.name, args: input.args ?? {}, meta: input.meta ?? {} })
     const dispatch = Effect.gen(function* () {
       scope.reserve()
@@ -879,11 +881,15 @@ export const dispatchMcp = <A, E, R>(
         ...(input.meta ?? {}),
         [McpProvenance.RequestKey]: { version: 1, context: scope.capture.signed, invocation: signed },
       }) as Readonly<Record<string, unknown>>
+      const consent = authorize ? yield* authorize({ name: input.name, args, meta }) : {}
+      // Waiting for a person must not age the actual invocation signature.
+      const dispatchSigned = authorize ? processSigner().mcpInvocation({ ...invocation, issuedAt: Date.now() }).signed : signed
+      const dispatchMeta = { ...meta, ...consent, [McpProvenance.RequestKey]: { version: 1, context: scope.capture.signed, invocation: dispatchSigned } }
       const intent = Object.freeze({})
-      invocationIntents.set(intent, signed)
+      invocationIntents.set(intent, dispatchSigned)
       if (invocation.terminalVersion === 1) yield* scope.prepareInvocation!(intent)
       if (!scope.valid()) return yield* Effect.die(new Error("MCP provenance authorization is unavailable"))
-      const raw = yield* transport({ name: input.name, args, meta }).pipe(
+      const raw = yield* transport({ name: input.name, args, meta: dispatchMeta }).pipe(
         Effect.tapError(() => Effect.sync(() => scope.unknown())),
       )
       if (
@@ -898,7 +904,7 @@ export const dispatchMcp = <A, E, R>(
         return raw
       }
       const verified = McpProvenance.result(scope.capture, invocation, raw)
-      scope.observe({ invocation: signed, proof: verified.proof, signed: verified.signed, snapshot: verified.snapshot })
+      scope.observe({ invocation: dispatchSigned, proof: verified.proof, signed: verified.signed, snapshot: verified.snapshot })
       if (verified.proof.mode === "terminal-control") return yield* scope.terminal!()
       if (invocation.terminalVersion === 1) yield* scope.completeInvocation!(intent)
       return verified.result

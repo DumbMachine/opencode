@@ -79,7 +79,7 @@ function assertion(input: Partial<Permission.AssertInput> = {}) {
   } satisfies Permission.AssertInput
 }
 
-function waitForRequest(input: Partial<Permission.AssertInput> = {}) {
+function waitForRequest(input: Partial<Permission.AssertInput> = {}, tolerateDecline = false) {
   return Effect.gen(function* () {
     const value = assertion(input)
     const service = yield* Permission.Service
@@ -91,7 +91,8 @@ function waitForRequest(input: Partial<Permission.AssertInput> = {}) {
       return request.id === value.id ? Deferred.succeed(asked, request).pipe(Effect.asVoid) : Effect.void
     })
     yield* Effect.addFinalizer(() => unsubscribe)
-    const fiber = yield* service.assert(value).pipe(Effect.forkScoped)
+    const execution = service.assert(value)
+    const fiber = yield* (tolerateDecline ? execution.pipe(Effect.exit, Effect.asVoid) : execution).pipe(Effect.forkScoped)
     const request = yield* Deferred.await(asked)
     return { service, fiber, request }
   })
@@ -707,3 +708,46 @@ describe("shell scanner permission impact", () => {
     }
   }
 })
+
+it.effect("requires host evidence even under an allow rule and cannot save that decision", () =>
+  Effect.gen(function* () {
+    yield* setup([{ action: "read", resource: "*", effect: "allow" }])
+    const { service, fiber, request } = yield* waitForRequest({ required: true })
+    expect((yield* service.list()).map(p => p.id)).toContain(request.id)
+    yield* service.reply({ requestID: request.id, reply: "once" }).pipe(Effect.flip)
+    yield* service.reply({ requestID: request.id, reply: "always", evidence: "host-decision" }).pipe(Effect.flip)
+    expect(yield* service.get(request.id)).toBeDefined()
+    yield* service.reply({ requestID: request.id, reply: "once", evidence: "host-decision" })
+    yield* Fiber.join(fiber)
+    expect(yield* service.get(request.id)).toBeUndefined()
+  }),
+)
+
+it.effect("returns host decision evidence on the original waiter", () =>
+  Effect.gen(function* () {
+    yield* setup([])
+    const service = yield* Permission.Service
+    const bus = yield* Bus.Service
+    const asked = yield* Deferred.make<void>()
+    const unsubscribe = yield* bus.listen(event => event.type === Permission.Event.Asked.type ? Deferred.succeed(asked, undefined).pipe(Effect.asVoid) : Effect.void)
+    yield* Effect.addFinalizer(() => unsubscribe)
+    const fiber = yield* service.decide(assertion({ required: true })).pipe(Effect.forkScoped)
+    yield* Deferred.await(asked)
+    yield* service.reply({ requestID: Permission.ID.create("per_test"), reply: "once", evidence: "exact-call-decision" })
+    expect(yield* Fiber.join(fiber)).toBe("exact-call-decision")
+    yield* service.reply({ requestID: Permission.ID.create("per_test"), reply: "once", evidence: "exact-call-decision" }).pipe(Effect.flip)
+  }),
+)
+
+it.effect("denying one required gate leaves another tool's permission intact", () =>
+  Effect.gen(function* () {
+    yield* setup([])
+    const first = yield* waitForRequest({ required: true, id: Permission.ID.create("per_first") }, true)
+    const second = yield* waitForRequest({ required: true, id: Permission.ID.create("per_second") })
+    yield* first.service.reply({ requestID: first.request.id, reply: "reject" })
+    yield* Fiber.join(first.fiber)
+    expect(yield* second.service.get(second.request.id)).toBeDefined()
+    yield* second.service.reply({ requestID: second.request.id, reply: "once", evidence: "second-only" })
+    yield* Fiber.join(second.fiber)
+  }),
+)

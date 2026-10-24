@@ -43,6 +43,7 @@ export const AssertInput = Schema.Struct({
   id: ID.pipe(Schema.optional),
   ...RequestFields,
   agent: Agent.ID.pipe(Schema.optional),
+  required: Schema.Boolean.pipe(Schema.optional),
 }).annotate({ identifier: "Permission.AssertInput" })
 export type AssertInput = typeof AssertInput.Type
 
@@ -50,6 +51,7 @@ export const ReplyInput = Schema.Struct({
   requestID: ID,
   reply: Reply,
   message: Schema.String.pipe(Schema.optional),
+  evidence: Schema.String.pipe(Schema.optional),
 }).annotate({ identifier: "Permission.ReplyInput" })
 export type ReplyInput = typeof ReplyInput.Type
 
@@ -104,6 +106,7 @@ export interface Interface {
   readonly close: Effect.Effect<void>
   readonly ask: (input: AssertInput) => Effect.Effect<AskResult, SessionErrors.NotFoundError>
   readonly assert: (input: AssertInput) => Effect.Effect<void, Error | SessionErrors.NotFoundError>
+  readonly decide: (input: AssertInput) => Effect.Effect<string | undefined, Error | SessionErrors.NotFoundError>
   readonly reply: (input: ReplyInput) => Effect.Effect<void, NotFoundError>
   readonly get: (id: ID) => Effect.Effect<Request | undefined>
   readonly forSession: (sessionID: SessionSchema.ID) => Effect.Effect<ReadonlyArray<Request>>
@@ -115,7 +118,8 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/Pe
 interface Pending {
   readonly request: Request
   readonly agent?: Agent.ID
-  readonly deferred: Deferred.Deferred<void, DeclinedError | CorrectedError>
+  readonly required?: boolean
+  readonly deferred: Deferred.Deferred<string | undefined, DeclinedError | CorrectedError>
 }
 
 const layer = Layer.effect(
@@ -201,11 +205,11 @@ const layer = Layer.effect(
       }
     }
 
-    const create = (request: Request, agent?: Agent.ID) =>
+    const create = (request: Request, agent?: Agent.ID, required?: boolean) =>
       Effect.uninterruptible(
         Effect.gen(function* () {
-          const deferred = yield* Deferred.make<void, DeclinedError | CorrectedError>()
-          const item = { request, agent, deferred }
+          const deferred = yield* Deferred.make<string | undefined, DeclinedError | CorrectedError>()
+          const item = { request, agent, required, deferred }
           if (closed) {
             yield* Deferred.fail(deferred, new DeclinedError())
             return item
@@ -228,7 +232,7 @@ const layer = Layer.effect(
       return { id: value.id, effect: result.effect }
     })
 
-    const assert = Effect.fn("Permission.assert")((input: AssertInput) =>
+    const decide = Effect.fn("Permission.decide")((input: AssertInput) =>
       Effect.gen(function* () {
         if (closed) return yield* Effect.die(new DeclinedError())
         const result = yield* evaluateInput(input)
@@ -242,8 +246,8 @@ const layer = Layer.effect(
                 reason: result.message,
               })
             }
-            if (result.effect === "allow") return
-            const item = yield* create(request(input, result.message), input.agent)
+            if (result.effect === "allow" && !input.required) return
+            const item = yield* create(request(input, result.message), input.agent, input.required)
             return yield* restore(Deferred.await(item.deferred)).pipe(
               // Deliberate defect tunnel: leaves wrap execution in blanket `mapError`, which
               // must not convert a user's decline into model-facing tool output. The decline
@@ -266,7 +270,8 @@ const layer = Layer.effect(
       Effect.uninterruptible(
         Effect.gen(function* () {
           const existing = pending.get(input.requestID)
-          if (!existing) return yield* new NotFoundError({ requestID: input.requestID })
+          if (!existing || (existing.required && input.reply !== "reject" && (input.reply !== "once" || !input.evidence)))
+            return yield* new NotFoundError({ requestID: input.requestID })
           yield* bus.publish(Permission.Event.Replied, {
             sessionID: existing.request.sessionID,
             requestID: existing.request.id,
@@ -279,6 +284,7 @@ const layer = Layer.effect(
               input.message ? new CorrectedError({ feedback: input.message }) : new DeclinedError(),
             )
             pending.delete(input.requestID)
+            if (existing.required) return
             for (const [id, item] of pending) {
               if (item.request.sessionID !== existing.request.sessionID) continue
               yield* bus.publish(Permission.Event.Replied, {
@@ -299,11 +305,12 @@ const layer = Layer.effect(
               resources: existing.request.save,
             })
           }
-          yield* Deferred.succeed(existing.deferred, undefined)
+          yield* Deferred.succeed(existing.deferred, input.evidence)
           pending.delete(input.requestID)
           if (input.reply !== "always" || !existing.request.save?.length) return
 
           for (const [id, item] of pending) {
+            if (item.required) continue
             const result = yield* evaluateInput({ ...item.request, agent: item.agent }).pipe(
               Effect.catchTag("Session.NotFoundError", () => Effect.undefined),
             )
@@ -332,7 +339,8 @@ const layer = Layer.effect(
       return Array.from(pending.values(), (item) => item.request).filter((request) => request.sessionID === sessionID)
     })
 
-    return Service.of({ ask, assert, reply, get, forSession, list, close })
+    const assert: Interface["assert"] = (input) => decide(input).pipe(Effect.asVoid)
+    return Service.of({ ask, assert, decide, reply, get, forSession, list, close })
   }),
 )
 
