@@ -79,7 +79,7 @@ export const layer = Layer.effect(
                       if (request.effect === "deny") return new ToolFailure({ message: "Permission denied; no action was executed" })
                       if (request.effect === "allow") return Effect.succeed(request.evidence)
                       return permission.decide({
-                        id: Permission.ID.create(request.id), action: name(tool.server, tool.name), resources: [...request.resources], save: [], required: true,
+                        id: Permission.ID.create(request.id), action: name(tool.server, tool.name), resources: [...request.resources], save: [], required: true, expiresAt: request.expiresAt,
                         metadata: { permissionEvidence: request.evidence, tool: tool.name, request: args },
                         sessionID: context.sessionID, agent: context.agent,
                         source: { type: "tool", messageID: context.messageID, ...(context.inputID === undefined ? {} : { inputID: context.inputID }), id: context.id },
@@ -111,7 +111,7 @@ export const layer = Layer.effect(
                 }
               }).pipe(
                 Effect.mapError((error) =>
-                  error instanceof ToolFailure
+                  error instanceof Permission.ExpiredError ? new ToolFailure({ message: error.message }) : error instanceof ToolFailure
                     ? error
                     : new ToolFailure({ message: `Unable to execute ${name(tool.server, tool.name)}` }),
                 ),
@@ -200,7 +200,7 @@ export const layer = Layer.effect(
                     }
                   }).pipe(
                     Effect.mapError((error) =>
-                      error instanceof ToolFailure
+                      error instanceof Permission.ExpiredError ? new ToolFailure({ message: error.message }) : error instanceof ToolFailure
                         ? error
                         : new ToolFailure({ message: `Unable to execute ${name(tool.server, tool.name)}` }),
                     ),

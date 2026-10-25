@@ -1,7 +1,7 @@
 export * as Permission from "./permission.js"
 
 import { makeLocationNode } from "@opencode/util/effect/app-node"
-import { Context, Deferred, Effect, Layer, Schema } from "effect"
+import { Clock, Context, Deferred, Effect, Layer, Schema } from "effect"
 import { Permission } from "@opencode/schema/permission"
 import { Bus } from "./bus.js"
 import { Location } from "./location.js"
@@ -44,6 +44,7 @@ export const AssertInput = Schema.Struct({
   ...RequestFields,
   agent: Agent.ID.pipe(Schema.optional),
   required: Schema.Boolean.pipe(Schema.optional),
+  expiresAt: Schema.Number.pipe(Schema.optional),
 }).annotate({ identifier: "Permission.AssertInput" })
 export type AssertInput = typeof AssertInput.Type
 
@@ -65,6 +66,12 @@ export { Event } from "@opencode/schema/permission"
 
 export class DeclinedError extends Schema.TaggedError<DeclinedError>()("Permission.DeclinedError", {}) {}
 
+export class ExpiredError extends Schema.TaggedError<ExpiredError>()("Permission.ExpiredError", {}) {
+  override get message() {
+    return "Permission request expired; no action was executed."
+  }
+}
+
 export class CorrectedError extends Schema.TaggedError<CorrectedError>()("Permission.CorrectedError", {
   feedback: Schema.String,
 }) {}
@@ -84,7 +91,7 @@ export class NotFoundError extends Schema.TaggedError<NotFoundError>()("Permissi
   requestID: ID,
 }) {}
 
-export type Error = BlockedError | CorrectedError
+export type Error = BlockedError | CorrectedError | ExpiredError
 
 export function evaluate(action: string, resource: string, ...rulesets: Permission.Ruleset[]): Permission.Rule {
   return (
@@ -119,7 +126,8 @@ interface Pending {
   readonly request: Request
   readonly agent?: Agent.ID
   readonly required?: boolean
-  readonly deferred: Deferred.Deferred<string | undefined, DeclinedError | CorrectedError>
+  readonly expiresAt?: number
+  readonly deferred: Deferred.Deferred<string | undefined, DeclinedError | CorrectedError | ExpiredError>
 }
 
 const layer = Layer.effect(
@@ -205,11 +213,11 @@ const layer = Layer.effect(
       }
     }
 
-    const create = (request: Request, agent?: Agent.ID, required?: boolean) =>
+    const create = (request: Request, agent?: Agent.ID, required?: boolean, expiresAt?: number) =>
       Effect.uninterruptible(
         Effect.gen(function* () {
-          const deferred = yield* Deferred.make<string | undefined, DeclinedError | CorrectedError>()
-          const item = { request, agent, required, deferred }
+          const deferred = yield* Deferred.make<string | undefined, DeclinedError | CorrectedError | ExpiredError>()
+          const item = { request, agent, required, expiresAt, deferred }
           if (closed) {
             yield* Deferred.fail(deferred, new DeclinedError())
             return item
@@ -232,6 +240,15 @@ const layer = Layer.effect(
       return { id: value.id, effect: result.effect }
     })
 
+    const expire = (item: Pending) => Effect.uninterruptible(Effect.gen(function* () {
+      if (pending.get(item.request.id) !== item) return
+      pending.delete(item.request.id)
+      yield* bus.publish(Permission.Event.Replied, {
+        sessionID: item.request.sessionID, requestID: item.request.id, reply: "reject",
+      })
+      yield* Deferred.fail(item.deferred, new ExpiredError())
+    }))
+
     const decide = Effect.fn("Permission.decide")((input: AssertInput) =>
       Effect.gen(function* () {
         if (closed) return yield* Effect.die(new DeclinedError())
@@ -247,8 +264,11 @@ const layer = Layer.effect(
               })
             }
             if (result.effect === "allow" && !input.required) return
-            const item = yield* create(request(input, result.message), input.agent, input.required)
-            return yield* restore(Deferred.await(item.deferred)).pipe(
+            const item = yield* create(request(input, result.message), input.agent, input.required, input.expiresAt)
+            const waiting = Deferred.await(item.deferred)
+            const deadline = input.expiresAt === undefined ? undefined : Math.max(0, input.expiresAt - (yield* Clock.currentTimeMillis))
+            const expiration = deadline === undefined ? waiting : Effect.sleep(deadline).pipe(Effect.andThen(expire(item)), Effect.andThen(waiting))
+            return yield* restore(deadline === undefined ? waiting : Effect.raceFirst(waiting, expiration)).pipe(
               // Deliberate defect tunnel: leaves wrap execution in blanket `mapError`, which
               // must not convert a user's decline into model-facing tool output. The decline
               // resurfaces as a typed failure at SessionModelRequest.executeTool. A decline
@@ -270,6 +290,10 @@ const layer = Layer.effect(
       Effect.uninterruptible(
         Effect.gen(function* () {
           const existing = pending.get(input.requestID)
+          if (existing?.expiresAt !== undefined && existing.expiresAt <= (yield* Clock.currentTimeMillis)) {
+            yield* expire(existing)
+            return yield* new NotFoundError({ requestID: input.requestID })
+          }
           if (!existing || (existing.required && input.reply !== "reject" && (input.reply !== "once" || !input.evidence)))
             return yield* new NotFoundError({ requestID: input.requestID })
           yield* bus.publish(Permission.Event.Replied, {

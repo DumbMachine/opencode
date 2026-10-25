@@ -1,5 +1,6 @@
 import { describe, expect } from "bun:test"
-import { Cause, Deferred, Effect, Fiber, Layer } from "effect"
+import { Cause, Clock, Deferred, Effect, Fiber, Layer } from "effect"
+import { TestClock } from "effect/testing"
 import { Agent } from "@opencode/core/agent"
 import { Database } from "@opencode/core/database/database"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
@@ -749,5 +750,47 @@ it.effect("denying one required gate leaves another tool's permission intact", (
     expect(yield* second.service.get(second.request.id)).toBeDefined()
     yield* second.service.reply({ requestID: second.request.id, reply: "once", evidence: "second-only" })
     yield* Fiber.join(second.fiber)
+  }),
+)
+
+
+it.effect("expires the exact required waiter without executing or granting consent", () =>
+  Effect.gen(function* () {
+    yield* setup([{ action: "read", resource: "*", effect: "allow" }])
+    const service = yield* Permission.Service
+    const bus = yield* Bus.Service
+    const asked = yield* Deferred.make<void>()
+    const replies: string[] = []
+    const unsubscribe = yield* bus.listen(event => {
+      if (event.type === Permission.Event.Asked.type) return Deferred.succeed(asked, undefined).pipe(Effect.asVoid)
+      if (event.type === Permission.Event.Replied.type) replies.push((event.data as { reply: string }).reply)
+      return Effect.void
+    })
+    yield* Effect.addFinalizer(() => unsubscribe)
+    const now = yield* Clock.currentTimeMillis
+    const fiber = yield* service.decide(assertion({ required: true, expiresAt: now + 1000 })).pipe(Effect.flip, Effect.forkScoped)
+    yield* Deferred.await(asked)
+    yield* TestClock.adjust("1 second")
+    expect(yield* Fiber.join(fiber)).toBeInstanceOf(Permission.ExpiredError)
+    expect(yield* service.list()).toEqual([])
+    expect(replies).toEqual(["reject"])
+    const late = yield* service.reply({ requestID: Permission.ID.create("per_test"), reply: "once", evidence: "late" }).pipe(Effect.flip)
+    expect(late).toBeInstanceOf(Permission.NotFoundError)
+  }),
+)
+
+it.effect("approval before the deadline cancels expiry and preserves another ask", () =>
+  Effect.gen(function* () {
+    yield* setup([])
+    const now = yield* Clock.currentTimeMillis
+    const first = yield* waitForRequest({ required: true, expiresAt: now + 1000 })
+    const second = yield* waitForRequest({ required: true, id: Permission.ID.create("per_other") })
+    yield* first.service.reply({ requestID: first.request.id, reply: "once", evidence: "on-time" })
+    yield* Fiber.join(first.fiber)
+    yield* TestClock.adjust("2 seconds")
+    expect(yield* second.service.get(second.request.id)).toBeDefined()
+    yield* second.service.reply({ requestID: second.request.id, reply: "once", evidence: "other" })
+    yield* Fiber.join(second.fiber)
+    expect(yield* first.service.list()).toEqual([])
   }),
 )

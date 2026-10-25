@@ -2533,6 +2533,30 @@ it.effect("waits for permission before calling an MCP tool", () =>
   }),
 )
 
+it.effect("does not dispatch an MCP operation after its permission expires", () =>
+  Effect.gen(function* () {
+    calls = 0
+    assertion = yield* Deferred.make<Permission.AssertInput>()
+    decision = Effect.fail(new Permission.ExpiredError())
+    const registry = yield* Tool.Service
+    const registration = yield* McpTool.Service
+    yield* registration.flush
+    const toolSet = yield* registry.snapshot()
+    const execution = yield* toolSet.execute({
+      sessionID: Session.ID.make("ses_mcp_expired"),
+      ...toolIdentity,
+      call: {
+        type: "tool-call",
+        id: "call_mcp_expired",
+        name: "execute",
+        input: { code: "return await tools.demo.search({})" },
+      },
+    })
+    expect(execution.metadata).toMatchObject({ error: true })
+    expect(calls).toBe(0)
+  }),
+)
+
 it.effect("does not call MCP when permission is blocked", () =>
   Effect.gen(function* () {
     calls = 0

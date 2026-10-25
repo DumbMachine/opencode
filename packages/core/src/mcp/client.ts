@@ -93,7 +93,7 @@ export interface ElicitationHandler {
 export const PermissionResolution = Schema.Struct({
   id: Schema.String,
   effect: Schema.Literals(["allow", "ask", "deny"]), action: Schema.String,
-  resources: Schema.Array(Schema.String), evidence: Schema.String,
+  resources: Schema.Array(Schema.String), evidence: Schema.String, expiresAt: Schema.Number,
 })
 export type PermissionResolution = typeof PermissionResolution.Type
 export type PermissionGate = (request: PermissionResolution) => Effect.Effect<string | undefined, Error>
