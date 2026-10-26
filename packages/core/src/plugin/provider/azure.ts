@@ -180,8 +180,8 @@ export const AzurePlugin = define({
       Effect.forkScoped({ startImmediately: true }),
     )
 
-    // Entra bearer tokens are minted per request from the target URL's scope, so they are injected
-    // at the transport hooks rather than stored as a credential.
+    // Resolve Entra authentication before the request is measured. Protected
+    // requests must not install transport hooks that can rewrite attested bytes.
     const bearer = Effect.fn("AzurePlugin.bearer")(function* (url: string) {
       const connection = yield* ctx.integration.connection.active(Provider.ID.azure)
       const credential = connection
@@ -197,25 +197,11 @@ export const AzurePlugin = define({
       return `Bearer ${current.access}`
     })
     yield* ctx.session.hook(
-      "http.request",
+      "model.request",
       (evt) =>
         Effect.gen(function* () {
-          if (evt.model.providerID !== Provider.ID.azure) return
-          const authorization = yield* bearer(evt.request.url)
-          if (!authorization) return
-          evt.request.headers.delete("api-key")
-          evt.request.headers.delete("x-api-key")
-          evt.request.headers.set("authorization", authorization)
-          evt.request.headers.set("user-agent", App.useragent(ctx.app))
-        }),
-      { providerID: Provider.ID.azure },
-    )
-    yield* ctx.session.hook(
-      "experimental.ws.handshake",
-      (evt) =>
-        Effect.gen(function* () {
-          if (evt.model.providerID !== Provider.ID.azure) return
-          const authorization = yield* bearer(evt.url)
+          if (evt.model.providerID !== Provider.ID.azure || !evt.baseURL) return
+          const authorization = yield* bearer(evt.baseURL)
           if (!authorization) return
           delete evt.headers["api-key"]
           delete evt.headers["x-api-key"]

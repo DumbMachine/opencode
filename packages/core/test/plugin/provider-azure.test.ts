@@ -101,6 +101,26 @@ const azureCredential = Effect.gen(function* () {
   })
 })
 describe("AzurePlugin", () => {
+  it.effect("keeps API-key requests free of transport rewrites", () =>
+    Effect.gen(function* () {
+      yield* addPlugin()
+      const hooks = yield* PluginHooks.Service
+      for (const hook of ["http.request", "experimental.ws.handshake"] as const)
+        expect(yield* hooks.has("session", hook, Provider.ID.azure)).toBe(false)
+      for (const url of ["https://first.openai.azure.com/openai/v1", "https://second.openai.azure.com/openai/v1"]) {
+        const prepared = yield* hooks.trigger("session", "model.request", {
+          sessionID: Session.ID.make("ses_azure_key"),
+          agent: Agent.ID.make("build"),
+          model: Model.Ref.make({ providerID: Provider.ID.azure, id: Model.ID.make("gpt-5-mini") }),
+          kind: "primary",
+          baseURL: url,
+          headers: { "api-key": "configured-key", "x-keep": "yes" },
+        })
+        expect(prepared.headers).toEqual({ "api-key": "configured-key", "x-keep": "yes" })
+      }
+    }),
+  )
+
   it.effect("registers a resource name form when the environment does not provide one", () =>
     withEnv({ AZURE_RESOURCE_NAME: undefined, AZURE_COGNITIVE_SERVICES_RESOURCE_NAME: undefined }, () =>
       Effect.gen(function* () {
@@ -275,46 +295,27 @@ describe("AzurePlugin", () => {
           yield* addPlugin()
           const hooks = yield* PluginHooks.Service
           const model = Model.Ref.make({ providerID: Provider.ID.azure, id: Model.ID.make("gpt-5-mini") })
-          const azure = yield* hooks.trigger("session", "http.request", {
-            sessionID: Session.ID.make("ses_azure"),
-            agent: Agent.ID.make("build"),
-            model,
-            kind: "primary",
-            request: new Request("https://test-resource.openai.azure.com/openai/v1/responses", {
-              headers: { "api-key": "stored-token", "x-keep": "yes" },
-            }),
-          })
-          expect(azure.request.headers.get("authorization")).toBe(
-            "Bearer https://cognitiveservices.azure.com/.default-token",
-          )
-          expect(azure.request.headers.has("api-key")).toBe(false)
-          expect(azure.request.headers.get("x-keep")).toBe("yes")
-
-          const foundry = yield* hooks.trigger("session", "http.request", {
-            sessionID: Session.ID.make("ses_foundry"),
-            agent: Agent.ID.make("build"),
-            model,
-            kind: "primary",
-            request: new Request("https://test-resource.services.ai.azure.com/anthropic/v1/messages", {
-              headers: { "x-api-key": "stored-token" },
-            }),
-          })
-          expect(foundry.request.headers.get("authorization")).toBe("Bearer https://ai.azure.com/.default-token")
-          expect(foundry.request.headers.has("x-api-key")).toBe(false)
-
-          const handshake = yield* hooks.trigger("session", "experimental.ws.handshake", {
-            sessionID: Session.ID.make("ses_azure_ws"),
-            agent: Agent.ID.make("build"),
-            model,
-            kind: "primary",
-            url: "wss://test-resource.openai.azure.com/openai/v1/responses",
-            headers: { "api-key": "stored-token", "x-keep": "yes" },
-          })
-          expect(handshake.headers).toMatchObject({
-            authorization: "Bearer https://cognitiveservices.azure.com/.default-token",
-            "x-keep": "yes",
-          })
-          expect(handshake.headers).not.toHaveProperty("api-key")
+          for (const hook of ["http.request", "experimental.ws.handshake"] as const)
+            expect(yield* hooks.has("session", hook, Provider.ID.azure)).toBe(false)
+          for (const target of [
+            { url: "https://test-resource.openai.azure.com/openai/v1", scope: "https://cognitiveservices.azure.com/.default" },
+            { url: "https://other-resource.openai.azure.com/openai/v1", scope: "https://cognitiveservices.azure.com/.default" },
+            { url: "https://test-resource.services.ai.azure.com/anthropic/v1", scope: "https://ai.azure.com/.default" },
+            { url: "https://test-resource.services.ai.azure.com/models", scope: "https://cognitiveservices.azure.com/.default" },
+          ]) {
+            const prepared = yield* hooks.trigger("session", "model.request", {
+              sessionID: Session.ID.make("ses_azure"),
+              agent: Agent.ID.make("build"),
+              model,
+              kind: "primary",
+              baseURL: target.url,
+              headers: { "api-key": "stored-token", "x-api-key": "stored-token", "x-keep": "yes" },
+            })
+            expect(prepared.headers.authorization).toBe("Bearer " + target.scope + "-token")
+            expect(prepared.headers).not.toHaveProperty("api-key")
+            expect(prepared.headers).not.toHaveProperty("x-api-key")
+            expect(prepared.headers["x-keep"]).toBe("yes")
+          }
         }),
     ),
   )
