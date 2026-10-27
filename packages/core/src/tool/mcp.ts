@@ -57,35 +57,25 @@ export const layer = Layer.effect(
             execute: (input, context) =>
               Effect.gen(function* () {
                 const args = (input ?? {}) as Record<string, unknown>
-                if (tool._meta?.["access.dev/permission-gate"] !== true)
-                  yield* permission.assert({
-                    action: name(tool.server, tool.name),
-                    resources: ["*"],
-                    save: ["*"],
-                    metadata: {},
-                    sessionID: context.sessionID,
-                    agent: context.agent,
-                    source: {
-                      type: "tool",
-                      messageID: context.messageID,
-                      ...(context.inputID === undefined ? {} : { inputID: context.inputID }),
-                      id: context.id,
-                    },
-                  })
+                // Access does not preflight tools/call. OpenCode's own rule is
+                // the only client check, and interactive Access tools are allowed.
+                // Role admission happens inside the tool handler.
+                yield* permission.assert({
+                  action: name(tool.server, tool.name),
+                  resources: ["*"],
+                  save: ["*"],
+                  metadata: {},
+                  sessionID: context.sessionID,
+                  agent: context.agent,
+                  source: {
+                    type: "tool",
+                    messageID: context.messageID,
+                    ...(context.inputID === undefined ? {} : { inputID: context.inputID }),
+                    id: context.id,
+                  },
+                })
                 const result = yield* execution.callTool({
                   server: tool.server, name: tool.name, args, sessionID: context.sessionID,
-                  ...(tool._meta?.["access.dev/permission-gate"] === true ? {
-                    permission: (request) => {
-                      if (request.effect === "deny") return new ToolFailure({ message: "Permission denied; no action was executed" })
-                      if (request.effect === "allow") return Effect.succeed(request.evidence)
-                      return permission.decide({
-                        id: Permission.ID.create(request.id), action: name(tool.server, tool.name), resources: [...request.resources], save: [], required: true, expiresAt: request.expiresAt,
-                        metadata: { permissionEvidence: request.evidence, tool: tool.name, request: args },
-                        sessionID: context.sessionID, agent: context.agent,
-                        source: { type: "tool", messageID: context.messageID, ...(context.inputID === undefined ? {} : { inputID: context.inputID }), id: context.id },
-                      })
-                    },
-                  } : {}),
                 }).pipe(Effect.catchTags({
                   "MCP.NotFoundError": (error) => new ToolFailure({ message: `MCP server "${error.server}" is not available` }),
                   "MCP.ToolCallError": (error) => new ToolFailure({ message: error.message }),

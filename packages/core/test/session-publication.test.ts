@@ -49,6 +49,15 @@ describe("Exact output publication authorization", () => {
       }
     }
   })
+  test("waits for a committed host proof beyond five seconds and still validates it", async () => {
+    const fixture = publicationHost({ observe: async () => { await new Promise((resolve) => setTimeout(resolve, 5_200)) } })
+    try {
+      const prepared = await prepare(fixture)
+      const permit = await Effect.runPromise(prepared.publication!.authorize(unit))
+      expect(permit.valid()).toBe(true)
+      expect(permit.proof.threadID).toBe("thread-original")
+    } finally { fixture.server.stop(true) }
+  }, 15_000)
   const mutations: Array<[string, (p: ExecutionDisclosure.PublicationProof) => ExecutionDisclosure.PublicationProof]> =
     [
       ["purpose", (p) => ({ ...p, purpose: "other" as typeof p.purpose })],

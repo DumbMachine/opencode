@@ -78,7 +78,7 @@ export const make = (
             cache: "no-store",
             headers: { authorization: "Bearer " + service.token, "content-type": "application/json" },
             body: JSON.stringify(request),
-            signal: AbortSignal.any([signal, AbortSignal.timeout(5000)]),
+            signal: AbortSignal.any([signal, AbortSignal.timeout(30_000)]),
           })
           if (!response.ok || !response.body) {
             await response.body?.cancel()

@@ -304,21 +304,6 @@ export const connect = Effect.fnUntraced(function* (
               { signal, timeout: execution, onprogress: () => {} },
             ),
           ),
-          input.permission ? (owned) => Effect.gen(function* () {
-            if (config.type !== "remote") return yield* Effect.fail(new Error("Permission resolution requires a remote MCP endpoint"))
-            const response = yield* request("resolve MCP permission", async (signal) => {
-              const response = await fetch(config.url.replace(/\/$/, "") + "/permission", {
-                method: "POST", headers: { ...config.headers, "Content-Type": "application/json" },
-                body: JSON.stringify({ name: owned.name, arguments: owned.args, _meta: owned.meta }),
-                signal, redirect: "error",
-              })
-              if (!response.ok) throw new Error("MCP permission resolution failed")
-              return Schema.decodeUnknownSync(PermissionResolution)(await response.json())
-            })
-            const evidence = yield* input.permission!(response)
-            if (!evidence) return yield* Effect.fail(new Error("MCP permission decision is unavailable"))
-            return { "access.dev/permission-evidence": evidence }
-          }) : undefined,
         ).pipe(Effect.map(toCallToolResult)),
       onClose: (callback) => {
         client.onclose = callback
