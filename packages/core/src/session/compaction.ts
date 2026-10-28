@@ -204,12 +204,11 @@ export const layer = Layer.effect(
       const ceiling = calculateCeiling(context.model.limit, settings.buffer)
       if (trigger.reason === "auto" && !due(context, ceiling)) return { status: "skipped" }
       if (
-        context.disclosure !== undefined ||
         (context.input?.type === "user" && SessionInputRequirements.auxiliaryBlocked(context.input.capabilities)) ||
         context.messages.some(
           (message) => message.type === "user" && SessionInputRequirements.auxiliaryBlocked(message.capabilities),
         ) ||
-        (yield* SessionHistory.requiresDisclosure(db, context.session.id))
+        (yield* SessionHistory.hasUnsupportedInput(db, context.session.id))
       )
         return {
           status: "failed",

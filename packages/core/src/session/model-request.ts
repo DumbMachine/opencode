@@ -11,7 +11,7 @@ import {
   Message,
   SystemPart,
 } from "@opencode/ai"
-import { LLMClient, type StreamOptions } from "@opencode/ai/route"
+import type { StreamOptions } from "@opencode/ai/route"
 import { LayerNodePlatform } from "../effect/app-node-platform.js"
 import type {
   SessionCompaction,
@@ -24,7 +24,7 @@ import type {
 import type { Agent } from "@opencode/schema/agent"
 import type { Model } from "@opencode/schema/model"
 import type { Content } from "@opencode/schema/tool"
-import { Cause, Context, Effect, Layer, Option, Result, Stream } from "effect"
+import { Cause, Context, Effect, Layer, Result, Stream } from "effect"
 import { HttpClientRequest, HttpClientResponse } from "effect/unstable/http"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { App } from "../app.js"
@@ -39,17 +39,12 @@ import { SessionSchema } from "./schema.js"
 import { SessionSystemPrompt } from "./system-prompt.js"
 import { toLLMMessages } from "./runner/to-llm-message.js"
 import type { SessionMessage } from "./message.js"
-import type { ExecutionDisclosure } from "@opencode/schema/execution-disclosure"
 import { SessionInlineIdentity } from "./inline-identity.js"
 import { SessionInputRequirements } from "./input-requirements.js"
-import { SessionDisclosure } from "./disclosure.js"
 import { SessionExecutionCapability } from "./execution-capability.js"
 import { SessionRunCoordinator } from "./run-coordinator.js"
-import { NativeProducer } from "../execution-producer.js"
 import { CodeModeInstructions } from "../codemode/instructions.js"
 import { CodeModeCatalog } from "../codemode/catalog.js"
-import { SessionPublicationWriter } from "./publication-writer.js"
-import type { SessionPublicationProvenance } from "./publication-provenance.js"
 import { ModelBudget } from "../model-budget.js"
 import { Bus } from "../bus.js"
 import { Database } from "../database/database.js"
@@ -93,9 +88,6 @@ export const withinInlineRequestLimit = (messages: readonly Message[]) => {
 export type ExecuteError = Tool.Error | Permission.DeclinedError | QuestionTool.CancelledError
 
 export interface Prepared<Event = SessionRequest> {
-  readonly disclosure?: Effect.Success<ReturnType<typeof SessionDisclosure.prepare>>
-  readonly assertCurrent?: Effect.Effect<void>
-  readonly publication?: SessionPublicationWriter.Writer
   readonly event: Event
   readonly request: LLMRequest
   readonly options: StreamOptions
@@ -107,16 +99,6 @@ export interface Prepared<Event = SessionRequest> {
 }
 
 export interface Input {
-  readonly disclosure?: ExecutionDisclosure.Service
-  readonly disclosureRevision?: number
-  readonly disclosureCurrent?: () => boolean
-  readonly disclosureCatalog?: NativeProducer.CatalogEvidence
-  readonly disclosureComponents?: readonly ExecutionDisclosure.Component[]
-  readonly disclosureMessages?: readonly SessionMessage.Info[]
-  readonly disclosureProvenance?: readonly {
-    readonly id: SessionMessage.ID
-    readonly state: SessionPublicationProvenance.State | null
-  }[]
   readonly session: SessionSchema.Info
   readonly agent: Agent.ID
   readonly inputID?: SessionMessage.ID
@@ -131,8 +113,6 @@ export interface Input {
 
 export const baseTranscript = (input: {
   readonly agent: Agent.Info
-  readonly contextPolicy?: SessionSchema.Info["contextPolicy"]
-  readonly compositionVersion?: ExecutionDisclosure.Service["compositionVersion"]
   readonly model: SessionRunnerModel.Resolved
   readonly tools: Tool.Snapshot
   readonly initial: string
@@ -143,36 +123,15 @@ export const baseTranscript = (input: {
   const providerMetadataKey = input.model.model.route.providerMetadataKey ?? input.model.model.provider
   return {
     providerMetadataKey,
-    system: (input.contextPolicy
-      ? [
-          input.instructions ?? "",
-          ...(input.contextPolicy.version === 2
-            ? [
-                input.tools.codeModeCatalog
-                  ? CodeModeInstructions.render(CodeModeCatalog.summarize(input.tools.codeModeCatalog))
-                  : "",
-                input.ephemeral ?? "",
-              ]
-            : []),
-        ]
-      : [
-          input.agent.system
-            ? input.agent.system
-            : SessionSystemPrompt.make(input.tools.definitions.map((tool) => tool.name)),
-          input.initial,
-          input.ephemeral ?? "",
-          input.instructions ?? "",
-        ]
-    )
+    system: [
+      input.agent.system ? input.agent.system : SessionSystemPrompt.make(input.tools.definitions.map((tool) => tool.name)),
+      input.initial,
+      input.ephemeral ?? "",
+      input.instructions ?? "",
+    ]
       .filter((part) => part.length > 0)
       .map(SystemPart.make),
-    messages: toLLMMessages(
-      input.messages,
-      input.model.ref,
-      providerMetadataKey,
-      input.compositionVersion === 3 || input.compositionVersion === 4,
-      input.compositionVersion === 4,
-    ),
+    messages: toLLMMessages(input.messages, input.model.ref, providerMetadataKey),
   }
 }
 
@@ -286,7 +245,6 @@ export const layer = Layer.effect(
     const hooks = yield* PluginHooks.Service
     const transport = yield* SessionModelTransport.Service
     const app = yield* App.Metadata
-    const client = Option.getOrUndefined(yield* Effect.serviceOption(LLMClient.Service))
     const prepare = Effect.fn("SessionModelRequest.prepare")(function* <
       S extends SessionRequest & { tools?: Definitions },
     >(
@@ -297,91 +255,10 @@ export const layer = Layer.effect(
         tools: Definitions,
       ) => Effect.Effect<{ readonly event: S; readonly invoked: number }>,
     ) {
-      const service = input.disclosure === undefined ? undefined : structuredClone(input.disclosure)
-      const requestOnly = service?.compositionVersion === 2 || service?.compositionVersion === 3
-      const toolLane = service?.compositionVersion === 4
-      const inlineIdentity = service?.compositionVersion === 3 || toolLane
-      if (requestOnly && !input.session.contextPolicy)
-        return yield* Effect.die(new Error("Execution context authorization is unavailable"))
-      if (inlineIdentity && !withinInlineRequestLimit(input.messages))
-        return yield* Effect.die(new Error("Inline media is unsupported or exceeds the 41943040 byte request limit"))
-      if (
-        (input.session.contextPolicy &&
-          (kind !== "primary" || service?.publicationVersion !== input.session.contextPolicy.version)) ||
-        (!input.session.contextPolicy && service?.publicationVersion !== undefined) ||
-        (toolLane && input.session.contextPolicy?.version !== 2)
-      )
-        return yield* Effect.die(new Error("Execution publication authorization is unavailable"))
-      if (!SessionInputRequirements.serviceSupported(service))
-        return yield* Effect.die(new Error("Execution publication authorization is unavailable"))
       const inputID = input.inputID
       const session = input.session
       const sessionID = session.id
       const model = input.model
-      // Own canonical history and its rendered positions before the first wait,
-      // including waits for ownership, hooks and the host callback.
-      const producer =
-        service?.compositionVersion !== undefined &&
-        kind === "primary" &&
-        inputID !== undefined &&
-        input.disclosureMessages
-          ? toolLane
-            ? NativeProducer.captureToolContext({
-                sessionID,
-                inputID,
-                model: model.ref,
-                providerMetadataKey: model.model.route.providerMetadataKey ?? model.model.provider,
-                messages: input.disclosureMessages,
-                provenance: input.disclosureProvenance ?? [],
-                catalog: input.disclosureCatalog,
-                tools: input.tools ?? {
-                  definitions: [],
-                  execute: () => new Tool.Error({ message: "Tools unavailable" }),
-                },
-                system: input.system,
-              })
-            : NativeProducer.captureContext({
-                sessionID,
-                inputID,
-                model: model.ref,
-                providerMetadataKey: model.model.route.providerMetadataKey ?? model.model.provider,
-                messages: input.disclosureMessages,
-                components: input.disclosureComponents ?? [],
-                requestOnly: requestOnly
-                  ? { provenance: input.disclosureProvenance ?? [], inlineIdentity: service?.compositionVersion === 3 }
-                  : undefined,
-              })
-          : undefined
-      const revision = input.disclosureRevision
-      const earlier = input.disclosureCurrent
-      const owner =
-        service === undefined
-          ? undefined
-          : Option.getOrUndefined(yield* Effect.serviceOption(SessionRunCoordinator.Ownership))
-      if (
-        service !== undefined &&
-        (kind !== "primary" || inputID === undefined || revision === undefined || !earlier || !owner)
-      )
-        return yield* Effect.die(new Error("Execution context authorization is unavailable"))
-      const installed =
-        service === undefined
-          ? undefined
-          : SessionExecutionCapability.captureSelection(sessionID, inputID!, revision!, service)
-      const current = Effect.sync(() => {
-        if (service !== undefined && (!owner!.live() || !earlier!() || !installed!()))
-          throw new Error("Execution context authorization is unavailable")
-      })
-      const publicationCapture =
-        service !== undefined &&
-        (service.compositionVersion === 1 || service.publicationVersion === 1 || service.publicationVersion === 2)
-          ? yield* SessionPublicationWriter.capturePreflight({
-              sessionID,
-              inputID: inputID!,
-              revision: revision!,
-              service,
-            })
-          : undefined
-      yield* current
       const scope = { sessionID, agent: input.agent, model: model.ref, kind }
       const tools = input.tools ?? {
         definitions: [],
@@ -411,10 +288,6 @@ export const layer = Layer.effect(
       const providerOptions = Object.fromEntries(entries.filter(([k]) => !GENERATION_KEYS.has(k)))
       const affinity = session.parentID ?? session.fork?.sessionID ?? session.id
       const supported = unsupportedParts(shaped.messages, model.capabilities)
-      // Inline identity cannot endorse replacement text or drop earlier images.
-      // Preserve the actual renderer bytes and reject unsupported modalities.
-      if (inlineIdentity && SessionDisclosure.digest(supported) !== SessionDisclosure.digest(shaped.messages))
-        return yield* Effect.die(new Error("Execution context provenance is unavailable"))
       const base = LLM.request({
         model: model.model,
         http: {
@@ -431,7 +304,7 @@ export const layer = Layer.effect(
         // TODO: Persist cache lineage so nested forks reuse the root session's cache key.
         promptCacheKey: /^ses_[0-9a-f]{64}$/.test(affinity) ? affinity.slice(4) : affinity,
         system: shaped.system,
-        messages: inlineIdentity ? shaped.messages : boundImages(supported),
+        messages: boundImages(supported),
         tools: Array.from(hooked, ([name, t]) => ({ ...t, name })),
         toolChoice: input.toolChoice,
         generation: Object.keys(generation).length === 0 ? undefined : generation,
@@ -439,8 +312,6 @@ export const layer = Layer.effect(
       })
 
       const baseURL = base.model.route.endpoint.baseURL
-      if (requestOnly && (yield* hooks.has("session", "model.request", model.ref.providerID)))
-        return yield* Effect.die(new Error("Execution context authorization is unavailable"))
       const modelObservation = yield* hooks.triggerObserved("session", "model.request", {
         ...scope,
         baseURL: typeof baseURL === "string" ? baseURL : undefined,
@@ -467,14 +338,7 @@ export const layer = Layer.effect(
           query: base.http?.query,
         }),
       })
-      const bounded = client?.prepareRequest ? yield* client.prepareRequest(routed).pipe(Effect.orDie) : routed
-      const request =
-        service === undefined
-          ? bounded
-          : yield* Effect.try({
-              try: () => SessionDisclosure.snapshot(bounded),
-              catch: () => new Error("Execution context authorization is unavailable"),
-            }).pipe(Effect.orDie)
+      const request = routed
       if (modelHook.providerCostCovered) ModelBudget.coverProviderCost(request, modelHook.providerCostCovered.baseURL)
       // History selects native windows against the catalog route before hooks run. A newly installed
       // routing hook must not send an existing opaque window to another deployment; `prepare` has no
@@ -521,163 +385,46 @@ export const layer = Layer.effect(
               return HttpClientResponse.fromWeb(sent, after.response)
             }).pipe(Effect.mapError((cause) => (cause instanceof Error ? cause : new Error(String(cause)))))
         : undefined
-      // Untracked transport hooks can replace attested bytes after this seam.
-      // Until they carry lineage, a required disclosure request cannot use them.
+      // Subscription billing measures the exact bytes; transport hooks could rewrite them.
       const hasWebSocketHooks =
-        (service !== undefined || modelHook.providerCostCovered !== undefined) &&
+        modelHook.providerCostCovered !== undefined &&
         ((yield* hooks.has("session", "experimental.ws.send", model.ref.providerID)) ||
           (yield* hooks.has("session", "experimental.ws.receive", model.ref.providerID)) ||
           (yield* hooks.has("session", "experimental.ws.handshake", model.ref.providerID)))
       if (modelHook.providerCostCovered && (hasHttpHooks || hasWebSocketHooks))
         return yield* Effect.die(new Error("Subscription billing does not support transport request rewrites"))
-      if (service !== undefined && (hasHttpHooks || hasWebSocketHooks || inputID === undefined || kind !== "primary"))
-        return yield* Effect.die(new Error("Execution context authorization is unavailable"))
-      const disclosure =
-        service === undefined
-          ? undefined
-          : yield* Effect.gen(function* () {
-              const contextDigest = SessionDisclosure.digest(SessionDisclosure.logicalContext(request))
-              yield* current
-              const extra = [
-                {
-                  kind: "tools" as const,
-                  id: "advertised-definitions",
-                  revision: SessionDisclosure.digest(request.tools),
-                },
-                { kind: "prepared-context" as const, id: "logical-request", revision: contextDigest },
-              ]
-              const observed = producer
-                ? yield* producer.observe(
-                    request,
-                    shapedObservation.invoked +
-                      (toolLane ? (modelObservation.untracked ?? modelObservation.invoked) : modelObservation.invoked),
-                    extra,
-                  )
-                : undefined
-              if (requestOnly && observed === undefined)
-                return yield* Effect.die(new Error("Execution context provenance is unavailable"))
-              const exact =
-                observed ??
-                SessionDisclosure.makeRequest({
-                  sessionID,
-                  inputID: inputID!,
-                  kind,
-                  contextDigest,
-                  components: [...(input.disclosureComponents ?? []), ...extra],
-                })
-              const prepared = publicationCapture
-                ? { ...(yield* publicationCapture.prepareRequest(exact)), publication: undefined }
-                : { ...(yield* SessionDisclosure.prepareRequest(service!, exact)), writer: undefined }
-              yield* current
-              return prepared
-            })
-      if (requestOnly && !disclosure?.proof.complete)
-        return yield* Effect.die(new Error("Execution context provenance is unavailable"))
-      if (input.session.contextPolicy && !disclosure?.writer)
-        return yield* Effect.die(new Error("Execution publication authorization is unavailable"))
-      const transportNames = [
-        "http.request",
-        "http.response",
-        "experimental.ws.handshake",
-        "experimental.ws.send",
-        "experimental.ws.receive",
-      ] as const
-      const transportCurrent = Effect.gen(function* () {
-        for (const name of transportNames)
-          if (yield* hooks.has("session", name, model.ref.providerID))
-            return yield* Effect.die(new Error("Execution context authorization is unavailable"))
-      })
-      const protectedTransport = <A>(name: (typeof transportNames)[number], value: A) =>
-        hooks
-          .has("session", name, model.ref.providerID)
-          .pipe(
-            Effect.flatMap((present) =>
-              present ? Effect.die(new Error("Execution context authorization is unavailable")) : Effect.succeed(value),
-            ),
-          )
-      // Capture primitive bindings independently of the returned proof object.
-      const assertedDigest =
-        disclosure === undefined ? undefined : SessionDisclosure.digest(SessionDisclosure.logicalContext(request))
-      const assertRequest =
-        assertedDigest === undefined
-          ? undefined
-          : (actual: LLMRequest) =>
-              Effect.sync(() => {
-                if (
-                  actual.http?.body ||
-                  actual.model.defaults?.http?.body ||
-                  actual.model.route.defaults.http?.body ||
-                  SessionDisclosure.digest(SessionDisclosure.logicalContext(actual)) !== assertedDigest
-                )
-                  throw new Error("Execution context authorization is unavailable")
-              })
-      const expiresAt = disclosure?.proof.expiresAt
-      const assertCurrent =
-        expiresAt === undefined
-          ? undefined
-          : current.pipe(
-              Effect.andThen(transportCurrent),
-              Effect.andThen(disclosure?.writer?.assertExecution ?? Effect.void),
-              Effect.andThen(
-                Effect.sync(() => {
-                  if (Date.now() >= expiresAt) throw new Error("Execution context authorization is unavailable")
-                }),
-              ),
-            )
       // HTTP hooks wrap every HTTP request, including the WebSocket fallback path. The route decides
       // which transport actually carries the request, so both hook families are always offered.
       const webSocket =
-        !requestOnly && input.webSocket === "session" && model.transport === "websocket"
+        input.webSocket === "session" && model.transport === "websocket"
           ? transport.bind(
               session.id,
               {
                 handshake: (connect) =>
-                  service !== undefined
-                    ? protectedTransport("experimental.ws.handshake", connect)
-                    : hooks
-                        .trigger("session", "experimental.ws.handshake", {
-                          ...scope,
-                          url: connect.url,
-                          headers: connect.headers,
-                        })
-                        .pipe(Effect.map((event) => ({ url: event.url, headers: event.headers }))),
+                  hooks
+                    .trigger("session", "experimental.ws.handshake", {
+                      ...scope,
+                      url: connect.url,
+                      headers: connect.headers,
+                    })
+                    .pipe(Effect.map((event) => ({ url: event.url, headers: event.headers }))),
                 send: (frame) =>
-                  service !== undefined
-                    ? protectedTransport("experimental.ws.send", frame)
-                    : hooks
-                        .trigger("session", "experimental.ws.send", { ...scope, frame })
-                        .pipe(Effect.map((event) => event.frame)),
+                  hooks
+                    .trigger("session", "experimental.ws.send", { ...scope, frame })
+                    .pipe(Effect.map((event) => event.frame)),
                 receive: (frame) =>
-                  service !== undefined
-                    ? protectedTransport("experimental.ws.receive", frame)
-                    : hooks
-                        .trigger("session", "experimental.ws.receive", { ...scope, frame })
-                        .pipe(Effect.map((event) => event.frame)),
+                  hooks
+                    .trigger("session", "experimental.ws.receive", { ...scope, frame })
+                    .pipe(Effect.map((event) => event.frame)),
               },
               model.chunkTimeout,
             )
           : undefined
 
-      const toolCapture =
-        toolLane && disclosure
-          ? yield* NativeProducer.captureTools({
-              service: service!,
-              signed: disclosure.signed,
-              current: () => owner!.live() && earlier!() && installed!(),
-              observeTerminal: disclosure.writer?.observeTerminal,
-              prepareInvocation: disclosure.writer?.prepareInvocation,
-              completeInvocation: disclosure.writer?.completeInvocation,
-            })
-          : undefined
       return {
         event: shaped,
-        disclosure,
-        publication: disclosure?.writer,
-        assertCurrent,
         request,
         options: {
-          ...(assertCurrent ? { beforeDispatch: assertCurrent } : {}),
-          ...(assertRequest ? { assertRequest } : {}),
           ...(http ? { http } : {}),
           ...(webSocket ? { webSocket } : {}),
         },
@@ -686,15 +433,7 @@ export const layer = Layer.effect(
         // Permission.assert and the question tool throw declines as defects so tools cannot
         // catch them and turn a "no" into model-visible output. Recover them here as failures.
         executeTool: (call: Parameters<Prepared["executeTool"]>[0]) =>
-          current.pipe(
-            Effect.andThen(() => {
-              const execute = tools.execute({ ...call, inputID, definitions: hooked })
-              const identity = { messageID: call.messageID, toolCallID: call.call.id }
-              const guarded = disclosure?.writer?.toolScope ? disclosure.writer.toolScope(execute) : execute
-              return toolCapture
-                ? toolCapture.run(identity, guarded).pipe(Effect.map((result) => result.value))
-                : execute
-            }),
+          tools.execute({ ...call, inputID, definitions: hooked }).pipe(
             Effect.catchCauseFilter(
               (cause) => {
                 const decline = cause.reasons.flatMap((r) =>
@@ -712,26 +451,12 @@ export const layer = Layer.effect(
     })
 
     const agentHook =
-      (name: "context" | "compaction" | "generate", agent: Agent.ID, requestOnly = false) =>
+      (name: "context" | "compaction" | "generate", agent: Agent.ID) =>
       (draft: SessionRequest, tools: Definitions) =>
-        requestOnly
-          ? Effect.succeed({ event: { ...draft, agent, tools }, invoked: 0 })
-          : hooks.triggerObserved("session", name, { ...draft, agent, tools })
+        hooks.triggerObserved("session", name, { ...draft, agent, tools })
 
     return Service.of({
-      primary: (input) =>
-        prepare(
-          "primary",
-          input,
-          agentHook(
-            "context",
-            input.agent,
-            !!input.session.contextPolicy &&
-              (input.disclosure?.compositionVersion === 2 ||
-                input.disclosure?.compositionVersion === 3 ||
-                input.disclosure?.compositionVersion === 4),
-          ),
-        ),
+      primary: (input) => prepare("primary", input, agentHook("context", input.agent)),
       compaction: (input) => prepare("compaction", input, agentHook("compaction", input.agent)),
       generate: (input) => prepare("generate", input, agentHook("generate", input.agent)),
       title: (input) => prepare("title", input, (draft) => hooks.triggerObserved("session", "title", draft)),

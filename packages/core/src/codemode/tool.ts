@@ -5,7 +5,6 @@ import type { Content, Context, Error, Info, Metadata, Namespace as ToolNamespac
 import { Effect, Ref, Schema, Semaphore } from "effect"
 import { definition, normalizedName } from "../tool/runtime.js"
 import { CodeModeCatalog } from "./catalog.js"
-import { NativeProducer } from "../execution-producer.js"
 import { CodeModeWeb } from "./web.js"
 
 const ExecuteFile = Schema.Struct({
@@ -157,16 +156,14 @@ function progressHooks(record: (update: (items: Array<ExecuteCall>) => Array<Exe
     "tool.after": settle,
     // Only listed extension functions get a row; anything else stays out of the TUI.
     "extension.before": (call) =>
-      NativeProducer.unknownToolSource.pipe(
-        Effect.andThen(() => {
-          switch (call.name) {
-            case "fetch":
-              return start(call, { tool: call.name, status: "running", input: CodeModeWeb.display(call.args) })
-            default:
-              return Effect.void
-          }
-        }),
-      ),
+      Effect.suspend(() => {
+        switch (call.name) {
+          case "fetch":
+            return start(call, { tool: call.name, status: "running", input: CodeModeWeb.display(call.args) })
+          default:
+            return Effect.void
+        }
+      }),
     "extension.after": settle,
   } satisfies CodeMode.Hooks
 }

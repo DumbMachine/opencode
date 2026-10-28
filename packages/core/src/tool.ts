@@ -16,8 +16,6 @@ import { SessionMessage } from "./session/message.js"
 import { SessionSchema } from "./session/schema.js"
 import { State } from "./state.js"
 import { definition, effectiveName, execute, normalizedName, normalizeContent } from "./tool/runtime.js"
-import { ToolProvenance } from "./tool/provenance.js"
-import { NativeProducer } from "./execution-producer.js"
 import { Wildcard } from "./util/wildcard.js"
 
 export { effectiveName }
@@ -125,12 +123,7 @@ const layer = Layer.effect(
       name: Name,
       event: PluginHooks.Domains["tool"][Name],
     ) =>
-      hooks.triggerObserved("tool", name, event).pipe(
-        Effect.tap((observed) =>
-          (observed.untracked ?? observed.invoked) > 0 ? NativeProducer.unknownToolSource : Effect.void,
-        ),
-        Effect.map((observed) => observed.event),
-      )
+      hooks.triggerObserved("tool", name, event).pipe(Effect.map((observed) => observed.event))
     const beforeExecute = (name: string, input: unknown, context: Tool.Context) =>
       observeHook("execute.before", {
         tool: name,
@@ -147,10 +140,6 @@ const layer = Layer.effect(
       input: unknown,
       context: Tool.Context,
     ) {
-      if (!ToolProvenance.hasResultProducer(tool)) {
-        yield* NativeProducer.requireToolBinding
-        yield* NativeProducer.unknownToolSource
-      }
       const execution = yield* execute(tool, input, context).pipe(
         Effect.map((value) => ({ value })),
         Effect.catchTag("Tool.Error", (failure) => Effect.succeed({ failure })),
@@ -255,24 +244,7 @@ const layer = Layer.effect(
 
     return Service.of({
       transform: Effect.fnUntraced(function* (callback: Parameters<Interface["transform"]>[0]) {
-        const producer = yield* ToolProvenance.registration
-        return yield* state.transform((editor) =>
-          callback(
-            producer?.definitions
-              ? {
-                  ...editor,
-                  add: (tool) => {
-                    ToolProvenance.recordDefinition(tool)
-                    editor.add(tool)
-                  },
-                  namespace: (namespace) => {
-                    ToolProvenance.recordNamespace(namespace)
-                    editor.namespace(namespace)
-                  },
-                }
-              : editor,
-          ),
-        )
+        return yield* state.transform((editor) => callback(editor))
       }),
       reload: state.reload,
       list: () => Effect.sync(() => Array.from(state.get().tools.values())),
@@ -313,11 +285,7 @@ const layer = Layer.effect(
               ? catalog.value
               : CodeModeTool.catalog(codeModeInventory)
           if (codeModeCatalog && options?.tools === undefined) catalog = { data, names, value: codeModeCatalog }
-          const complete =
-            Array.from(active.values()).every(ToolProvenance.knownDefinition) &&
-            Array.from(namespaces.values()).every(ToolProvenance.publicNamespace)
-          return ToolProvenance.recordSnapshot(
-            {
+          return {
               ...(codeModeCatalog === undefined ? {} : { codeModeCatalog }),
               definitions: [
                 ...Array.from(direct)
@@ -341,17 +309,14 @@ const layer = Layer.effect(
                   return yield* new Tool.Error({ message: `Tool is not available for this request: ${event.tool}` })
                 const name = requested?.name ?? event.tool
                 if (name === "execute" && codeModeTool)
-                  return yield* executeTool(ToolProvenance.resultProducer(codeModeTool), name, event.input, context)
+                  return yield* executeTool(codeModeTool, name, event.input, context)
                 const tool = direct.get(name)
                 if (tool) return yield* executeTool(tool, name, event.input, context)
                 return yield* new Tool.Error({
                   message: `No tool named "${name}" is currently available. Please use a tool from the available tool list.`,
                 })
               }),
-            },
-            complete,
-            Array.from(active.values()),
-          )
+          }
         }),
       ),
     })

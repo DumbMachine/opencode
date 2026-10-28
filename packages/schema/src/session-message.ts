@@ -1,7 +1,6 @@
 export * as SessionMessage from "./session-message.js"
 
 import { Schema } from "effect"
-import { ExecutionProducer } from "./execution-producer.js"
 import { SessionProviderContext } from "./session-provider-context.js"
 import { optional } from "./schema.js"
 import { Content } from "./tool.js"
@@ -67,7 +66,6 @@ export const LocationSwitched = Schema.Struct({
 export interface User extends Schema.Schema.Type<typeof User> {}
 export const User = Schema.Struct({
   ...Base,
-  preparedInput: ExecutionProducer.SignedFact.pipe(optional),
   execution: Execution.pipe(optional),
   text: Prompt.fields.text,
   files: Prompt.fields.files,

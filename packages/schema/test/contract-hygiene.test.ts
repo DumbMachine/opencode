@@ -17,9 +17,6 @@ import { Permission } from "../src/permission.js"
 import { SessionMessageID } from "../src/session-message-id.js"
 import { SessionMessage } from "../src/session-message.js"
 import { SessionInbox } from "../src/session-inbox.js"
-import { ExecutionProducer } from "../src/execution-producer.js"
-import { ExecutionDisclosure } from "../src/execution-disclosure.js"
-import { VerificationKey } from "../src/execution-verification-key.js"
 import { FileDiff } from "../src/file-diff.js"
 import { Money } from "../src/money.js"
 import { Skill } from "../src/skill.js"
@@ -370,62 +367,4 @@ test("an input execution configuration freezes complete model and agent selectio
   })
   expect(() => decode({ agent: "agent-one" })).toThrow()
   expect(() => decode({ model: { id: "model-one", providerID: "provider-one" } })).toThrow()
-})
-
-test("producer observations remain optional canonical data with bounded wire fields", () => {
-  expect(Schema.encodeSync(SessionInbox.UserPayload)({ text: "legacy", preparedInput: undefined })).toEqual({
-    text: "legacy",
-  })
-  const signed = { keyID: "key", payload: "{}", signature: "s".repeat(86) }
-  expect(
-    Schema.decodeUnknownSync(SessionInbox.UserPayload)({ text: "new", preparedInput: signed }).preparedInput,
-  ).toEqual(signed)
-  const decode = Schema.decodeUnknownSync(ExecutionProducer.SignedFact)
-  for (const invalid of [
-    { ...signed, keyID: "" },
-    { ...signed, payload: "x".repeat(4097) },
-    { ...signed, signature: "short" },
-  ])
-    expect(() => decode(invalid)).toThrow()
-  const request = Schema.decodeUnknownSync(ExecutionProducer.EnrollmentRequest)
-  expect(() => request({ version: 2, challenge: "c".repeat(43), audience: "host" })).toThrow()
-  expect(() => request({ version: 1, challenge: "c".repeat(43), audience: "x".repeat(513) })).toThrow()
-})
-
-test("composition shares the exact existing verification-key schema and never claims completeness", () => {
-  expect(ExecutionDisclosure.VerificationKey).toBe(VerificationKey)
-  expect(VerificationKey.ast.annotations?.identifier).toBe("ExecutionDisclosure.VerificationKey")
-  const request = {
-    version: 1 as const,
-    sessionID: "ses_scope",
-    inputID: "msg_scope",
-    kind: "primary" as const,
-    attempt: "attempt",
-    contextDigest: "a".repeat(64),
-    componentsDigest: "b".repeat(64),
-    components: [],
-  }
-  expect(
-    Schema.encodeSync(ExecutionDisclosure.ContextRequest)(
-      Schema.decodeUnknownSync(ExecutionDisclosure.ContextRequest)(request),
-    ),
-  ).toEqual(request)
-  const composition = {
-    version: 1,
-    purpose: "native-model-composition",
-    producerEpoch: "epoch",
-    contract: "model-plaintext-projection-v1",
-    sessionID: "ses_scope",
-    inputID: "msg_scope",
-    kind: "primary" as const,
-    attempt: "attempt",
-    contextDigest: "a".repeat(64),
-    componentsDigest: "b".repeat(64),
-    complete: false,
-    issuedAt: 1,
-  }
-  expect(Schema.decodeUnknownSync(ExecutionProducer.ModelComposition)(composition).complete).toBeFalse()
-  expect(() =>
-    Schema.decodeUnknownSync(ExecutionProducer.ModelComposition)({ ...composition, complete: true }),
-  ).toThrow()
 })

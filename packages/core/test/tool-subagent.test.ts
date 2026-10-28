@@ -35,8 +35,6 @@ import { PluginSupervisor } from "@opencode/core/plugin/supervisor"
 import { Permission } from "@opencode/core/permission"
 import { SubagentTool } from "@opencode/core/tool/plugin/subagent"
 import { Tool } from "@opencode/core/tool"
-import { ToolProvenance } from "@opencode/core/tool/provenance"
-import { NativeProducer } from "@opencode/core/execution-producer"
 import { tmpdir } from "./fixture/tmpdir"
 import { tempGlobalLayer } from "./fixture/global"
 import { offlineModels } from "./fixture/models"
@@ -200,58 +198,6 @@ const withSubagent = (location: Location.Ref) =>
   })
 
 describe("SubagentTool", () => {
-  productionIt.live("keeps compiled builtin input hooks usable for a request-bound tool", () =>
-    Effect.acquireRelease(
-      Effect.promise(() => tmpdir()),
-      (dir) => Effect.promise(() => dir[Symbol.asyncDispose]()),
-    ).pipe(
-      Effect.flatMap((dir) =>
-        Effect.gen(function* () {
-          const sessions = yield* Session.Service
-          const session = yield* sessions.create({
-            location: Location.Ref.make({ directory: AbsolutePath.make(dir.path) }),
-            model: parentModel,
-          })
-          const locations = yield* LocationServiceMap.Service
-          yield* Effect.gen(function* () {
-            const plugins = yield* Plugin.Service
-            yield* plugins.awaitActivation
-            const registry = yield* Tool.Service
-            let executions = 0
-            yield* ToolProvenance.compiled(
-              registry.transform((editor) =>
-                editor.add(
-                  ToolProvenance.resultProducer({
-                    name: "bound_lookup",
-                    options: { codemode: false },
-                    description: "Synthetic request-bound lookup",
-                    input: { type: "object", properties: {} },
-                    execute: () =>
-                      Effect.sync(() => {
-                        executions++
-                        return { content: "measured result" }
-                      }),
-                  }),
-                ),
-              ),
-              { definitions: true },
-            )
-            const snapshot = yield* registry.snapshot([])
-            expect(ToolProvenance.snapshotComplete(snapshot)).toBeTrue()
-            const result = yield* NativeProducer.managedPreparation(
-              snapshot.execute({
-                sessionID: session.id,
-                ...toolIdentity,
-                call: { type: "tool-call", id: "bound-call", name: "bound_lookup", input: {} },
-              }),
-            )
-            expect(result.content).toEqual([{ type: "text", text: "measured result" }])
-            expect(executions).toBe(1)
-          }).pipe(Effect.provide(locations.get(session.location)))
-        }),
-      ),
-    ),
-  )
   completionIt.live("admits one durable completion across live delivery and restart replay", () =>
     Effect.acquireRelease(
       Effect.promise(() => tmpdir()),

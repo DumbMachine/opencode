@@ -1,4 +1,3 @@
-import type { SessionPublicationProvenance } from "./publication-provenance.js"
 import { sqliteTable, text, integer, index, primaryKey, real, uniqueIndex } from "drizzle-orm/sqlite-core"
 import { sql } from "drizzle-orm"
 import { directoryColumn, pathColumn } from "../database/path.js"
@@ -26,7 +25,6 @@ type SessionMessageData = DistributiveOmit<(typeof SessionMessage.Info)["Encoded
 export const SessionLifecycleTable = sqliteTable("session_lifecycle", {
   id: text().$type<SessionSchema.ID>().primaryKey(),
   retired_at: integer(),
-  context_policy: text({ mode: "json" }).$type<Session.Info["contextPolicy"]>(),
 })
 
 export const SessionTable = sqliteTable(
@@ -52,7 +50,6 @@ export const SessionTable = sqliteTable(
     summary_files: integer(),
     summary_diffs: text({ mode: "json" }).$type<FileDiff.LegacyInfo[]>(),
     metadata: text({ mode: "json" }).$type<Session.Metadata>(),
-    context_policy: text({ mode: "json" }).$type<Session.Info["contextPolicy"]>(),
     cost: real().notNull().default(0),
     tokens_input: integer().notNull().default(0),
     tokens_output: integer().notNull().default(0),
@@ -98,7 +95,6 @@ export const SessionMessageTable = sqliteTable(
     type: text().$type<SessionMessage.Type>().notNull(),
     seq: integer().notNull(),
     ...Timestamps,
-    publication_provenance: text({ mode: "json" }).$type<SessionPublicationProvenance.State>(),
     data: text({ mode: "json" }).notNull().$type<SessionMessageData>(),
   },
   (table) => [
@@ -186,44 +182,3 @@ export const InstructionStateTable = sqliteTable("instruction_state", {
   initial_values: text({ mode: "json" }).notNull().$type<Instruction.Values>(),
   current_values: text({ mode: "json" }).notNull().$type<Instruction.Values>(),
 })
-
-// Private execution barrier. This is not a transcript position or source grant.
-export const SessionTerminalControlTable = sqliteTable(
-  "session_terminal_control",
-  {
-    session_id: text()
-      .$type<SessionSchema.ID>()
-      .notNull()
-      .references(() => SessionTable.id, { onDelete: "cascade" }),
-    input_id: text().$type<SessionMessage.ID>().notNull(),
-    attempt: text().notNull(),
-    message_id: text().$type<SessionMessage.ID>().notNull(),
-    tool_call_id: text().notNull(),
-    producer_epoch: text().notNull(),
-    producer_key_id: text().notNull(),
-    context_reference: text().notNull(),
-    receipt_reference: text().notNull(),
-    evidence: text().notNull(),
-    unit_id: text().$type<Event.ID>(),
-    unit_digest: text(),
-    created: integer().notNull(),
-  },
-  (table) => [primaryKey({ columns: [table.session_id, table.input_id] })],
-)
-
-// Pre-transport deny-only intent survives uncertain host completion/recorder failure.
-export const SessionTerminalInvocationTable = sqliteTable(
-  "session_terminal_invocation",
-  {
-    session_id: text()
-      .$type<SessionSchema.ID>()
-      .notNull()
-      .references(() => SessionTable.id, { onDelete: "cascade" }),
-    input_id: text().$type<SessionMessage.ID>().notNull(),
-    invocation_id: text().notNull(),
-    context_reference: text().notNull(),
-    evidence: text().notNull(),
-    created: integer().notNull(),
-  },
-  (table) => [primaryKey({ columns: [table.session_id, table.input_id, table.invocation_id] })],
-)

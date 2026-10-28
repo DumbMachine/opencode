@@ -5,8 +5,6 @@ import { HttpClientError } from "effect/unstable/http"
 import { HttpApiClient } from "effect/unstable/httpapi"
 import { ClientApi } from "../../contract"
 import type {
-  ServerEnrollProducerInput,
-  ServerEnrollProducerOutput,
   ServerInfoOutput,
   ServerPairOutput,
   ServerConnectInput,
@@ -295,18 +293,6 @@ const preserveStream =
   <E, R>(stream: Stream.Stream<A, E, R>) =>
     stream
 
-const EndpointServerEnrollProducer = (raw: RawClient["server.server"]) => (input: ServerEnrollProducerInput) =>
-  preserveEffect<ServerEnrollProducerOutput>()(
-    raw["server.enrollProducer"]({
-      payload: {
-        version: input["version"],
-        challenge: input["challenge"],
-        audience: input["audience"],
-        contracts: input["contracts"],
-      },
-    }).pipe(Effect.mapError(mapClientError)),
-  )
-
 const EndpointServerInfo = (raw: RawClient["server.server"]) => () =>
   preserveEffect<ServerInfoOutput>()(raw["server.info"]({}).pipe(Effect.mapError(mapClientError)))
 
@@ -319,7 +305,6 @@ const EndpointServerConnect = (raw: RawClient["server.server"]) => (input: Serve
   )
 
 const adaptGroupServer = (raw: RawClient["server.server"]) => ({
-  enrollProducer: EndpointServerEnrollProducer(raw),
   info: EndpointServerInfo(raw),
   pair: EndpointServerPair(raw),
   connect: EndpointServerConnect(raw),
@@ -422,7 +407,6 @@ const EndpointSessionCreate = (raw: RawClient["server.session"]) => (input?: Ses
         model: input?.["model"],
         location: input?.["location"],
         metadata: input?.["metadata"],
-        contextPolicy: input?.["contextPolicy"],
         permissions: input?.["permissions"],
       },
     }).pipe(
@@ -523,7 +507,6 @@ const EndpointSessionPrompt = (raw: RawClient["server.session"]) => (input: Sess
         files: input["files"],
         agents: input["agents"],
         skills: input["skills"],
-        disclosure: input["disclosure"],
         mcpRevision: input["mcpRevision"],
         mcp: input["mcp"],
         execution: input["execution"],
@@ -547,7 +530,6 @@ const EndpointSessionCommand = (raw: RawClient["server.session"]) => (input: Ses
         files: input["files"],
         agents: input["agents"],
         skills: input["skills"],
-        disclosure: input["disclosure"],
         mcpRevision: input["mcpRevision"],
         mcp: input["mcp"],
         delivery: input["delivery"],
@@ -670,12 +652,7 @@ const EndpointSessionInboxRenewCapability =
     preserveEffect<SessionInboxRenewCapabilityOutput>()(
       raw["session.inbox.renewCapability"]({
         params: { sessionID: input["sessionID"], inboxID: input["inboxID"] },
-        payload: {
-          mcp: input["mcp"],
-          disclosure: input["disclosure"],
-          revision: input["revision"],
-          claim: input["claim"],
-        },
+        payload: { mcp: input["mcp"], revision: input["revision"], claim: input["claim"] },
       }).pipe(Effect.mapError(mapClientError)),
     )
 

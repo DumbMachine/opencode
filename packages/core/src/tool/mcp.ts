@@ -9,8 +9,6 @@ import { Bus } from "../bus.js"
 import { Mcp } from "../mcp/index.js"
 import { Permission } from "../permission.js"
 import { Tool } from "../tool.js"
-import { ToolProvenance } from "./provenance.js"
-import { SessionDisclosure } from "../session/disclosure.js"
 
 /**
  * Registry namespace and permission action names for MCP tools.
@@ -41,9 +39,7 @@ export const layer = Layer.effect(
       const found = yield* execution.tools()
       return found.map((tool): Tool.Info => {
         const schema = (tool.inputSchema ?? {}) as JsonSchema.JsonSchema
-        const { server: _server, codemode: _codemode, ...rawDefinition } = tool
-        return ToolProvenance.catalogDefinition(
-          {
+        return {
             name: tool.name,
             options: { namespace: namespace(tool.server), codemode: tool.codemode !== false, group: "mcp" },
             description: tool.description ?? "",
@@ -106,9 +102,7 @@ export const layer = Layer.effect(
                     : new ToolFailure({ message: `Unable to execute ${name(tool.server, tool.name)}` }),
                 ),
               ),
-          },
-          { execution, server: tool.server, tool: tool.name, revision: SessionDisclosure.digest(rawDefinition) },
-        )
+          }
       })
     })
 

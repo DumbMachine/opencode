@@ -27,8 +27,6 @@ import { ProjectTable } from "../project/sql.js"
 import { SessionLifecycle } from "./lifecycle.js"
 import { NotFoundError } from "./error.js"
 import type { Event } from "@opencode/schema/event"
-import { SessionPublicationAdmission } from "./publication-admission.js"
-import { SessionPublicationProvenance } from "./publication-provenance.js"
 
 type DatabaseService = Database.Interface["db"]
 type MessageEvent = Exclude<
@@ -121,7 +119,6 @@ const projectFork = Effect.fn("SessionProjector.projectFork")(function* (
     .get()
     .pipe(Effect.orDie)
   if (!parent) return yield* Effect.die(new Error(`Fork parent session not found: ${event.data.parentID}`))
-  if (parent.context_policy) return yield* Effect.die(new Error("Session context policy does not support forks"))
   const boundary = yield* db
     .select({ seq: SessionMessageTable.seq })
     .from(SessionMessageTable)
@@ -241,14 +238,12 @@ function run(db: DatabaseService, event: MessageEvent) {
       Effect.gen(function* () {
         const encoded = encodeMessage(message)
         const { id, type, ...data } = encoded
-        const provenance = yield* SessionPublicationProvenance.next(db, event.data.sessionID, event, message)
         yield* db
           .update(SessionMessageTable)
           .set({
             type,
             time_created: DateTime.toEpochMillis(message.time.created),
             data,
-            publication_provenance: provenance,
           })
           .where(
             and(
@@ -402,7 +397,6 @@ function insertMessage(db: DatabaseService, event: SessionEvent.DurableEvent, me
   return Effect.gen(function* () {
     const encoded = encodeMessage(message)
     const { id, type, ...data } = encoded
-    const provenance = yield* SessionPublicationProvenance.next(db, event.data.sessionID, event, message)
     yield* db
       .insert(SessionMessageTable)
       .values({
@@ -412,7 +406,6 @@ function insertMessage(db: DatabaseService, event: SessionEvent.DurableEvent, me
         seq: event.durable.seq,
         time_created: DateTime.toEpochMillis(message.time.created),
         data,
-        publication_provenance: provenance,
       })
       .run()
       .pipe(Effect.orDie)
@@ -454,55 +447,21 @@ const layer = Layer.effectDiscard(
   Effect.gen(function* () {
     const bus = yield* Bus.Service
     const db = (yield* Database.Service).db
-    const metadataOnly = new Set<Event.Definition>([
-      SessionEvent.Created,
-      SessionEvent.Deleted,
-      SessionEvent.Viewed,
-      SessionEvent.UsageRecorded,
-      SessionEvent.Execution.Succeeded,
-      SessionEvent.Execution.Interrupted,
-      SessionEvent.InboxCancelled,
-      SessionEvent.InboxDeliveryChanged,
-    ])
     const project = <D extends Event.Definition>(definition: D, handler: Bus.Subscriber<D>) =>
-      bus.project(definition, (event) =>
-        Effect.gen(function* () {
-          const sessionID = (event.data as { readonly sessionID: SessionSchema.ID }).sessionID
-          if (!metadataOnly.has(definition)) yield* SessionPublicationAdmission.assert(db, sessionID, event)
-          yield* handler(event)
-        }),
-      )
+      bus.project(definition, handler)
     yield* project(SessionEvent.Created, (event) =>
       Effect.gen(function* () {
-        if (
-          event.data.contextPolicy &&
-          (!bus.persistent ||
-            event.data.parentID ||
-            event.data.metadata !== undefined ||
-            event.data.title !== undefined)
-        )
-          return yield* Effect.die(new Error("Session context policy requires an original persistent session"))
         if (event.data.parentID) {
           yield* SessionLifecycle.activate(db, event.data.parentID).pipe(Effect.orDie)
           const parent = yield* db
-            .select({ id: SessionTable.id, contextPolicy: SessionTable.context_policy })
+            .select({ id: SessionTable.id })
             .from(SessionTable)
             .where(eq(SessionTable.id, event.data.parentID))
             .get()
             .pipe(Effect.orDie)
           if (!parent) return yield* Effect.die(new NotFoundError({ sessionID: event.data.parentID }))
-          if (parent.contextPolicy)
-            return yield* Effect.die(new Error("Session context policy does not support child sessions"))
         }
         yield* SessionLifecycle.activate(db, event.data.sessionID).pipe(Effect.orDie)
-        if (event.data.contextPolicy) {
-          yield* db
-            .update(SessionLifecycleTable)
-            .set({ context_policy: event.data.contextPolicy })
-            .where(eq(SessionLifecycleTable.id, event.data.sessionID))
-            .run()
-            .pipe(Effect.orDie)
-        }
         const stored = yield* db
           .insert(SessionTable)
           .values({
@@ -517,7 +476,6 @@ const layer = Layer.effectDiscard(
             agent: event.data.agent,
             model: event.data.model,
             metadata: event.data.metadata,
-            context_policy: event.data.contextPolicy,
             permission: event.data.permissions,
             version: event.data.version,
             time_created: event.created,
@@ -528,8 +486,6 @@ const layer = Layer.effectDiscard(
           .get()
           .pipe(Effect.orDie)
         if (!stored) return yield* Effect.die(new SessionAlreadyProjected())
-        if (event.data.contextPolicy)
-          yield* InstructionState.initialize(db, event.data.sessionID, event.durable.seq, {})
       }),
     )
     yield* project(SessionEvent.Moved, (event) =>
@@ -694,7 +650,6 @@ const layer = Layer.effectDiscard(
                 id: input.id,
                 type: "user",
                 metadata: input.payload.metadata,
-                preparedInput: input.payload.preparedInput,
                 text: input.payload.text,
                 files: input.payload.files,
                 agents: input.payload.agents,

@@ -6,8 +6,6 @@ import { Command } from "@opencode/schema/command"
 import { Config } from "@opencode/schema/config"
 import { Credential } from "@opencode/schema/credential"
 import { Event } from "@opencode/schema/event"
-import { ExecutionDisclosure } from "@opencode/schema/execution-disclosure"
-import { ExecutionProducer } from "@opencode/schema/execution-producer"
 import { EventLog } from "@opencode/schema/event-log"
 import { FileDiff } from "@opencode/schema/file-diff"
 import { FileSystem } from "@opencode/schema/filesystem"
@@ -48,8 +46,6 @@ const effectTypeReferences = [
   ...namespaceTypes("Config", "@opencode/schema/config", Config),
   ...namespaceTypes("Credential", "@opencode/schema/credential", Credential),
   ...namespaceTypes("Event", "@opencode/schema/event", Event),
-  ...namespaceTypes("ExecutionDisclosure", "@opencode/schema/execution-disclosure", ExecutionDisclosure),
-  ...namespaceTypes("ExecutionProducer", "@opencode/schema/execution-producer", ExecutionProducer),
   ...namespaceTypes("EventLog", "@opencode/schema/event-log", EventLog),
   ...namespaceTypes("FileDiff", "@opencode/schema/file-diff", FileDiff),
   ...namespaceTypes("FileSystem", "@opencode/schema/filesystem", FileSystem),

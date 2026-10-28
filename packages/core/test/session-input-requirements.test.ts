@@ -55,7 +55,7 @@ it.effect("retains SQLite requirement node types and blocks malformed hidden his
           time: { created: 1 },
         })
         yield* database.db.run(sql`UPDATE session_message SET data=${data} WHERE id=${message}`).pipe(Effect.orDie)
-        expect(yield* SessionHistory.requiresDisclosure(database.db, id)).toBe(blocked)
+        expect(yield* SessionHistory.hasUnsupportedInput(database.db, id)).toBe(blocked)
       }
     }
   }),

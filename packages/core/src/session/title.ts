@@ -107,8 +107,6 @@ export const layer = Layer.effect(
     ) {
       const session = yield* store.get(sessionID)
       if (!session) return
-      if (session.contextPolicy)
-        return yield* Effect.die(new Error("Session context policy does not support title generation"))
       const firstUser = yield* SessionHistory.firstUserMessage(db, session.id)
       if (!firstUser) return
       const messages = !isUntitled(session)
@@ -119,7 +117,7 @@ export const layer = Layer.effect(
         messages?.some(
           (message) => message.type === "user" && SessionInputRequirements.auxiliaryBlocked(message.capabilities),
         ) ||
-        (yield* SessionHistory.requiresDisclosure(db, sessionID))
+        (yield* SessionHistory.hasUnsupportedInput(db, sessionID))
       )
         return yield* Effect.die(new Error("Execution context authorization is unavailable for title generation"))
       const text =

@@ -1,7 +1,6 @@
 import { describe, expect } from "bun:test"
 import path from "path"
-import { Effect, Exit } from "effect"
-import type { SessionPublicationWriter } from "@opencode/core/session/publication-writer"
+import { Effect } from "effect"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { ToolOutput } from "@opencode/core/tool-output"
@@ -155,28 +154,3 @@ describe("ToolOutput", () => {
     ),
   )
 })
-
-it.live("denies a protected full spill before creating or writing its output path", () =>
-  withStore(
-    (output, fs, root) =>
-      Effect.gen(function* () {
-        const before = yield* fs.readDirectory(root)
-        let observed: { readonly path: string; readonly content: string; readonly projection: object } | undefined
-        const publication: SessionPublicationWriter.Writer = {
-          prepare: () => Effect.die(new Error("unused model writer")),
-          prepareSpill: (spill) => {
-            observed = spill
-            return Effect.die(new Error("denied spill"))
-          },
-        }
-        const result = yield* output
-          .truncate({ content: [{ type: "text", text: "one\ntwo\nthree" }] }, publication)
-          .pipe(Effect.exit)
-        expect(Exit.isFailure(result)).toBeTrue()
-        expect(observed?.content).toBe("one\ntwo\nthree")
-        expect(JSON.stringify(observed?.projection)).toContain("outputPath")
-        expect(yield* fs.readDirectory(root)).toEqual(before)
-      }),
-    { maxLines: 1, maxBytes: 100 },
-  ),
-)

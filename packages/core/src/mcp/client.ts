@@ -28,7 +28,6 @@ import { Cause, Effect, Exit, Schema } from "effect"
 import { ConfigMCP } from "@opencode/schema/config/mcp"
 import type { Session } from "@opencode/schema/session"
 import { McpStdio } from "./stdio.js"
-import { NativeProducer } from "../execution-producer.js"
 
 const DEFAULT_STARTUP_TIMEOUT = 30_000
 const DEFAULT_CATALOG_TIMEOUT = 30_000
@@ -150,7 +149,6 @@ export const connect = Effect.fnUntraced(function* (
     onChanged: () => changed[key](),
   })
 
-  const observedClients = new WeakSet<Client>()
   const initialize = Effect.fnUntraced(function* (transport: Transport) {
     const client = new Client(clientInfo, {
       capabilities: {
@@ -176,11 +174,9 @@ export const connect = Effect.fnUntraced(function* (
       )
     }
 
-    const observedTransport = yield* NativeProducer.catalogTransport(server, transport)
-    if (observedTransport !== transport) observedClients.add(client)
     yield* Effect.tryPromise({
       try: (signal) =>
-        client.connect(observedTransport, { timeout: config.timeout?.startup ?? DEFAULT_STARTUP_TIMEOUT, signal }),
+        client.connect(transport, { timeout: config.timeout?.startup ?? DEFAULT_STARTUP_TIMEOUT, signal }),
       catch: (error) => error,
     }).pipe(Effect.onError(() => Effect.promise(() => transport.close()).pipe(Effect.ignore)))
     return client
@@ -263,9 +259,7 @@ export const connect = Effect.fnUntraced(function* (
 
     return {
       modern: client.getProtocolEra() === "modern",
-      instructions: observedClients.has(client)
-        ? client.getInstructions()
-        : client.getInstructions()?.trim() || undefined,
+      instructions: client.getInstructions()?.trim() || undefined,
       tools: () =>
         request("list MCP tools", () => client.listTools(undefined, catalog)).pipe(Effect.map((r) => r.tools)),
       prompts: () =>
@@ -289,20 +283,18 @@ export const connect = Effect.fnUntraced(function* (
           client.getPrompt({ name: input.name, arguments: input.args ?? {} }, { signal, timeout: execution }),
         ),
       callTool: (input) =>
-        NativeProducer.dispatchMcp({ ...input, server }, (owned) =>
-          request("call MCP tool", (signal) =>
-            client.callTool(
-              {
-                name: owned.name,
-                arguments: owned.args,
-                _meta: {
-                  ...owned.meta,
-                  ...(input.sessionID === undefined ? {} : { "ai.opencode/sessionID": input.sessionID }),
-                },
+        request("call MCP tool", (signal) =>
+          client.callTool(
+            {
+              name: input.name,
+              arguments: input.args ?? {},
+              _meta: {
+                ...input.meta,
+                ...(input.sessionID === undefined ? {} : { "ai.opencode/sessionID": input.sessionID }),
               },
-              // Requesting progress keeps long calls alive under the SDK's timeout; execution is the hard wall.
-              { signal, timeout: execution, onprogress: () => {} },
-            ),
+            },
+            // Requesting progress keeps long calls alive under the SDK's timeout; execution is the hard wall.
+            { signal, timeout: execution, onprogress: () => {} },
           ),
         ).pipe(Effect.map(toCallToolResult)),
       onClose: (callback) => {

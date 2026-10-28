@@ -1,6 +1,4 @@
 import type {
-  ServerEnrollProducerInput,
-  ServerEnrollProducerOutput,
   ServerInfoOutput,
   ServerPairOutput,
   ServerConnectInput,
@@ -428,23 +426,6 @@ export function make(options: ClientOptions) {
 
   return {
     server: {
-      enrollProducer: (input: ServerEnrollProducerInput, requestOptions?: RequestOptions) =>
-        request<ServerEnrollProducerOutput>(
-          {
-            method: "POST",
-            path: `/api/producer/enrollment`,
-            body: {
-              version: input["version"],
-              challenge: input["challenge"],
-              audience: input["audience"],
-              contracts: input["contracts"],
-            },
-            successStatus: 200,
-            declaredStatuses: [400, 401],
-            empty: false,
-          },
-          requestOptions,
-        ),
       info: (requestOptions?: RequestOptions) =>
         request<ServerInfoOutput>(
           { method: "GET", path: `/api/info`, successStatus: 200, declaredStatuses: [400, 401], empty: false },
@@ -610,7 +591,6 @@ export function make(options: ClientOptions) {
               model: input?.["model"],
               location: input?.["location"],
               metadata: input?.["metadata"],
-              contextPolicy: input?.["contextPolicy"],
               permissions: input?.["permissions"],
             },
             successStatus: 200,
@@ -758,7 +738,6 @@ export function make(options: ClientOptions) {
               files: input["files"],
               agents: input["agents"],
               skills: input["skills"],
-              disclosure: input["disclosure"],
               mcpRevision: input["mcpRevision"],
               mcp: input["mcp"],
               execution: input["execution"],
@@ -783,7 +762,6 @@ export function make(options: ClientOptions) {
               files: input["files"],
               agents: input["agents"],
               skills: input["skills"],
-              disclosure: input["disclosure"],
               mcpRevision: input["mcpRevision"],
               mcp: input["mcp"],
               delivery: input["delivery"],
@@ -948,12 +926,7 @@ export function make(options: ClientOptions) {
             {
               method: "PUT",
               path: `/api/session/${encodeURIComponent(input.sessionID)}/inbox/${encodeURIComponent(input.inboxID)}/capability`,
-              body: {
-                mcp: input["mcp"],
-                disclosure: input["disclosure"],
-                revision: input["revision"],
-                claim: input["claim"],
-              },
+              body: { mcp: input["mcp"], revision: input["revision"], claim: input["claim"] },
               successStatus: 204,
               declaredStatuses: [400, 401, 404, 409],
               empty: true,

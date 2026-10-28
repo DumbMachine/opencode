@@ -52,6 +52,7 @@ import m49 from "./migration/20261018133558_session_context_policy.js"
 import m50 from "./migration/20261018142423_message_publication_provenance.js"
 import m51 from "./migration/20261019213736_terminal_control_observation.js"
 import m52 from "./migration/20261019214250_terminal_invocation_intent.js"
+import m53 from "./migration/20261028123620_drop_protected_sessions.js"
 
 export const migrations = [
   m00,
@@ -107,4 +108,5 @@ export const migrations = [
   m50,
   m51,
   m52,
+  m53,
 ] satisfies DatabaseMigration.Migration[]

@@ -29,9 +29,7 @@ import { SessionModelRequest } from "./model-request.js"
 import { SessionRunnerModel } from "./runner/model.js"
 import { SessionSchema } from "./schema.js"
 import { SessionStore } from "./store.js"
-import type { ExecutionDisclosure } from "@opencode/schema/execution-disclosure"
 import { Hash } from "@opencode/util/hash"
-import type { SessionPublicationProvenance } from "./publication-provenance.js"
 
 export interface Selection {
   readonly input?: SessionMessage.User | SessionMessage.Synthetic
@@ -44,15 +42,6 @@ export interface Selection {
 }
 
 export interface Loaded {
-  readonly disclosure?: ExecutionDisclosure.Service
-  readonly disclosureRevision?: number
-  readonly disclosureCatalog?: import("../execution-producer.js").NativeProducer.CatalogEvidence
-  readonly disclosureCurrent?: () => boolean
-  readonly disclosureComponents?: readonly ExecutionDisclosure.Component[]
-  readonly disclosureProvenance?: readonly {
-    readonly id: SessionMessage.ID
-    readonly state: SessionPublicationProvenance.State | null
-  }[]
   readonly executionInstructions?: string
   readonly input?: SessionMessage.User | SessionMessage.Synthetic
   readonly session: SessionSchema.Info
@@ -183,7 +172,7 @@ const layer = Layer.effect(
       const input =
         captured === undefined ? yield* SessionHistory.latestInput(db, sessionID).pipe(Effect.orDie) : captured.input
       const execution = input?.type === "user" ? input.execution : undefined
-      if (!session.contextPolicy) yield* mcpTools.flush
+      yield* mcpTools.flush
       const agent = captured?.selection?.agent ?? (yield* agents.select(execution?.agent ?? session.agent))
       if (!agent.info)
         return yield* new AgentNotFoundError({
@@ -191,13 +180,9 @@ const layer = Layer.effect(
           agent: execution?.agent ?? session.agent ?? agent.id,
         })
       // Session permissions narrow discovery the same way they narrow the tool snapshot.
-      const permissions =
-        session.contextPolicy?.version === 1
-          ? [{ action: "*", resource: "*", effect: "deny" as const }]
-          : Permission.merge(agent.info.permissions, session.permissions ?? [])
-      const executionTools =
-        executionMcp && session.contextPolicy?.version !== 1
-          ? yield* Effect.gen(function* () {
+      const permissions = Permission.merge(agent.info.permissions, session.permissions ?? [])
+      const executionTools = executionMcp
+        ? yield* Effect.gen(function* () {
               const discovered = yield* mcpTools.tools(executionMcp)
               const event = yield* hooks.trigger("tool", "resolve", {
                 sessionID,
@@ -221,42 +206,21 @@ const layer = Layer.effect(
         {
           tools: registry.snapshot(
             permissions,
-            executionTools || session.contextPolicy?.version === 2
-              ? { excludeGroups: ["mcp"], ...(executionTools ? { tools: executionTools } : {}) } : undefined,
+            executionTools ? { excludeGroups: ["mcp"], tools: executionTools } : undefined,
           ),
-          shared: session.contextPolicy
-            ? Effect.succeed({
-                builtins: Instructions.empty,
-                discovery: Instructions.empty,
-                references: Instructions.empty,
-                entries: Instructions.empty,
-              })
-            : sharedInstructions(sessionID),
-          skills: session.contextPolicy ? Effect.succeed(Instructions.empty) : skillInstructions.load(permissions),
-          mcp:
-            executionMcp || session.contextPolicy
-              ? Effect.succeed(Instructions.empty)
-              : mcpInstructions.load(permissions),
-          ephemeral:
-            executionMcp && session.contextPolicy?.version !== 1
-              ? mcpInstructions.ephemeral(executionMcp, permissions)
-              : Effect.succeed(undefined),
+          shared: sharedInstructions(sessionID),
+          skills: skillInstructions.load(permissions),
+          mcp: executionMcp ? Effect.succeed(Instructions.empty) : mcpInstructions.load(permissions),
+          ephemeral: executionMcp ? mcpInstructions.ephemeral(executionMcp, permissions) : Effect.succeed(undefined),
         },
         { concurrency: "unbounded" },
       )
-      if (
-        session.contextPolicy?.version === 1 &&
-        (loaded.tools.definitions.length !== 0 || loaded.tools.codeModeCatalog !== undefined)
-      )
-        return yield* Effect.die(new Error("Session context policy requires empty tools"))
       return {
         session,
         input,
         model: captured?.selection?.model ?? execution?.model ?? session.model,
         agent: { ...agent, info: agent.info },
-        instructions: session.contextPolicy
-          ? Instructions.empty
-          : Instructions.combine([
+        instructions: Instructions.combine([
               loaded.shared.builtins,
               CodeModeInstructions.make(loaded.tools.codeModeCatalog),
               loaded.shared.discovery,
@@ -284,34 +248,8 @@ const layer = Layer.effect(
         agent: selection.agent,
         model,
         initial: history.initial,
-        disclosureComponents: [
-          { kind: "instructions" as const, id: selection.session.id, revision: Hash.sha256(history.initial) },
-          ...history.entries.map((entry) => ({
-            kind: "message" as const,
-            id: entry.message.id,
-            revision: Hash.sha256(JSON.stringify(entry.message)),
-          })),
-          {
-            kind: "agent" as const,
-            id: selection.agent.id,
-            revision: Hash.sha256(JSON.stringify(selection.agent.info)),
-          },
-          ...(selection.ephemeral === undefined
-            ? []
-            : [{ kind: "ephemeral" as const, id: selection.session.id, revision: Hash.sha256(selection.ephemeral) }]),
-          ...(history.input?.type === "user" && history.input.execution?.instructions !== undefined
-            ? [
-                {
-                  kind: "input-instructions" as const,
-                  id: history.input.id,
-                  revision: Hash.sha256(history.input.execution.instructions),
-                },
-              ]
-            : []),
-        ],
         ephemeral: selection.ephemeral,
         messages: history.entries.map((entry) => entry.message),
-        disclosureProvenance: history.entries.map((entry) => ({ id: entry.message.id, state: entry.provenance })),
         input: history.input,
         executionInstructions: history.input?.type === "user" ? history.input.execution?.instructions : undefined,
         tools: selection.tools,

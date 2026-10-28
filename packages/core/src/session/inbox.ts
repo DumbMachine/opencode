@@ -17,7 +17,6 @@ import {
   UserPayload,
 } from "@opencode/schema/session-inbox"
 import type { Mcp } from "@opencode/schema/mcp"
-import type { ExecutionDisclosure } from "@opencode/schema/execution-disclosure"
 import { Database } from "../database/database.js"
 import { Bus } from "../bus.js"
 import { KeyedMutex } from "../effect/keyed-mutex.js"
@@ -27,7 +26,6 @@ import { SessionExecutionCapability } from "./execution-capability.js"
 import { SessionSchema } from "./schema.js"
 import { SessionInputRequirements } from "./input-requirements.js"
 import { SessionLifecycle } from "./lifecycle.js"
-import { SessionPublicationWriter } from "./publication-writer.js"
 import { NotFoundError } from "./error.js"
 import { SessionInboxTable, SessionMessageTable, SessionTable } from "./sql.js"
 
@@ -76,24 +74,15 @@ export class LifecycleConflict extends Schema.TaggedError<LifecycleConflict>()("
 const supportedItem = (item: Item | Info) =>
   item.type !== "user" || SessionInputRequirements.supported(item.payload.capabilities)
 
-const requirePublicationPolicy = Effect.fnUntraced(function* (db: DatabaseService, entry: Info | (Item & PendingRef)) {
+const requireSession = Effect.fnUntraced(function* (db: DatabaseService, entry: Info | (Item & PendingRef)) {
   if (entry.type !== "user") return
   const session = yield* db
-    .select({ policy: SessionTable.context_policy })
+    .select({ id: SessionTable.id })
     .from(SessionTable)
     .where(eq(SessionTable.id, entry.sessionID))
     .get()
     .pipe(Effect.orDie)
   if (!session) return yield* new NotFoundError({ sessionID: entry.sessionID })
-  if (
-    (session.policy?.version ?? undefined) !==
-    (entry.payload.capabilities?.includes("publication-v2")
-      ? 2
-      : entry.payload.capabilities?.includes("publication-v1")
-        ? 1
-        : undefined)
-  )
-    return yield* new LifecycleConflict({ id: entry.id })
 })
 
 function matches<Type extends Item["type"]>(
@@ -201,32 +190,18 @@ export const make = Effect.fn("SessionInbox.make")(function* () {
     readonly id: SessionMessage.ID
     readonly sessionID: SessionSchema.ID
     readonly item: Item & { readonly type: Type }
-    readonly publication?: SessionPublicationWriter.Writer
   }) {
     const existing = yield* reconcile({ ...request, type: request.item.type, delivery: request.item.delivery })
     if (existing !== undefined) {
       if (!supportedItem(existing)) return yield* new LifecycleConflict({ id: request.id })
-      yield* requirePublicationPolicy(db, existing)
+      yield* requireSession(db, existing)
       return existing
     }
     const item: Item = request.item
-    if (
-      !supportedItem(item) ||
-      (item.type === "user" &&
-        (item.payload.capabilities?.includes("publication-v1") ||
-          item.payload.capabilities?.includes("publication-v2")) &&
-        request.publication === undefined)
-    )
-      return yield* new LifecycleConflict({ id: request.id })
-    yield* requirePublicationPolicy(db, { ...request.item, id: request.id, sessionID: request.sessionID })
+    if (!supportedItem(item)) return yield* new LifecycleConflict({ id: request.id })
+    yield* requireSession(db, { ...request.item, id: request.id, sessionID: request.sessionID })
     const data = { inboxID: request.id, sessionID: request.sessionID, item: request.item }
-    const published: Effect.Effect<{ readonly created: number }> = request.publication
-      ? Effect.gen(function* () {
-          const unit = yield* request.publication!.prepare(SessionEvent.InboxEnqueued, data)
-          yield* unit.publish
-          return { created: unit.created }
-        })
-      : bus.publish(SessionEvent.InboxEnqueued, data)
+    const published: Effect.Effect<{ readonly created: number }> = bus.publish(SessionEvent.InboxEnqueued, data)
     const admitted = yield* published.pipe(
       Effect.map((event) =>
         Info.make({
@@ -290,7 +265,7 @@ export const make = Effect.fn("SessionInbox.make")(function* () {
             !SessionInputRequirements.supported(pending.payload.capabilities)
           )
             return yield* new LifecycleConflict({ id: input.id })
-          yield* requirePublicationPolicy(db, pending)
+          yield* requireSession(db, pending)
           const renewal = yield* SessionExecutionCapability.beginRenewal(input.sessionID, input.id, input.claim)
           if (!renewal) return yield* new LifecycleConflict({ id: input.id })
           return renewal
@@ -304,7 +279,6 @@ export const make = Effect.fn("SessionInbox.make")(function* () {
     (
       input: PendingRef & {
         readonly mcp?: Mcp.RequestServers
-        readonly disclosure?: ExecutionDisclosure.Service
         readonly revision?: number
         readonly claim?: string
       },
@@ -313,20 +287,7 @@ export const make = Effect.fn("SessionInbox.make")(function* () {
         input.sessionID,
         Effect.gen(function* () {
           yield* SessionLifecycle.check(db, input.sessionID)
-          if (!SessionInputRequirements.serviceSupported(input.disclosure))
-            return yield* new LifecycleConflict({ id: input.id })
-          const session = yield* db
-            .select({ policy: SessionTable.context_policy })
-            .from(SessionTable)
-            .where(eq(SessionTable.id, input.sessionID))
-            .get()
-            .pipe(Effect.orDie)
-          if (
-            (session?.policy?.version ?? undefined) !== input.disclosure?.publicationVersion ||
-            (session?.policy?.version === 1 && input.mcp !== undefined && Object.keys(input.mcp).length !== 0)
-          )
-            return yield* new LifecycleConflict({ id: input.id })
-          const grant = { inputID: input.id, mcp: input.mcp, disclosure: input.disclosure, revision: input.revision }
+          const grant = { inputID: input.id, mcp: input.mcp, revision: input.revision }
           if (input.claim && (yield* SessionExecutionCapability.committedRenewal(input.sessionID, grant, input.claim)))
             return
           const pending = yield* find(db, input.id)
@@ -411,7 +372,7 @@ export const projectAdmitted = Effect.fn("SessionInbox.projectAdmitted")(functio
     readonly timeCreated: number
   },
 ) {
-  yield* requirePublicationPolicy(db, { ...request.item, id: request.id, sessionID: request.sessionID }).pipe(
+  yield* requireSession(db, { ...request.item, id: request.id, sessionID: request.sessionID }).pipe(
     Effect.orDie,
   )
   const message = yield* db
@@ -596,37 +557,13 @@ const publish = Effect.fn("SessionInbox.publish")(function* (
     (row) =>
       Effect.gen(function* () {
         const entry = fromRow(row)
-        yield* requirePublicationPolicy(db, entry).pipe(Effect.orDie)
+        yield* requireSession(db, entry).pipe(Effect.orDie)
         if (entry.type === "compaction") return yield* Effect.die(new LifecycleConflict({ id: entry.id }))
         // Deny conditional controls during delivery instead of exposing the
-        // previous input while a new user message is committing. This also
-        // fails closed if publication aborts before context is reloaded.
+        // previous input while a new user message is committing.
         if (entry.type === "user") yield* SessionExecutionCapability.clearSelection(sessionID)
         const data = { sessionID, inboxID: entry.id }
-        const published: Effect.Effect<void> =
-          entry.type === "user" &&
-          (entry.payload.capabilities?.includes("publication-v1") ||
-            entry.payload.capabilities?.includes("publication-v2"))
-            ? Effect.gen(function* () {
-                const grant = yield* SessionExecutionCapability.getInstalled(sessionID, entry.id)
-                if (
-                  !grant?.disclosure ||
-                  grant.revision === undefined ||
-                  grant.disclosure.publicationVersion !==
-                    (entry.payload.capabilities?.includes("publication-v2") ? 2 : 1)
-                )
-                  return yield* Effect.die(new Error("Execution publication authorization is unavailable"))
-                const capture = yield* SessionPublicationWriter.captureInput({
-                  sessionID,
-                  inputID: entry.id,
-                  revision: grant.revision,
-                  service: grant.disclosure,
-                }).pipe(Effect.provideService(Bus.Service, bus), Effect.provideService(Database.Service, { db }))
-                const publication = yield* capture.prepareInput(entry.payload)
-                const unit = yield* publication.prepare(SessionEvent.InboxDelivered, data)
-                yield* unit.publish
-              })
-            : bus.publish(SessionEvent.InboxDelivered, data).pipe(Effect.asVoid)
+        const published: Effect.Effect<void> = bus.publish(SessionEvent.InboxDelivered, data).pipe(Effect.asVoid)
         return yield* published.pipe(
           Effect.tap(() =>
             entry.type === "user" ? SessionExecutionCapability.select(sessionID, entry.id) : Effect.void,

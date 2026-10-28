@@ -4,7 +4,6 @@ import { Base64, FileAttachment, Prompt } from "@opencode/schema/prompt"
 import { PromptInput } from "@opencode/schema/prompt-input"
 import { SessionInbox } from "@opencode/schema/session-inbox"
 import type { Mcp } from "@opencode/schema/mcp"
-import type { ExecutionDisclosure } from "@opencode/schema/execution-disclosure"
 import type { Session } from "@opencode/schema/session"
 import type { SessionMessage } from "@opencode/schema/session-message"
 import { FSUtil } from "@opencode/util/fs-util"
@@ -16,7 +15,6 @@ import { Instance } from "../instance/service.js"
 import { Mime } from "../mime.js"
 import { Plugin } from "../plugin/service.js"
 import { PluginHooks } from "../plugin/hooks.js"
-import { NativeProducer } from "../execution-producer.js"
 import { SessionInlineIdentity } from "./inline-identity.js"
 import { Skill } from "../skill.js"
 import { AttachmentError, SkillNotFoundError } from "./error.js"
@@ -28,7 +26,6 @@ export type Input = {
   skills?: PromptInput.Prompt["skills"]
   execution?: SessionInbox.UserPayload["execution"]
   capabilities?: readonly string[]
-  disclosure?: ExecutionDisclosure.Service
   mcp?: Mcp.RequestServers
   mcpRevision?: Mcp.RequestRevision
   metadata?: Record<string, unknown>
@@ -49,24 +46,12 @@ export const prepare = Effect.fn("SessionPrompt.prepare")(function* (request: {
     agents: request.input.agents,
     skills: request.input.skills,
   })
-  const inlineIdentity =
-    request.input.disclosure?.compositionVersion === 3 || request.input.disclosure?.compositionVersion === 4
-  if (
-    request.session.contextPolicy &&
-    (original.agents?.length ||
-      original.skills?.length ||
-      (inlineIdentity ? SessionInlineIdentity.originalRevision(original) === undefined : original.files?.length))
-  )
-    return yield* Effect.die(new Error("Session context policy does not support these attachments"))
-  const tracked = request.input.disclosure !== undefined
   const fs = yield* FSUtil.Service
   const instances = yield* Instance.Service
 
   return yield* Effect.gen(function* () {
     yield* Plugin.awaitActivation
     const hooks = yield* PluginHooks.Service
-    if (request.session.contextPolicy && (yield* hooks.has("session", "prompt")))
-      return yield* Effect.die(new Error("Session context policy does not support prompt transformations"))
     const observed = yield* hooks.triggerObserved("session", "prompt", {
       sessionID,
       messageID: inputID,
@@ -74,12 +59,10 @@ export const prepare = Effect.fn("SessionPrompt.prepare")(function* (request: {
       metadata: structuredClone(request.input.metadata),
       delivery: request.input.delivery ?? "steer",
     })
-    if (request.session.contextPolicy && observed.invoked !== 0)
-      return yield* Effect.die(new Error("Session context policy does not support prompt transformations"))
     const event = observed.event
     const input = event.prompt
     const files = input.files
-      ? yield* Effect.forEach(input.files, (file) => materializeAttachment(file, inlineIdentity), { concurrency: 8 })
+      ? yield* Effect.forEach(input.files, (file) => materializeAttachment(file), { concurrency: 8 })
       : undefined
     const requested = input.skills
     const selected = yield* Effect.gen(function* () {
@@ -113,19 +96,9 @@ export const prepare = Effect.fn("SessionPrompt.prepare")(function* (request: {
       metadata: structuredClone(event.metadata),
       capabilities: request.input.capabilities ? [...request.input.capabilities] : undefined,
     })
-    const prepared = tracked
-      ? yield* NativeProducer.prepareInput({
-          sessionID,
-          inputID,
-          original,
-          invoked: observed.invoked,
-          inlineIdentity,
-          payload,
-        })
-      : undefined
     return {
       type: "user",
-      payload: prepared ?? payload,
+      payload,
       delivery: SessionInbox.Delivery.make(event.delivery),
     } satisfies SessionInbox.Item
   }).pipe(instances.provide(request.session))

@@ -158,8 +158,7 @@ const schema: Omit<DatabaseMigration.Migration, "id"> = {
       yield* tx.run(`
         CREATE TABLE \`session_lifecycle\` (
           \`id\` text PRIMARY KEY,
-          \`retired_at\` integer,
-          \`context_policy\` text
+          \`retired_at\` integer
         );
       `)
       yield* tx.run(`
@@ -170,7 +169,6 @@ const schema: Omit<DatabaseMigration.Migration, "id"> = {
           \`seq\` integer NOT NULL,
           \`time_created\` integer NOT NULL,
           \`time_updated\` integer NOT NULL,
-          \`publication_provenance\` text,
           \`data\` text NOT NULL,
           CONSTRAINT \`fk_session_message_session_id_session_v2_id_fk\` FOREIGN KEY (\`session_id\`) REFERENCES \`session_v2\`(\`id\`) ON DELETE CASCADE
         );
@@ -206,7 +204,6 @@ const schema: Omit<DatabaseMigration.Migration, "id"> = {
           \`summary_files\` integer,
           \`summary_diffs\` text,
           \`metadata\` text,
-          \`context_policy\` text,
           \`cost\` real DEFAULT 0 NOT NULL,
           \`tokens_input\` integer DEFAULT 0 NOT NULL,
           \`tokens_output\` integer DEFAULT 0 NOT NULL,
@@ -227,37 +224,6 @@ const schema: Omit<DatabaseMigration.Migration, "id"> = {
           \`time_suspended\` integer,
           \`resume_attempts\` integer DEFAULT 0 NOT NULL,
           CONSTRAINT \`fk_session_v2_project_id_project_id_fk\` FOREIGN KEY (\`project_id\`) REFERENCES \`project\`(\`id\`) ON DELETE CASCADE
-        );
-      `)
-      yield* tx.run(`
-        CREATE TABLE \`session_terminal_control\` (
-          \`session_id\` text NOT NULL,
-          \`input_id\` text NOT NULL,
-          \`attempt\` text NOT NULL,
-          \`message_id\` text NOT NULL,
-          \`tool_call_id\` text NOT NULL,
-          \`producer_epoch\` text NOT NULL,
-          \`producer_key_id\` text NOT NULL,
-          \`context_reference\` text NOT NULL,
-          \`receipt_reference\` text NOT NULL,
-          \`evidence\` text NOT NULL,
-          \`unit_id\` text,
-          \`unit_digest\` text,
-          \`created\` integer NOT NULL,
-          CONSTRAINT \`session_terminal_control_pk\` PRIMARY KEY(\`session_id\`, \`input_id\`),
-          CONSTRAINT \`fk_session_terminal_control_session_id_session_v2_id_fk\` FOREIGN KEY (\`session_id\`) REFERENCES \`session_v2\`(\`id\`) ON DELETE CASCADE
-        );
-      `)
-      yield* tx.run(`
-        CREATE TABLE \`session_terminal_invocation\` (
-          \`session_id\` text NOT NULL,
-          \`input_id\` text NOT NULL,
-          \`invocation_id\` text NOT NULL,
-          \`context_reference\` text NOT NULL,
-          \`evidence\` text NOT NULL,
-          \`created\` integer NOT NULL,
-          CONSTRAINT \`session_terminal_invocation_pk\` PRIMARY KEY(\`session_id\`, \`input_id\`, \`invocation_id\`),
-          CONSTRAINT \`fk_session_terminal_invocation_session_id_session_v2_id_fk\` FOREIGN KEY (\`session_id\`) REFERENCES \`session_v2\`(\`id\`) ON DELETE CASCADE
         );
       `)
       yield* tx.run(`

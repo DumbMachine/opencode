@@ -1,7 +1,6 @@
 import { SessionMessage } from "@opencode/schema/session-message"
 import { SessionInbox } from "@opencode/schema/session-inbox"
 import { Mcp } from "@opencode/schema/mcp"
-import { ExecutionDisclosure } from "@opencode/schema/execution-disclosure"
 import { PromptInput } from "@opencode/schema/prompt-input"
 import { Session } from "@opencode/schema/session"
 import { SessionStats } from "@opencode/schema/session-stats"
@@ -225,7 +224,6 @@ export const makeSessionGroup = <I extends HttpApiMiddleware.AnyId, S, FormI ext
           model: Model.Ref.pipe(Schema.optional),
           location: Location.PublicRef.pipe(Schema.optional),
           metadata: Session.Metadata.pipe(Schema.optional),
-          contextPolicy: Session.Info.fields.contextPolicy,
           permissions: Permission.Ruleset.pipe(Schema.optional),
         }),
         success: Schema.Struct({ data: PublicSessionInfo }),
@@ -653,7 +651,6 @@ export const makeSessionGroup = <I extends HttpApiMiddleware.AnyId, S, FormI ext
         params: { sessionID: Session.ID, inboxID: SessionMessage.ID },
         payload: Schema.Struct({
           mcp: Mcp.RequestServers.pipe(Schema.optional),
-          disclosure: ExecutionDisclosure.Service.pipe(Schema.optional),
           revision: Mcp.RequestRevision.pipe(Schema.optional),
           claim: Mcp.RequestClaim.pipe(Schema.optional),
         }),
@@ -664,7 +661,7 @@ export const makeSessionGroup = <I extends HttpApiMiddleware.AnyId, S, FormI ext
           identifier: "session.inbox.renewCapability",
           summary: "Renew pending input capability",
           description:
-            "Commit the exact original process-local MCP and disclosure components for a pending user input. Renewal requires its active claim. Identical committed-claim retries acknowledge success after delivery without changing credentials. Never admits or wakes work; rejects stale claims and revisions.",
+            "Commit the exact original process-local MCP components for a pending user input. Renewal requires its active claim. Identical committed-claim retries acknowledge success after delivery without changing credentials. Never admits or wakes work; rejects stale claims and revisions.",
         }),
       ),
     )

@@ -6,7 +6,6 @@ import { Api } from "../api"
 import { ServerAuth } from "../auth"
 import { ServerInfo } from "../server-info"
 import { ServerPairing } from "../pairing"
-import { NativeProducer } from "@opencode/core/execution-producer"
 
 export const ServerHandler = HttpApiBuilder.group(Api, "server.server", (handlers) =>
   Effect.gen(function* () {
@@ -14,21 +13,12 @@ export const ServerHandler = HttpApiBuilder.group(Api, "server.server", (handler
     const auth = yield* ServerAuth.Config
 
     return handlers
-      .handle("server.enrollProducer", (ctx) =>
-        Effect.gen(function* () {
-          if (!ServerAuth.required(auth))
-            return yield* new UnauthorizedError({ message: "Configured server authentication is required" })
-          return yield* NativeProducer.enroll(ctx.payload)
-        }),
-      )
       .handleRaw("server.info", () =>
         Effect.gen(function* () {
           const info = yield* ServerInfo.Service
           return HttpServerResponse.jsonUnsafe(
             {
               version: info.app.version ?? "unknown",
-              contextInlineCompositionVersion: 1,
-              contextToolsCompositionVersion: 1,
               pid: process.pid ?? 0,
               urls: info.urls(),
               paths: info.paths,
@@ -36,12 +26,6 @@ export const ServerHandler = HttpApiBuilder.group(Api, "server.server", (handler
             {
               headers: {
                 "x-opencode-input-config": "1",
-                "x-opencode-context-preflight": "1",
-                "x-opencode-context-policy": "1",
-                "x-opencode-context-composition": "2",
-                "x-opencode-context-inline-composition": "1",
-                "x-opencode-context-tools-composition": "1",
-                "x-opencode-context-publication": "1",
                 "x-opencode-session-retirement": "1",
                 "x-opencode-inbox-capability-renewal": "2",
                 "x-opencode-input-capability-resume": "1",

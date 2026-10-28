@@ -4,7 +4,6 @@ import { DateTime, Effect, Fiber, Scope } from "effect"
 import type { Agent } from "@opencode/schema/agent"
 import type { Model } from "@opencode/schema/model"
 import type { Mcp } from "@opencode/schema/mcp"
-import type { ExecutionDisclosure } from "@opencode/schema/execution-disclosure"
 import type { Permission } from "@opencode/schema/permission"
 import { Event } from "@opencode/schema/event"
 import { FSUtil } from "@opencode/util/fs-util"
@@ -35,7 +34,6 @@ import { SessionShell } from "./shell.js"
 import { SessionSkill } from "./skill.js"
 import { SessionSchema } from "./schema.js"
 import { SessionStore } from "./store.js"
-import { SessionPublicationWriter } from "./publication-writer.js"
 
 type PromptRequest = SessionPrompt.Input & {
   id?: SessionMessage.ID
@@ -149,7 +147,6 @@ export const make = Effect.fn("Session.make")(function* () {
     inboxID: SessionMessage.ID,
     input: {
       readonly mcp?: Mcp.RequestServers
-      readonly disclosure?: ExecutionDisclosure.Service
       readonly revision?: number
       readonly claim?: string
     },
@@ -218,34 +215,9 @@ export const make = Effect.fn("Session.make")(function* () {
           const receiptOnly =
             existing?.type === "user" &&
             input.mcp === undefined &&
-            input.disclosure === undefined &&
             input.mcpRevision === undefined &&
             input.capabilities === undefined
-          if (
-            existing?.type === "user" &&
-            session.contextPolicy?.version !==
-              (existing.payload.capabilities?.includes("publication-v2")
-                ? 2
-                : existing.payload.capabilities?.includes("publication-v1")
-                  ? 1
-                  : undefined)
-          )
-            return yield* new PromptConflictError({ sessionID, messageID })
-          if (
-            !receiptOnly &&
-            ((session.contextPolicy !== undefined &&
-              input.disclosure?.publicationVersion !== session.contextPolicy.version) ||
-              (session.contextPolicy === undefined &&
-                (input.disclosure?.publicationVersion !== undefined ||
-                  input.capabilities?.includes("publication-v1") ||
-                  input.capabilities?.includes("publication-v2"))) ||
-              (session.contextPolicy?.version === 1 &&
-                input.mcp !== undefined &&
-                Object.keys(input.mcp).length !== 0) ||
-              !SessionInputRequirements.supported(input.capabilities) ||
-              !SessionInputRequirements.serviceSupported(input.disclosure) ||
-              (input.disclosure !== undefined && input.mcpRevision === undefined))
-          )
+          if (!receiptOnly && !SessionInputRequirements.supported(input.capabilities))
             return yield* new PromptConflictError({ sessionID, messageID })
 
           const item = existing
@@ -260,9 +232,6 @@ export const make = Effect.fn("Session.make")(function* () {
                       ...new Set([
                         ...(input.capabilities ?? []),
                         ...(input.mcp === undefined ? [] : ["mcp"]),
-                        ...(input.disclosure === undefined ? [] : ["disclosure"]),
-                        ...(input.disclosure?.publicationVersion === 1 ? ["publication-v1"] : []),
-                        ...(input.disclosure?.publicationVersion === 2 ? ["publication-v2"] : []),
                       ]),
                     ],
                   },
@@ -281,36 +250,14 @@ export const make = Effect.fn("Session.make")(function* () {
                 const latest = yield* get(sessionID)
                 if (latest.revert) yield* SessionRevert.commit(bus, latest)
               }
-              const admitted =
-                current ??
-                (yield* Effect.gen(function* () {
-                  if (!session.contextPolicy) return yield* admission.admit({ id: messageID, sessionID, item: item! })
-                  const installed = yield* SessionExecutionCapability.set(sessionID, {
-                    inputID: messageID,
-                    mcp: input.mcp,
-                    disclosure: input.disclosure,
-                    revision: input.mcpRevision,
-                  })
-                  if (!installed) return yield* new SessionInbox.LifecycleConflict({ id: messageID })
-                  return yield* Effect.gen(function* () {
-                    const capture = yield* SessionPublicationWriter.captureInput({
-                      sessionID,
-                      inputID: messageID,
-                      revision: input.mcpRevision!,
-                      service: input.disclosure!,
-                    }).pipe(Effect.provideService(Bus.Service, bus), Effect.provideService(Database.Service, database))
-                    const publication = yield* capture.prepareInput(item!.payload)
-                    return yield* admission.admit({ id: messageID, sessionID, item: item!, publication })
-                  }).pipe(Effect.tapCause(() => SessionExecutionCapability.drop(sessionID, messageID)))
-                }))
-              if (input.mcp !== undefined || input.disclosure !== undefined) {
+              const admitted = current ?? (yield* admission.admit({ id: messageID, sessionID, item: item! }))
+              if (input.mcp !== undefined) {
                 const required = admitted.payload.capabilities ?? []
                 if (!SessionInputRequirements.matches(required, input))
                   return yield* new SessionInbox.LifecycleConflict({ id: messageID })
                 const installed = yield* SessionExecutionCapability.set(sessionID, {
                   inputID: admitted.id,
                   mcp: input.mcp,
-                  disclosure: input.disclosure,
                   revision: input.mcpRevision,
                 })
                 if (!installed) return yield* new SessionInbox.LifecycleConflict({ id: messageID })
@@ -331,8 +278,6 @@ export const make = Effect.fn("Session.make")(function* () {
     input: { id?: SessionMessage.ID; command: string },
   ) {
     const session = yield* get(sessionID)
-    if (session.contextPolicy)
-      return yield* Effect.die(new Error("Session context policy does not support shell execution"))
     // The server owns completion recording even if the submitting client disconnects.
     const running = yield* Effect.gen(function* () {
       const started = yield* SessionShell.start({ session, command: input.command }).pipe(
@@ -377,8 +322,6 @@ export const make = Effect.fn("Session.make")(function* () {
     input: { messageID?: SessionMessage.ID; skill: Skill.ID; resume?: boolean },
   ) {
     const session = yield* get(sessionID)
-    if (session.contextPolicy)
-      return yield* Effect.die(new Error("Session context policy does not support skill execution"))
     const skill = yield* SessionSkill.get({ session, skill: input.skill }).pipe(
       Effect.provideService(Instance.Service, instances),
     )
@@ -402,7 +345,6 @@ export const make = Effect.fn("Session.make")(function* () {
     input: { id?: SessionMessage.ID; delivery?: SessionInbox.Delivery },
   ) {
     const session = yield* get(sessionID)
-    if (session.contextPolicy) return yield* Effect.die(new Error("Session context policy does not support compaction"))
     if (session.revert) yield* SessionRevert.commit(bus, session)
     const inputID = input.id ?? SessionMessage.ID.create()
     const admitted = yield* admission

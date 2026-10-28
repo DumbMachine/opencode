@@ -80,34 +80,6 @@ export const layer = (options?: Options) =>
       const maxAttempts = options?.maxAttempts ?? DEFAULT_MAX_ATTEMPTS
 
       const prepareResume = Effect.fnUntraced(function* (sessionID: SessionSchema.ID) {
-        // A verified stop or uncertain dispatch is deny-only. Resolve the next
-        // actual input before adding restart notices; protected admission may
-        // reject those notices, and an old input must never resume through them.
-        const recovery = yield* SessionInbox.serialized(
-          sessionID,
-          Effect.gen(function* () {
-            const pending = yield* SessionInbox.nextPromotable(db, sessionID, "input")
-            const latest = yield* SessionHistory.latestInput(db, sessionID).pipe(Effect.orDie)
-            const inputID = pending?.id ?? latest?.id
-            if (inputID && (yield* SessionHistory.terminalInput(db, sessionID, inputID))) {
-              if (yield* execution.isActive(sessionID)) return "ordinary" as const
-              yield* store.release(sessionID)
-              return "stopped" as const
-            }
-            // A new input keeps its own authority checks. A restart note for
-            // the old stopped input must not obstruct that independent work.
-            if (
-              pending &&
-              (pending.type === "user" || pending.type === "synthetic") &&
-              latest &&
-              pending.id !== latest.id &&
-              (yield* SessionHistory.terminalInput(db, sessionID, latest.id))
-            )
-              return "independent" as const
-            return "ordinary" as const
-          }),
-        )
-        if (recovery === "stopped") return false
         // Durable before the resume runs, so a crash inside the resumed turn is
         // counted by the next sweep and the budget cannot be dodged.
         const attempts = yield* store.countResume(sessionID)
@@ -122,7 +94,6 @@ export const layer = (options?: Options) =>
           )
           return false
         }
-        if (recovery === "independent") return true
         yield* bus.publish(SessionEvent.Synthetic, {
           sessionID,
           text: CONTINUE_AFTER_SERVER_RESTART,

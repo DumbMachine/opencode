@@ -3,7 +3,6 @@ export * as SessionExecutionCapability from "./execution-capability.js"
 import { Clock, Effect } from "effect"
 import { Hash } from "@opencode/util/hash"
 import { Mcp } from "@opencode/schema/mcp"
-import type { ExecutionDisclosure } from "@opencode/schema/execution-disclosure"
 import { SessionInputRequirements } from "./input-requirements.js"
 import { SessionMessage } from "./message.js"
 import { SessionSchema } from "./schema.js"
@@ -11,7 +10,6 @@ import { SessionSchema } from "./schema.js"
 export interface Grant {
   readonly inputID: SessionMessage.ID
   readonly mcp?: Mcp.RequestServers
-  readonly disclosure?: ExecutionDisclosure.Service
   readonly revision?: number
 }
 
@@ -177,62 +175,20 @@ export const getWithSelection = (sessionID: SessionSchema.ID, inputID: SessionMe
   Effect.sync(() => {
     if (inputID === undefined) {
       selected.delete(sessionID)
-      return { grant: undefined, current: undefined }
+      return { grant: undefined }
     }
     selected.set(sessionID, inputID)
     const installed = grants.get(sessionID)?.get(inputID)
-    return {
-      grant: installed === undefined ? undefined : structuredClone(installed),
-      current:
-        installed?.disclosure !== undefined && installed.revision !== undefined
-          ? captureSelection(sessionID, inputID, installed.revision)
-          : undefined,
-    }
+    return { grant: installed === undefined ? undefined : structuredClone(installed) }
   })
 
-// A publication callback must retain this exact installation, not merely an
-// equal input ID/revision reinstalled after cancellation or process recovery.
-// This observer never changes the selected input or exposes credentials.
-export const captureInstallation = (
-  sessionID: SessionSchema.ID,
-  inputID: SessionMessage.ID,
-  revision: number,
-  service?: ExecutionDisclosure.Service,
-) => {
-  const installed = grants.get(sessionID)?.get(inputID)
-  const matches =
-    service === undefined ||
-    (installed !== undefined && fingerprint({ ...installed, disclosure: service }) === fingerprint(installed))
-  return () => {
-    const renewal = renewals.get(renewalKey(sessionID, inputID))
-    return (
-      matches &&
-      installed !== undefined &&
-      installed.disclosure !== undefined &&
-      installed.revision === revision &&
-      grants.get(sessionID)?.get(inputID) === installed &&
-      (!renewal || renewal.committed !== undefined)
-    )
-  }
-}
-
-// Input publication observes its own installation without changing active
-// execution/control ownership while the inbox is being admitted or delivered.
+// Observes an input's installation without changing active execution/control
+// ownership while the inbox is being admitted or delivered.
 export const getInstalled = (sessionID: SessionSchema.ID, inputID: SessionMessage.ID) =>
   Effect.sync(() => {
     const installed = grants.get(sessionID)?.get(inputID)
     return installed === undefined ? undefined : structuredClone(installed)
   })
-
-export const captureSelection = (
-  sessionID: SessionSchema.ID,
-  inputID: SessionMessage.ID,
-  revision: number,
-  service?: ExecutionDisclosure.Service,
-) => {
-  const installed = captureInstallation(sessionID, inputID, revision, service)
-  return () => installed() && selected.get(sessionID) === inputID
-}
 
 export const clearSelection = (sessionID: SessionSchema.ID) =>
   Effect.sync(() => {
@@ -252,8 +208,6 @@ export const set = (sessionID: SessionSchema.ID, grant: Grant) =>
   })
 
 function install(sessionID: SessionSchema.ID, grant: Grant) {
-  if (!SessionInputRequirements.serviceSupported(grant.disclosure)) return false
-  if (grant.disclosure !== undefined && grant.revision === undefined) return false
   let inputs = grants.get(sessionID)
   if (!inputs) grants.set(sessionID, (inputs = new Map()))
   const previous = inputs.get(grant.inputID)

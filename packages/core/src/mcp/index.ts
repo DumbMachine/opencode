@@ -17,7 +17,6 @@ import { KeyedMutex } from "../effect/keyed-mutex.js"
 import { Location } from "../location.js"
 import { waitForAbort } from "@opencode/util/process"
 import { State } from "../state.js"
-import { NativeProducer } from "../execution-producer.js"
 import type { McpClient } from "./client.js"
 
 export const ServerName = Schema.String.pipe(Schema.brand("MCP.ServerName"))
@@ -777,13 +776,11 @@ export const layer = (options?: Options) =>
         // Reads report what is connected now; servers still starting contribute once they publish a change.
         request,
         tools: Effect.fn("MCP.tools")(function* () {
-          yield* NativeProducer.assertAmbientMcpAccess
           return Array.from(entries.values())
             .flatMap((entry) => entry.tools ?? [])
             .toSorted((a, b) => a.server.localeCompare(b.server) || a.name.localeCompare(b.name))
         }),
         callTool: Effect.fn("MCP.callTool")(function* (input) {
-          yield* NativeProducer.assertAmbientMcpAccess
           const target = yield* requireServer(input.server)
           yield* target.entry.startup.await
           if (!target.entry.client)
@@ -802,7 +799,6 @@ export const layer = (options?: Options) =>
           return { ...result, server: target.name, tool: input.name }
         }),
         instructions: Effect.fn("MCP.instructions")(function* () {
-          yield* NativeProducer.assertAmbientMcpAccess
           return Array.from(entries)
             .flatMap(([server, entry]) => {
               const instructions = entry.client?.instructions
@@ -812,13 +808,11 @@ export const layer = (options?: Options) =>
             .toSorted((a, b) => a.server.localeCompare(b.server))
         }),
         prompts: Effect.fn("MCP.prompts")(function* () {
-          yield* NativeProducer.assertAmbientMcpAccess
           return Array.from(entries.values())
             .flatMap((entry) => entry.prompts ?? [])
             .toSorted((a, b) => a.server.localeCompare(b.server) || a.name.localeCompare(b.name))
         }),
         prompt: Effect.fn("MCP.prompt")(function* (input) {
-          yield* NativeProducer.assertAmbientMcpAccess
           const target = yield* requireServer(input.server)
           yield* target.entry.startup.await
           if (!target.entry.client) return undefined
@@ -829,7 +823,6 @@ export const layer = (options?: Options) =>
           return { ...result, server: target.name, name: input.name }
         }),
         resourceCatalog: Effect.fn("MCP.resourceCatalog")(function* () {
-          yield* NativeProducer.assertAmbientMcpAccess
           const empty = ResourceCatalog.make({ resources: [], templates: [] })
           const catalogs = yield* Effect.forEach(
             Array.from(entries),
@@ -842,14 +835,12 @@ export const layer = (options?: Options) =>
           return mergeCatalogs(catalogs)
         }),
         resources: Effect.fn("MCP.resources")(function* (input) {
-          yield* NativeProducer.assertAmbientMcpAccess
           const target = yield* requireServer(input.server)
           yield* target.entry.startup.await
           if (!target.entry.client) return ResourceCatalog.make({ resources: [], templates: [] })
           return mergeCatalogs([yield* loadCatalog(target.name, target.entry, target.entry.client)])
         }),
         readResource: Effect.fn("MCP.readResource")(function* (input) {
-          yield* NativeProducer.assertAmbientMcpAccess
           const target = yield* requireServer(input.server)
           yield* target.entry.startup.await
           if (!target.entry.client) return undefined

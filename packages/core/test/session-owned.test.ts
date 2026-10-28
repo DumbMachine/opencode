@@ -1302,7 +1302,7 @@ describe("SessionInbox command contracts", () => {
             },
           }
           yield* handle.prompt({ id, text: "original", mcp, mcpRevision: 1, resume: false })
-          expect(yield* SessionExecutionCapability.ready(sessionID, id)).toBe(true)
+          expect(yield* SessionExecutionCapability.ready(sessionID, id, ["mcp"])).toBe(true)
           const claim = "claim_" + suffix
           const receipt = yield* handle.beginInboxCapabilityRenewal(id, claim)
           expect(receipt.claim).toBe(claim)
@@ -1310,7 +1310,7 @@ describe("SessionInbox command contracts", () => {
           expect(yield* handle.beginInboxCapabilityRenewal(id, claim + "_other").pipe(Effect.flip)).toBeInstanceOf(
             InboxConflictError,
           )
-          expect(yield* SessionExecutionCapability.ready(sessionID, id)).toBe(false)
+          expect(yield* SessionExecutionCapability.ready(sessionID, id, ["mcp"])).toBe(false)
           expect(
             yield* SessionInbox.promote(fixture.db, fixture.bus, sessionID, "input", () => Effect.succeed(true)),
           ).toBe("blocked")
@@ -1321,17 +1321,17 @@ describe("SessionInbox command contracts", () => {
           ).toBeInstanceOf(InboxConflictError)
           expect(yield* SessionExecutionCapability.set(sessionID, { inputID: id, mcp, revision: 2 })).toBe(false)
           yield* handle.renewInboxCapability(id, { mcp, revision: 2, claim })
-          expect(yield* SessionExecutionCapability.ready(sessionID, id)).toBe(true)
+          expect(yield* SessionExecutionCapability.ready(sessionID, id, ["mcp"])).toBe(true)
           // A delayed duplicate begin must not suspend its committed grant again.
           yield* handle.beginInboxCapabilityRenewal(id, claim)
-          expect(yield* SessionExecutionCapability.ready(sessionID, id)).toBe(true)
+          expect(yield* SessionExecutionCapability.ready(sessionID, id, ["mcp"])).toBe(true)
           expect(yield* SessionInbox.promote(fixture.db, fixture.bus, sessionID, "input")).toBe(1)
           expect(yield* handle.beginInboxCapabilityRenewal(id, "delivered_claim").pipe(Effect.flip)).toBeInstanceOf(
             InboxConflictError,
           )
           yield* SessionExecutionCapability.retain(sessionID, new Set())
           yield* handle.renewInboxCapability(id, { mcp, revision: 2, claim })
-          expect(yield* SessionExecutionCapability.ready(sessionID, id)).toBe(false)
+          expect(yield* SessionExecutionCapability.ready(sessionID, id, ["mcp"])).toBe(false)
           expect(yield* handle.inbox()).toEqual([])
           expect((yield* handle.message(id))?.id).toBe(id)
           expect(

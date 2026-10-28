@@ -16,7 +16,6 @@ import { toSessionError } from "./to-session-error.js"
 import { UserInterruptedError } from "./error.js"
 import { SessionExecutionCapability } from "./execution-capability.js"
 import { SessionInbox } from "./inbox.js"
-import { SessionPublicationAdmission } from "./publication-admission.js"
 import { SessionExecutionDiagnostics } from "./execution-diagnostics.js"
 
 export interface State {
@@ -178,7 +177,7 @@ export const layer = Layer.effect(
               SessionEvent.Execution.Failed,
               {
                 sessionID,
-                error: session?.contextPolicy ? SessionPublicationAdmission.failure(outcome.error) : outcome.error,
+                error: outcome.error,
               },
               releaseOnCommit(sessionID),
             )

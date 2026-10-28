@@ -10,7 +10,7 @@ import {
   type ToolCall,
 } from "@opencode/ai"
 import type { Agent } from "@opencode/schema/agent"
-import { Cause, Clock, Data, Deferred, Effect, Exit, Fiber, Option, Semaphore, Stream } from "effect"
+import { Cause, Clock, Data, Effect, Exit, Fiber, Option, Stream } from "effect"
 import { SessionError } from "@opencode/schema/session-error"
 import { Bus } from "../../bus.js"
 import { Permission } from "../../permission.js"
@@ -28,7 +28,6 @@ import { SessionUsage } from "../usage.js"
 import { SessionRunnerModel } from "./model.js"
 import { createLLMEventPublisher } from "./publish-llm-event.js"
 import { SessionRunnerRetry } from "./retry.js"
-import { NativeProducer } from "../../execution-producer.js"
 
 export type Outcome = Data.TaggedEnum<{
   Completed: { readonly needsContinuation: boolean }
@@ -49,7 +48,6 @@ interface Input {
   readonly agent: Agent.ID
   readonly model: SessionRunnerModel.Resolved
   readonly prepared: Omit<SessionModelRequest.Prepared, "event">
-  readonly contextPolicy?: SessionSchema.Info["contextPolicy"]
   readonly retry: (
     cause: AIError,
     error: SessionError.Error,
@@ -72,25 +70,16 @@ export const make = Effect.gen(function* () {
   const toolOutput = yield* ToolOutput.Service
 
   const attempt = Effect.fn("SessionStep.attempt")(function* (input: Input) {
-    const startSnapshot = input.contextPolicy ? undefined : yield* snapshots.capture()
+    const startSnapshot = yield* snapshots.capture()
     const publisher = createLLMEventPublisher(bus, {
       sessionID: input.sessionID,
       assistantMessageID: input.assistantMessageID,
       agent: input.agent,
       model: input.model.ref,
       providerMetadataKey: input.model.model.route.providerMetadataKey ?? input.model.model.provider,
-      publication: input.prepared.publication,
       snapshot: startSnapshot,
       started: yield* Clock.currentTimeMillis,
     })
-    const terminalSignal = yield* Deferred.make<void>()
-    const toolFailureSignal = yield* Deferred.make<void>()
-    // No effect classification is negotiated for managed tools. Keep execution,
-    // truncation and durable publication ordered until the protocol supplies one.
-    const toolGate = input.prepared.publication?.prepareTerminal ? Semaphore.makeUnsafe(1) : undefined
-    let toolFailed = false
-    let terminalOutcome: { readonly id: string; readonly result: Tool.NormalizedResult } | undefined
-    const terminalResult = () => terminalOutcome
     const toolRuns: Array<{
       readonly call: ToolCall
       readonly fiber: Fiber.Fiber<void, Permission.DeclinedError | QuestionTool.CancelledError>
@@ -108,18 +97,14 @@ export const make = Effect.gen(function* () {
       })
     }
 
-    // Provider events retain their own order; managed local tools share a gate.
+    // Provider and tool fibers retain per-source order without a shared writer queue.
     // A local execution starts only after its Tool.Called publication completes.
     let overflowFailure: ProviderErrorEvent | undefined
     // Read to the end, not just the finish event, so the next request can reuse this response.
-    const providerStream = Stream.unwrap(
-      (input.prepared.assertCurrent ?? Effect.void).pipe(
-        Effect.map(() => llm.stream(input.prepared.request, input.prepared.options)),
-      ),
-    ).pipe(
+    const providerStream = llm.stream(input.prepared.request, input.prepared.options).pipe(
       Stream.runForEach((event) =>
         Effect.gen(function* () {
-          if (terminalOutcome || overflowFailure || publisher.hasProviderError()) return
+          if (overflowFailure || publisher.hasProviderError()) return
           if (
             LLMEvent.is.providerError(event) &&
             isContextOverflowFailure(event) &&
@@ -130,112 +115,32 @@ export const make = Effect.gen(function* () {
           }
           yield* publisher.publish(event)
           if (event.type !== "tool-call" || event.providerExecuted) return
-          const execution = Effect.uninterruptibleMask((restore) =>
-            restore(executeTool(event)).pipe(
-              Effect.catchCause((cause) => {
-                const result = NativeProducer.terminalToolResult(cause)
-                return result ? Effect.succeed(result) : Effect.failCause(cause)
-              }),
-              Effect.flatMap((result) => {
-                if (!NativeProducer.isTerminalToolResult(result))
-                  return toolOutput.truncate(result, input.prepared.publication)
-                terminalOutcome = { id: event.id, result }
-                return Deferred.succeed(terminalSignal, undefined).pipe(Effect.as(result))
-              }),
-              Effect.flatMap((outcome) =>
-                terminalOutcome ? Effect.void : publisher.toolExecution(event.id, event.name, outcome),
+          toolRuns.push({
+            call: event,
+            fiber: yield* Effect.uninterruptibleMask((restore) =>
+              restore(executeTool(event)).pipe(
+                Effect.flatMap(toolOutput.truncate),
+                Effect.flatMap((outcome) => publisher.toolExecution(event.id, event.name, outcome)),
+                Effect.catchTag("Tool.Error", (error) =>
+                  publisher.failTool(event.id, toSessionError(error), error.metadata).pipe(Effect.asVoid),
+                ),
               ),
-              Effect.catchTag("Tool.Error", (error) =>
-                publisher.failTool(event.id, toSessionError(error), error.metadata, error).pipe(Effect.asVoid),
-              ),
-            ),
-          )
-          // Register the fiber before its failure can stop the provider reader.
-          yield* Effect.uninterruptibleMask((restore) =>
-            restore(
-              toolGate
-                ? toolGate.withPermit(
-                    Effect.suspend(() => (terminalOutcome || toolFailed ? Effect.void : execution)).pipe(
-                      Effect.onExit((exit) => {
-                        if (Exit.isSuccess(exit)) return Effect.void
-                        toolFailed = true
-                        return Deferred.succeed(toolFailureSignal, undefined).pipe(Effect.asVoid)
-                      }),
-                    ),
-                  )
-                : execution,
-            ).pipe(
-              Effect.forkScoped,
-              Effect.tap((fiber) =>
-                Effect.sync(() => {
-                  toolRuns.push({ call: event, fiber })
-                }),
-              ),
-            ),
-          )
+            ).pipe(Effect.forkScoped),
+          })
         }),
       ),
-      Effect.ensuring(Effect.suspend(() => (terminalOutcome ? Effect.void : publisher.flush()))),
+      Effect.ensuring(publisher.flush()),
     )
 
     // Keep the final tool and Step events uninterruptible, even when the work itself is cancelled.
     return yield* Effect.uninterruptibleMask((restore) =>
       Effect.gen(function* () {
-        // Restore the race itself, not just a child: otherwise cancellation
-        // cannot reach a parent waiting on a provider that never finishes.
-        const stream = yield* restore(
-          Effect.raceFirst(
-            toolGate
-              ? Effect.raceFirst(providerStream, Deferred.await(toolFailureSignal))
-              : providerStream,
-            Deferred.await(terminalSignal),
-          ),
-        ).pipe(Effect.exit)
-        const terminalAfterStream = terminalResult()
-        if (terminalAfterStream) {
-          yield* interruptTools
-          yield* restore(publisher.terminalControl(terminalAfterStream.id, terminalAfterStream.result))
-          return Outcome.Completed({ needsContinuation: false })
-        }
+        const stream = yield* restore(providerStream).pipe(Effect.exit)
         const streamFailure = Option.getOrUndefined(Exit.findErrorOption(stream))
         const streamInterrupted = Exit.hasInterrupts(stream)
-        // A local terminal mutation may invalidate the generating context after
-        // the provider body ends but before its signed result arrives. Join the
-        // local tools before rejecting this ordinary boundary publication.
-        const streamed =
-          !overflowFailure && publisher.hasStarted()
-            ? yield* publisher.streamed().pipe(Effect.exit)
-            : Exit.succeed(undefined)
+        if (!overflowFailure && publisher.hasStarted()) yield* publisher.streamed()
         if (streamInterrupted) yield* interruptTools
-        const settlement = Exit.isFailure(streamed) ? input.prepared.publication?.terminalSettlement : undefined
-        if (Exit.isFailure(streamed) && (!settlement || !(yield* settlement.pending))) {
-          yield* interruptTools
-          return yield* Effect.failCause(streamed.cause)
-        }
-        const joining = restore(
-          Effect.raceFirst(
-            Fiber.awaitAll(toolRuns.map((run) => run.fiber)),
-            Deferred.await(terminalSignal).pipe(Effect.as([])),
-          ),
-        ).pipe(Effect.exit)
-        const joined = yield* settlement && Exit.isFailure(streamed)
-          ? joining.pipe(
-              Effect.timeoutOrElse({
-                duration: Math.max(0, settlement.deadline - (yield* Clock.currentTimeMillis)),
-                orElse: () => Effect.succeed(Exit.failCause(streamed.cause)),
-              }),
-            )
-          : joining
-        const terminalAfterTools = terminalResult()
-        if (terminalAfterTools) {
-          yield* interruptTools
-          yield* restore(publisher.terminalControl(terminalAfterTools.id, terminalAfterTools.result))
-          return Outcome.Completed({ needsContinuation: false })
-        }
-        if (Exit.isFailure(streamed)) {
-          yield* interruptTools
-          return yield* Effect.failCause(streamed.cause)
-        }
+        const joined = yield* restore(Fiber.awaitAll(toolRuns.map((run) => run.fiber))).pipe(Effect.exit)
         if (Exit.isFailure(joined)) yield* interruptTools
         const tools = classifyToolExits(joined, toolRuns)
 
@@ -303,7 +208,6 @@ export const make = Effect.gen(function* () {
               : undefined
         if (toolFailure) yield* publisher.failUnsettledTools(toolFailure)
         if (interrupted) yield* publisher.failAssistant(STEP_INTERRUPTED)
-        if (toolGate && tools.failure && toolFailure) yield* publisher.failAssistant(toolFailure)
 
         // All local fibers have joined; only provider-hosted results can still be missing.
         if (llmError || (Exit.isSuccess(stream) && !recorded.providerFailed)) {
@@ -313,7 +217,7 @@ export const make = Effect.gen(function* () {
 
         const record = publisher.record()
         if (record.finish || record.failure) {
-          const snapshot = input.contextPolicy ? undefined : yield* snapshots.capture()
+          const snapshot = yield* snapshots.capture()
           const files =
             startSnapshot && snapshot
               ? startSnapshot === snapshot
@@ -327,7 +231,7 @@ export const make = Effect.gen(function* () {
             : undefined
           if (record.failure) yield* publisher.publishStepFailure({ ...usage, snapshot, files })
           if (record.finish && usage && !record.failure)
-            yield* publisher.endStep({
+            yield* bus.publish(SessionEvent.Step.Ended, {
               sessionID: input.sessionID,
               assistantMessageID: yield* publisher.startAssistant(),
               finish: record.finish.finish,

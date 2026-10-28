@@ -1,4 +1,3 @@
-import type { SessionPublicationProvenance } from "./publication-provenance.js"
 import { pgTable, text, integer, index, primaryKey, real, uniqueIndex, bigint } from "drizzle-orm/pg-core"
 import { sql } from "drizzle-orm"
 import { directoryColumn, pathColumn } from "../database/path.pg.js"
@@ -23,7 +22,6 @@ type SessionMessageData = Omit<(typeof SessionMessage.Info)["Encoded"], "type" |
 export const SessionLifecycleTable = pgTable("session_lifecycle", {
   id: text().$type<SessionSchema.ID>().primaryKey(),
   retired_at: bigint({ mode: "number" }),
-  context_policy: text().$type<Session.Info["contextPolicy"]>(),
 })
 
 export const SessionTable = pgTable(
@@ -49,7 +47,6 @@ export const SessionTable = pgTable(
     summary_files: integer(),
     summary_diffs: text().$type<FileDiff.LegacyInfo[]>(),
     metadata: text().$type<Record<string, unknown>>(),
-    context_policy: text().$type<Session.Info["contextPolicy"]>(),
     cost: real().notNull().default(0),
     tokens_input: integer().notNull().default(0),
     tokens_output: integer().notNull().default(0),
@@ -95,7 +92,6 @@ export const SessionMessageTable = pgTable(
     type: text().$type<SessionMessage.Type>().notNull(),
     seq: bigint({ mode: "number" }).notNull(),
     ...Timestamps,
-    publication_provenance: text().$type<SessionPublicationProvenance.State>(),
     data: text().notNull().$type<SessionMessageData>(),
   },
   (table) => [
@@ -183,44 +179,3 @@ export const InstructionStateTable = pgTable("instruction_state", {
   initial_values: text().notNull().$type<Instruction.Values>(),
   current_values: text().notNull().$type<Instruction.Values>(),
 })
-
-// Private execution barrier. This is not a transcript position or source grant.
-export const SessionTerminalControlTable = pgTable(
-  "session_terminal_control",
-  {
-    session_id: text()
-      .$type<SessionSchema.ID>()
-      .notNull()
-      .references(() => SessionTable.id, { onDelete: "cascade" }),
-    input_id: text().$type<SessionMessage.ID>().notNull(),
-    attempt: text().notNull(),
-    message_id: text().$type<SessionMessage.ID>().notNull(),
-    tool_call_id: text().notNull(),
-    producer_epoch: text().notNull(),
-    producer_key_id: text().notNull(),
-    context_reference: text().notNull(),
-    receipt_reference: text().notNull(),
-    evidence: text().notNull(),
-    unit_id: text().$type<Event.ID>(),
-    unit_digest: text(),
-    created: bigint({ mode: "number" }).notNull(),
-  },
-  (table) => [primaryKey({ columns: [table.session_id, table.input_id] })],
-)
-
-// Pre-transport deny-only intent survives uncertain host completion/recorder failure.
-export const SessionTerminalInvocationTable = pgTable(
-  "session_terminal_invocation",
-  {
-    session_id: text()
-      .$type<SessionSchema.ID>()
-      .notNull()
-      .references(() => SessionTable.id, { onDelete: "cascade" }),
-    input_id: text().$type<SessionMessage.ID>().notNull(),
-    invocation_id: text().notNull(),
-    context_reference: text().notNull(),
-    evidence: text().notNull(),
-    created: bigint({ mode: "number" }).notNull(),
-  },
-  (table) => [primaryKey({ columns: [table.session_id, table.input_id, table.invocation_id] })],
-)

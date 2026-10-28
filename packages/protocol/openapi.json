@@ -6,65 +6,6 @@
     "description": "Experimental HttpApi surface for selected instance routes."
   },
   "paths": {
-    "/api/producer/enrollment": {
-      "post": {
-        "tags": ["server"],
-        "operationId": "server.enrollProducer",
-        "parameters": [],
-        "security": [],
-        "responses": {
-          "200": {
-            "description": "ExecutionProducer.Enrollment",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ExecutionProducer.Enrollment"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "InvalidRequestError",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "UnauthorizedError",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "anyOf": [
-                    {
-                      "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
-                    },
-                    {
-                      "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
-                    }
-                  ]
-                }
-              }
-            }
-          }
-        },
-        "description": "Prove possession of the process producer key to an authenticated host. This response alone does not enroll or trust the process.",
-        "summary": "Challenge the native producer identity",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ExecutionProducer.EnrollmentRequest"
-              }
-            }
-          },
-          "required": true
-        }
-      }
-    },
     "/api/info": {
       "get": {
         "tags": ["server"],
@@ -1125,9 +1066,6 @@
                         "type": "null"
                       }
                     ]
-                  },
-                  "contextPolicy": {
-                    "$ref": "#/components/schemas/Session.ContextPolicy"
                   },
                   "permissions": {
                     "anyOf": [
@@ -2288,9 +2226,6 @@
                       "$ref": "#/components/schemas/PromptInput.SkillAttachment"
                     }
                   },
-                  "disclosure": {
-                    "$ref": "#/components/schemas/ExecutionDisclosure.Service"
-                  },
                   "mcpRevision": {
                     "$ref": "#/components/schemas/Mcp.RequestRevision"
                   },
@@ -2435,9 +2370,6 @@
                     "items": {
                       "$ref": "#/components/schemas/PromptInput.SkillAttachment"
                     }
-                  },
-                  "disclosure": {
-                    "$ref": "#/components/schemas/ExecutionDisclosure.Service"
                   },
                   "mcpRevision": {
                     "$ref": "#/components/schemas/Mcp.RequestRevision"
@@ -3740,7 +3672,7 @@
             }
           }
         },
-        "description": "Commit the exact original process-local MCP and disclosure components for a pending user input. Renewal requires its active claim. Identical committed-claim retries acknowledge success after delivery without changing credentials. Never admits or wakes work; rejects stale claims and revisions.",
+        "description": "Commit the exact original process-local MCP components for a pending user input. Renewal requires its active claim. Identical committed-claim retries acknowledge success after delivery without changing credentials. Never admits or wakes work; rejects stale claims and revisions.",
         "summary": "Renew pending input capability",
         "requestBody": {
           "content": {
@@ -3752,16 +3684,6 @@
                     "anyOf": [
                       {
                         "$ref": "#/components/schemas/Mcp.RequestServers"
-                      },
-                      {
-                        "type": "null"
-                      }
-                    ]
-                  },
-                  "disclosure": {
-                    "anyOf": [
-                      {
-                        "$ref": "#/components/schemas/ExecutionDisclosure.Service"
                       },
                       {
                         "type": "null"
@@ -14396,170 +14318,6 @@
           }
         ]
       },
-      "ExecutionDisclosure.Service": {
-        "type": "object",
-        "properties": {
-          "version": {
-            "type": "number",
-            "enum": [1]
-          },
-          "endpoint": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 2048
-          },
-          "token": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 16384
-          },
-          "publicationVersion": {
-            "type": "number",
-            "enum": [1, 2]
-          },
-          "compositionVersion": {
-            "type": "number",
-            "enum": [1, 2, 3, 4]
-          },
-          "issuer": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 512
-          },
-          "audience": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 512
-          },
-          "keys": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/ExecutionDisclosure.VerificationKey"
-            },
-            "minItems": 1,
-            "maxItems": 8
-          },
-          "catalog": {
-            "type": "object",
-            "properties": {
-              "version": {
-                "type": "number",
-                "enum": [1]
-              },
-              "audience": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 512
-              },
-              "keys": {
-                "type": "array",
-                "items": {
-                  "$ref": "#/components/schemas/ExecutionDisclosure.VerificationKey"
-                },
-                "minItems": 1,
-                "maxItems": 8
-              }
-            },
-            "required": ["version", "audience", "keys"],
-            "additionalProperties": false
-          }
-        },
-        "required": ["version", "endpoint", "token", "issuer", "audience", "keys"],
-        "additionalProperties": false
-      },
-      "ExecutionDisclosure.VerificationKey": {
-        "type": "object",
-        "properties": {
-          "id": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 128
-          },
-          "algorithm": {
-            "type": "string",
-            "enum": ["Ed25519"]
-          },
-          "publicKey": {
-            "type": "string",
-            "pattern": "^[A-Za-z0-9_-]{43}$"
-          }
-        },
-        "required": ["id", "algorithm", "publicKey"],
-        "additionalProperties": false
-      },
-      "ExecutionProducer.Enrollment": {
-        "type": "object",
-        "properties": {
-          "key": {
-            "$ref": "#/components/schemas/ExecutionDisclosure.VerificationKey"
-          },
-          "signed": {
-            "$ref": "#/components/schemas/ExecutionProducer.SignedFact"
-          }
-        },
-        "required": ["key", "signed"],
-        "additionalProperties": false
-      },
-      "ExecutionProducer.EnrollmentRequest": {
-        "type": "object",
-        "properties": {
-          "version": {
-            "type": "number",
-            "enum": [1]
-          },
-          "challenge": {
-            "type": "string",
-            "pattern": "^[A-Za-z0-9_-]{43}$"
-          },
-          "audience": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 512
-          },
-          "contracts": {
-            "type": "array",
-            "items": {
-              "type": "string",
-              "enum": [
-                "human-plaintext-identity-v1",
-                "model-plaintext-projection-v1",
-                "model-request-only-plaintext-v1",
-                "human-inline-identity-v1",
-                "model-request-only-inline-v1",
-                "mcp-invocation-v1",
-                "mcp-result-projection-v1",
-                "tool-definitions-v1",
-                "model-tool-context-v1"
-              ]
-            },
-            "minItems": 1,
-            "maxItems": 9
-          }
-        },
-        "required": ["version", "challenge", "audience"],
-        "additionalProperties": false
-      },
-      "ExecutionProducer.SignedFact": {
-        "type": "object",
-        "properties": {
-          "keyID": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 128
-          },
-          "payload": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 4096
-          },
-          "signature": {
-            "type": "string",
-            "pattern": "^[A-Za-z0-9_-]{86}$"
-          }
-        },
-        "required": ["keyID", "payload", "signature"],
-        "additionalProperties": false
-      },
       "FileDiff.Info": {
         "type": "object",
         "properties": {
@@ -17869,14 +17627,6 @@
           "version": {
             "type": "string"
           },
-          "contextInlineCompositionVersion": {
-            "type": "number",
-            "enum": [1]
-          },
-          "contextToolsCompositionVersion": {
-            "type": "number",
-            "enum": [1]
-          },
           "pid": {
             "type": "integer",
             "minimum": 0
@@ -17923,17 +17673,6 @@
           }
         },
         "required": ["_tag", "message"],
-        "additionalProperties": false
-      },
-      "Session.ContextPolicy": {
-        "type": "object",
-        "properties": {
-          "version": {
-            "type": "number",
-            "enum": [1, 2]
-          }
-        },
-        "required": ["version"],
         "additionalProperties": false
       },
       "Session.ForkBoundary": {
@@ -18196,9 +17935,6 @@
               "$ref": "#/components/schemas/Prompt.SkillAttachment"
             }
           },
-          "preparedInput": {
-            "$ref": "#/components/schemas/ExecutionProducer.SignedFact"
-          },
           "execution": {
             "$ref": "#/components/schemas/Prompt.Execution"
           },
@@ -18289,9 +18025,6 @@
           },
           "metadata": {
             "$ref": "#/components/schemas/Session.Metadata"
-          },
-          "contextPolicy": {
-            "$ref": "#/components/schemas/Session.ContextPolicy"
           },
           "permissions": {
             "$ref": "#/components/schemas/Permission.Ruleset"
@@ -19190,9 +18923,6 @@
             },
             "required": ["created"],
             "additionalProperties": false
-          },
-          "preparedInput": {
-            "$ref": "#/components/schemas/ExecutionProducer.SignedFact"
           },
           "execution": {
             "$ref": "#/components/schemas/Prompt.Execution"

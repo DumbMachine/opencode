@@ -1,7 +1,6 @@
 export * as SessionInbox from "./session-inbox.js"
 
 import { Schema } from "effect"
-import { ExecutionProducer } from "./execution-producer.js"
 import { Location } from "./location.js"
 import { Project } from "./project.js"
 import { Execution, Prompt } from "./prompt.js"
@@ -15,7 +14,6 @@ export type Delivery = typeof Delivery.Type
 export interface UserPayload extends Schema.Schema.Type<typeof UserPayload> {}
 export const UserPayload = Schema.Struct({
   ...Prompt.fields,
-  preparedInput: ExecutionProducer.SignedFact.pipe(optional),
   execution: Execution.pipe(optional),
   metadata: Schema.Record(Schema.String, Schema.Unknown).pipe(optional),
   capabilities: Schema.Array(Schema.String).pipe(optional),
