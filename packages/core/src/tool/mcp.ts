@@ -10,6 +10,18 @@ import { Mcp } from "../mcp/index.js"
 import { Permission } from "../permission.js"
 import { Tool } from "../tool.js"
 
+// A person's answer to the permission prompt reaches the model as the tool
+// result: an expiry says nothing ran, and a decline with feedback carries what
+// they said. Anything else stays a generic failure without internal detail.
+const toolFailure = (error: unknown, tool: string) =>
+  error instanceof Permission.ExpiredError
+    ? new ToolFailure({ message: error.message })
+    : error instanceof Permission.CorrectedError
+      ? new ToolFailure({ message: error.feedback })
+      : error instanceof ToolFailure
+        ? error
+        : new ToolFailure({ message: `Unable to execute ${tool}` })
+
 /**
  * Registry namespace and permission action names for MCP tools.
  */
@@ -96,11 +108,7 @@ export const layer = Layer.effect(
                   ...(content.length === 0 ? {} : { content }),
                 }
               }).pipe(
-                Effect.mapError((error) =>
-                  error instanceof Permission.ExpiredError ? new ToolFailure({ message: error.message }) : error instanceof ToolFailure
-                    ? error
-                    : new ToolFailure({ message: `Unable to execute ${name(tool.server, tool.name)}` }),
-                ),
+                Effect.mapError((error) => toolFailure(error, name(tool.server, tool.name))),
               ),
           }
       })
@@ -183,11 +191,7 @@ export const layer = Layer.effect(
                       ...(content.length === 0 ? {} : { content }),
                     }
                   }).pipe(
-                    Effect.mapError((error) =>
-                      error instanceof Permission.ExpiredError ? new ToolFailure({ message: error.message }) : error instanceof ToolFailure
-                        ? error
-                        : new ToolFailure({ message: `Unable to execute ${name(tool.server, tool.name)}` }),
-                    ),
+                    Effect.mapError((error) => toolFailure(error, name(tool.server, tool.name))),
                   ),
               })
             }

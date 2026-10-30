@@ -2557,6 +2557,34 @@ it.effect("does not dispatch an MCP operation after its permission expires", () 
   }),
 )
 
+it.effect("tells the model what the person said when they decline an MCP call", () =>
+  Effect.gen(function* () {
+    for (const feedback of ["Use the read-only replica instead.", "Do not search; just answer from memory."]) {
+      calls = 0
+      assertion = yield* Deferred.make<Permission.AssertInput>()
+      decision = Effect.fail(new Permission.CorrectedError({ feedback }))
+      const registry = yield* Tool.Service
+      const registration = yield* McpTool.Service
+      yield* registration.flush
+      const toolSet = yield* registry.snapshot()
+      const execution = yield* toolSet.execute({
+        sessionID: Session.ID.make("ses_mcp_corrected"),
+        ...toolIdentity,
+        call: {
+          type: "tool-call",
+          id: "call_mcp_corrected",
+          name: "execute",
+          input: { code: "return await tools.demo.search({})" },
+        },
+      })
+      expect(execution.metadata).toMatchObject({ error: true })
+      expect(JSON.stringify(execution.output)).toContain(feedback)
+      expect(JSON.stringify(execution.output)).not.toContain("Unable to execute")
+      expect(calls).toBe(0)
+    }
+  }),
+)
+
 it.effect("does not call MCP when permission is blocked", () =>
   Effect.gen(function* () {
     calls = 0
