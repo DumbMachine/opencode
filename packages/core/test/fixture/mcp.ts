@@ -16,6 +16,7 @@ export const emptyMcp = Mcp.Service.of({
   remove: () => Effect.die("unused mcp.remove"),
   tools: () => Effect.succeed([]),
   request: () => Effect.die("unused mcp.request"),
+  awaitStartup: () => Effect.void,
   callTool: () => Effect.die("unused mcp.callTool"),
   instructions: () => Effect.succeed([]),
   prompts: () => Effect.succeed([]),

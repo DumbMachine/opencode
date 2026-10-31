@@ -69,7 +69,10 @@ export function permissionResources(meta: unknown, input: Record<string, unknown
 }
 
 export interface Interface {
-  /** Wait for the initial MCP tool registration to settle. */
+  /**
+   * Wait for the initial MCP tool registration, give servers still connecting a bounded chance to
+   * finish, then bring the registry up to date without waiting for the debounced reload.
+   */
   readonly flush: Effect.Effect<void>
   /** Builds request-local tools backed by the supplied MCP execution. */
   readonly tools: (mcp: Mcp.Execution) => Effect.Effect<ReadonlyArray<Tool.Info>>
@@ -254,7 +257,17 @@ export const layer = Layer.effect(
       Stream.runForEach(() => reconcile),
       Effect.forkScoped({ startImmediately: true }),
     )
-    return Service.of({ flush: Effect.asVoid(Fiber.await(initial)), tools: requestTools })
+    return Service.of({
+      flush: Effect.gen(function* () {
+        yield* Fiber.await(initial)
+        yield* mcp.awaitStartup()
+        // Each catalog refresh creates new tool objects, so identity shows whether the registry is behind.
+        const current = yield* mcp.tools()
+        if (current.length !== discovered.length || current.some((tool, index) => tool !== discovered[index]))
+          yield* reconcile
+      }),
+      tools: requestTools,
+    })
   }),
 )
 

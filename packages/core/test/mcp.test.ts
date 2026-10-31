@@ -388,6 +388,7 @@ const settled = (service: Mcp.Interface, name = "resources") =>
   }).pipe(Effect.retry({ times: 200, schedule: Schedule.spaced("10 millis") }))
 
 const mcp = Layer.mock(Mcp.Service, {
+  awaitStartup: () => Effect.void,
   tools: () =>
     Effect.succeed([
       {
@@ -2341,6 +2342,7 @@ testEffect(Layer.empty).live("isolates invalid MCP tools and preserves plugin tr
           AppNodeBuilder.build(LayerNode.group([Tool.node, McpTool.node, Bus.node]), [
             Mcp.node.replace(
               Layer.mock(Mcp.Service, {
+                awaitStartup: () => Effect.void,
                 tools: () => Ref.get(catalog),
                 callTool: (input) =>
                   Effect.succeed({
@@ -2361,37 +2363,45 @@ testEffect(Layer.empty).live("isolates invalid MCP tools and preserves plugin tr
 )
 
 testEffect(Layer.empty).effect("coalesces queued MCP tool notifications after initial registration", () => {
+  const tool = (name: string) =>
+    ({
+      server: Mcp.ServerName.make("demo"),
+      name,
+      codemode: false,
+      inputSchema: { type: "object", properties: {} },
+    }) satisfies Mcp.Tool
   let reads = 0
+  let catalog = [tool("read_1")]
   return Effect.gen(function* () {
     const registry = yield* Tool.Service
     const registration = yield* McpTool.Service
     const bus = yield* Bus.Service
     yield* registration.flush
-    expect(reads).toBe(1)
+    // Initial registration plus the flush's check that the registry is current.
+    expect(reads).toBe(2)
     expect((yield* toolDefinitions(registry)).map((tool) => tool.name)).toEqual(["demo_read_1", "execute"])
 
+    catalog = [tool("read_2")]
     yield* bus.publish(McpEvent.ToolsChanged, { server: "demo" })
-    yield* advance(() => reads >= 2)
-    expect(reads).toBe(2)
-    yield* Effect.forEach(Array.from({ length: 20 }), () => bus.publish(McpEvent.ToolsChanged, { server: "demo" }))
     yield* advance(() => reads >= 3)
-    yield* drain
     expect(reads).toBe(3)
+    catalog = [tool("read_3")]
+    yield* Effect.forEach(Array.from({ length: 20 }), () => bus.publish(McpEvent.ToolsChanged, { server: "demo" }))
+    yield* advance(() => reads >= 4)
+    yield* drain
+    expect(reads).toBe(4)
     expect((yield* toolDefinitions(registry)).map((tool) => tool.name)).toEqual(["demo_read_3", "execute"])
   }).pipe(
     Effect.provide(
       AppNodeBuilder.build(LayerNode.group([Tool.node, McpTool.node, Bus.node]), [
         Mcp.node.replace(
           Layer.mock(Mcp.Service, {
+            awaitStartup: () => Effect.void,
             tools: () =>
-              Effect.sync(() => [
-                {
-                  server: Mcp.ServerName.make("demo"),
-                  name: `read_${++reads}`,
-                  codemode: false,
-                  inputSchema: { type: "object", properties: {} },
-                } satisfies Mcp.Tool,
-              ]),
+              Effect.sync(() => {
+                reads++
+                return catalog
+              }),
           }),
         ),
         Permission.node.replace(Layer.mock(Permission.Service, { assert: () => Effect.void })),
@@ -2400,6 +2410,76 @@ testEffect(Layer.empty).effect("coalesces queued MCP tool notifications after in
     ),
   )
 })
+
+// Holds every MCP POST, including the handshake, until the test releases it.
+const gatedServer = Effect.gen(function* () {
+  const started = yield* Deferred.make<void>()
+  const release = yield* Deferred.make<void>()
+  const server = yield* resourceServer({
+    respond: (request) =>
+      request.method !== "POST"
+        ? undefined
+        : Effect.runPromise(
+            Deferred.succeed(started, undefined).pipe(Effect.andThen(Deferred.await(release)), Effect.as(undefined)),
+          ),
+  })
+  return { server, started, release }
+})
+
+// The real Mcp layer behind the tool registry; the bus never delivers, so only flush can register tools.
+const startupRegistry = (url: string) =>
+  AppNodeBuilder.build(LayerNode.group([Mcp.node, Tool.node, McpTool.node]), [
+    Mcp.node.replace(resourceMcpLayer(new ConfigMCP.Remote({ type: "remote", url, oauth: false, codemode: false }))),
+    Permission.node.replace(permissions),
+    Bus.node.replace(events),
+    Image.node.replace(imagePassthrough),
+    Global.node.replace(Global.layerWith({ data: outputData })),
+  ])
+
+testEffect(Layer.empty).effect("flush waits for a server that connects within its startup window", () =>
+  Effect.gen(function* () {
+    const gated = yield* gatedServer
+    yield* Effect.gen(function* () {
+      const registry = yield* Tool.Service
+      const registration = yield* McpTool.Service
+      yield* Deferred.await(gated.started)
+      const flush = yield* registration.flush.pipe(Effect.forkChild({ startImmediately: true }))
+      yield* Effect.yieldNow
+      expect(flush.pollUnsafe()).toBeUndefined()
+
+      yield* Deferred.succeed(gated.release, undefined)
+      yield* Fiber.join(flush)
+      expect((yield* toolDefinitions(registry)).map((tool) => tool.name)).toContain("resources_echo")
+    }).pipe(
+      Effect.ensuring(Deferred.succeed(gated.release, undefined)),
+      Effect.provide(startupRegistry(gated.server.url)),
+    )
+  }),
+)
+
+testEffect(Layer.empty).effect("flush stops waiting for a hung server when its startup window ends", () =>
+  Effect.gen(function* () {
+    const gated = yield* gatedServer
+    yield* Effect.gen(function* () {
+      const mcp = yield* Mcp.Service
+      const registration = yield* McpTool.Service
+      yield* Deferred.await(gated.started)
+      const flush = yield* registration.flush.pipe(Effect.forkChild({ startImmediately: true }))
+      yield* TestClock.adjust("1999 millis")
+      expect(flush.pollUnsafe()).toBeUndefined()
+
+      yield* TestClock.adjust("1 millis")
+      yield* Fiber.join(flush)
+      // Past its window, the still-pending server no longer holds up a model call.
+      yield* registration.flush
+      expect((yield* mcp.servers())[0]?.status).toEqual({ status: "pending" })
+    }).pipe(
+      // Shutting down mid-handshake would wait on the held request.
+      Effect.ensuring(Deferred.succeed(gated.release, undefined)),
+      Effect.provide(startupRegistry(gated.server.url)),
+    )
+  }),
+)
 
 it.effect("advertises MCP output schemas to Code Mode", () =>
   Effect.gen(function* () {
