@@ -12,6 +12,7 @@ import {
   Context,
   Effect,
   Exit,
+  Fiber,
   FiberSet,
   Latch,
   Layer,
@@ -217,6 +218,12 @@ export const layer = (options?: Options) =>
       // Serializes lifecycle operations per server. Anything taking this lock from a connection
       // callback must stay forked: lifecycle operations close scopes while holding it, firing onClose.
       const locks = KeyedMutex.makeUnsafe<ServerName>()
+      // Runs a requested lifecycle operation to the end even if its caller is interrupted, such as by a
+      // client dropping the HTTP request. Stopped halfway, a server stays "pending" after a cancelled
+      // connect, or "connected" with no connection after a cancelled disconnect. Location shutdown
+      // still interrupts it.
+      const transition = <E>(effect: Effect.Effect<void, E>) =>
+        Effect.forkIn(effect, root, { startImmediately: true }).pipe(Effect.flatMap(Fiber.join))
       // Legacy era only: pending URL-mode elicitation forms, settled by notifications/elicitation/complete.
       const urlElicitations = new Map<string, Form.ID>()
 
@@ -803,20 +810,24 @@ export const layer = (options?: Options) =>
         }),
         connect: Effect.fn("MCP.connect")(function* (server) {
           const name = ServerName.make(server)
-          yield* Effect.gen(function* () {
-            const target = yield* requireServer(name)
-            yield* stopServer(name, target.entry)
-            yield* startServer(name, target.entry)
-          }).pipe(locks.withLock(name))
+          yield* transition(
+            Effect.gen(function* () {
+              const target = yield* requireServer(name)
+              yield* stopServer(name, target.entry)
+              yield* startServer(name, target.entry)
+            }).pipe(locks.withLock(name)),
+          )
         }),
         disconnect: Effect.fn("MCP.disconnect")(function* (server) {
           const name = ServerName.make(server)
-          yield* Effect.gen(function* () {
-            const target = yield* requireServer(name)
-            yield* stopServer(name, target.entry)
-            target.entry.status = { status: "disabled" }
-            yield* bus.publish(McpEvent.StatusChanged, { server: name })
-          }).pipe(locks.withLock(name))
+          yield* transition(
+            Effect.gen(function* () {
+              const target = yield* requireServer(name)
+              yield* stopServer(name, target.entry)
+              target.entry.status = { status: "disabled" }
+              yield* bus.publish(McpEvent.StatusChanged, { server: name })
+            }).pipe(locks.withLock(name)),
+          )
         }),
         remove: Effect.fn("MCP.remove")(function* (server) {
           const name = ServerName.make(server)
