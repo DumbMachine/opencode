@@ -18,6 +18,7 @@ export function toSessionError(cause: unknown): SessionError.Error {
       case "ContentPolicy":
         return providerError("provider.content-filter", cause.reason)
       case "Transport":
+        if (isUnreachable(cause)) return unreachable(cause.reason)
         return providerError("provider.transport", cause.reason)
       case "ProviderInternal":
         return providerError("provider.internal", cause.reason)
@@ -66,6 +67,23 @@ export function toSessionError(cause: unknown): SessionError.Error {
     return { type: "provider.no-route", message: cause.message }
   if (cause instanceof Integration.AuthorizationError) return { type: "provider.auth", message: cause.message }
   return { type: "unknown", message: cause instanceof Error ? cause.message : String(cause) }
+}
+
+// This machine has no network path to the provider: the host name didn't resolve, or there is no route or
+// interface. A refused connection is left out: something answered, so it is the server's state.
+const UNREACHABLE_CODES = new Set(["ENOTFOUND", "EAI_AGAIN", "ENETUNREACH", "EHOSTUNREACH", "ENETDOWN"])
+
+/** Whether the failure says this machine has no network path to the provider's host. */
+export const isUnreachable = (error: AIError) =>
+  error.reason._tag === "Transport" && error.reason.code !== undefined && UNREACHABLE_CODES.has(error.reason.code)
+
+// Names the network as the problem, so a DNS outage doesn't read like a broken model or provider.
+function unreachable(reason: AIError["reason"]): SessionError.Error {
+  const host = "url" in reason && reason.url !== undefined ? URL.parse(reason.url)?.hostname : undefined
+  return {
+    ...providerError("provider.transport", reason),
+    message: `Can't reach ${host || "the provider"}. Check the network connection. (${reason.message})`,
+  }
 }
 
 function providerError(type: string, reason: AIError["reason"]): SessionError.Error {

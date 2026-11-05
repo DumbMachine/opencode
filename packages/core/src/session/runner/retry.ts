@@ -10,7 +10,7 @@ import type { PluginHooks } from "../../plugin/hooks.js"
 import { SessionEvent } from "../event.js"
 import { SessionMessage } from "../message.js"
 import { SessionSchema } from "../schema.js"
-import { toSessionError } from "../to-session-error.js"
+import { isUnreachable, toSessionError } from "../to-session-error.js"
 import { SessionExecutionDiagnostics } from "../execution-diagnostics.js"
 import { SessionExecutionCapability } from "../execution-capability.js"
 
@@ -101,18 +101,44 @@ const rateLimitSchedule = backoff("60 seconds", 20)
 // dead provider hold a step for most of an hour. Cap those attempts well below it.
 const MAX_TIMEOUT_RETRIES = 3
 
+// While this machine has no network path to the provider, every attempt fails before reaching it, and
+// the outage behind that (a router restart, a dropped VPN, a laptop between networks) usually outlasts
+// the general allowance. These retry on their own budget: exponential from 2s capped at 30s per gap,
+// for up to an hour after the first one.
+export const UNREACHABLE_WINDOW = Duration.hours(1)
+const UNREACHABLE_GAP_MAX = 30_000
+
+const unreachableSchedule = Schedule.max([
+  Schedule.min([Schedule.exponential("2 seconds"), Schedule.spaced(Duration.millis(UNREACHABLE_GAP_MAX))]),
+  Schedule.during(UNREACHABLE_WINDOW),
+]).pipe(
+  Schedule.jittered,
+  Schedule.setInputType<Input>(),
+  // Jitter scales the capped gap by up to 1.2, so cap it again after.
+  Schedule.modifyDelay(({ duration }) =>
+    Effect.succeed(Duration.millis(Math.min(Math.ceil(Duration.toMillis(duration)), UNREACHABLE_GAP_MAX))),
+  ),
+)
+
 const isTimeout = (error: AIError) => error.reason._tag === "Transport" && error.reason.code === "Timeout"
 
 export const policy = (sessionID: SessionSchema.ID) =>
   Effect.gen(function* () {
     const step = yield* Schedule.toStep(schedule)
     const rateLimitStep = yield* Schedule.toStep(rateLimitSchedule)
+    const unreachableStep = yield* Schedule.toStep(unreachableSchedule)
     let attempt = 1
     let timeouts = 0
     return (input: Input) =>
       Effect.gen(function* () {
         const now = yield* Clock.currentTimeMillis
-        const pick = input.cause.reason._tag === "RateLimit" ? rateLimitStep : step
+        // Unreachable failures don't spend the general allowance, so a flaky link that also drops streams keeps it.
+        const pick =
+          input.retry && isUnreachable(input.cause)
+            ? unreachableStep
+            : input.cause.reason._tag === "RateLimit"
+              ? rateLimitStep
+              : step
         const next = yield* pick(now, input).pipe(Pull.catchDone(() => Effect.succeed(undefined)))
         if (!next) return { retry: false as const }
         const [, duration] = next
