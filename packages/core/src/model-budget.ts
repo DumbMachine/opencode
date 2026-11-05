@@ -52,6 +52,10 @@ const sessionPrefix = (session: string) => `${journalPrefix}${encodeURIComponent
 const journalKey = (record: typeof completion.Type) => `${sessionPrefix(record.session_id)}${record.attempt_id}`
 const zeroUsage = { input: 0, output: 0, reasoning: 0, cache_read: 0, cache_write: 0 }
 const gatewayTimeouts = new Set([408, 504, 524])
+// Request-level refusals: the provider declined before generating. Server
+// errors, content-policy blocks and transport failures stay estimate-billed
+// because the provider may have processed the prompt.
+const unbilledRefusals = new Set(["RateLimit", "QuotaExceeded", "Authentication", "NoRoute", "InvalidRequest"])
 
 const hasOpaqueInput = (request: LLMRequest) =>
   request.messages.some((message) =>
@@ -455,7 +459,12 @@ export const make = (client: LLMClientShape, endpoint: string, token: string, kv
                 const status = error.reason.http?.status
                 const rejected =
                   status !== undefined && status >= 400 && status < 600 && !gatewayTimeouts.has(status)
-                if (!observed && rejected) yield* settle(state, "complete", zeroUsage)
+                // Some providers accept the stream (HTTP 200) and then report a
+                // request-level refusal such as a rate limit as its first event.
+                // Nothing was generated and the provider does not bill it, so a
+                // retry storm must not charge the whole prompt per attempt.
+                const refusedInStream = state.outputChars === 0 && unbilledRefusals.has(error.reason._tag)
+                if ((!observed && rejected) || refusedInStream) yield* settle(state, "complete", zeroUsage)
                 return Stream.fail(error)
               }),
             ),

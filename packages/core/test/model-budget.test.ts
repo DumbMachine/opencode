@@ -426,6 +426,55 @@ test("provider HTTP errors release the hold and gateway timeouts settle the esti
   }
 })
 
+test("in-stream refusals on an accepted stream release the hold without billing the prompt", async () => {
+  const completions: Array<Record<string, number>> = []
+  let frame: Record<string, unknown> = {}
+  const server = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const path = new URL(req.url).pathname
+      if (path === "/reserve") return Response.json({ ok: true })
+      if (path === "/complete") {
+        completions.push(((await req.json()) as { usage: Record<string, number> }).usage)
+        return Response.json({ ok: true })
+      }
+      // HTTP 200: the refusal arrives as the stream's first event.
+      return new Response(`data: ${JSON.stringify(frame)}\n\n`, { headers: { "content-type": "text/event-stream" } })
+    },
+  })
+  const layer = Layer.merge(
+    LayerNode.compile(KV.node),
+    LLMClient.layer.pipe(Layer.provide(RequestExecutor.layer.pipe(Layer.provide(FetchHttpClient.layer)))),
+  )
+  const run = Effect.gen(function* () {
+    const base = yield* LLMClient.Service
+    const journal = yield* KV.Service
+    const client = ModelBudget.make(base, server.url.origin, "test", journal, 128)
+    const model = OpenAIResponses.route
+      .with({ endpoint: { baseURL: server.url.origin + "/v1/" }, auth: Auth.bearer("test") })
+      .model({ id: "test", compatibility: { supportsMaxOutputTokens: false }, inputLimit: 4096, outputLimit: 512 })
+    return yield* client
+      .stream(LLM.request({ model, http: { headers: { "x-opencode-session": "s-refusal" } }, prompt: "hello ".repeat(200) }))
+      .pipe(Stream.runCollect)
+  }).pipe(Effect.provide(layer))
+  try {
+    for (const code of ["rate_limit_exceeded", "insufficient_quota"]) {
+      frame = { type: "error", code, message: "refused" }
+      completions.length = 0
+      await expect(Effect.runPromise(run)).rejects.toThrow()
+      expect(completions).toEqual([{ input: 0, output: 0, reasoning: 0, cache_read: 0, cache_write: 0 }])
+    }
+    // A server error may follow prompt processing, so it keeps the estimate.
+    frame = { type: "error", code: "server_error", message: "internal" }
+    completions.length = 0
+    await expect(Effect.runPromise(run)).rejects.toThrow()
+    expect(completions).toHaveLength(1)
+    expect(completions[0]!.input).toBeGreaterThan(0)
+  } finally {
+    server.stop(true)
+  }
+})
+
 test("interrupt waits for confirmed usage to finish its completion callback", async () => {
   const entered = Promise.withResolvers<void>()
   const release = Promise.withResolvers<void>()
