@@ -35,7 +35,9 @@ test("admission precedes provider execution and sends an enforced output limit",
       }
       if (path === "/complete") {
         if (completionFailures-- > 0) return new Response("temporary outage", { status: 503 })
-        expect(body.usage).toEqual({ input: 10, output: 3, reasoning: 0, cache_read: 0, cache_write: 0 })
+        // A stream without a usage report settles the admission estimate.
+        if (omitUsage) expect(body.usage).toMatchObject({ output: 0, reasoning: 0, cache_read: 0, cache_write: 0 })
+        else expect(body.usage).toEqual({ input: 10, output: 3, reasoning: 0, cache_read: 0, cache_write: 0 })
         return Response.json({ ok: true })
       }
       expect(body.provider_cost_covered).toBeUndefined()
@@ -76,7 +78,7 @@ test("admission precedes provider execution and sends an enforced output limit",
     events.length = 0
     omitUsage = true
     await Effect.runPromise(run).catch(() => undefined)
-    expect(events).toEqual(["/reserve", "/v1/chat/completions"])
+    expect(events).toEqual(["/reserve", "/v1/chat/completions", "/complete"])
     events.length = 0
     reject = true
     await expect(Effect.runPromise(run)).rejects.toThrow()
@@ -168,6 +170,21 @@ test("input bounds use each model window and media requires a declared limit", (
     const media = LLM.request({ model, messages: [Message.user(Message.media(Media.base64("aGVsbG8=", "image/png")))] })
     expect(ModelBudget.inputBound(media)).toBe(inputLimit)
     expect(ModelBudget.inputEstimate(media)).toBe(inputLimit)
+    const pdf = LLM.request({ model, messages: [Message.user(Message.media(Media.base64("aGVsbG8=", "application/pdf")))] })
+    expect(ModelBudget.inputEstimate(pdf)).toBe(inputLimit)
+  }
+  // An image keeps the full window as its maximum but is estimated at a fixed
+  // per-image size, so one screenshot does not make every later call in the
+  // chat hold an entire context window.
+  for (const inputLimit of [200_000, 1_000_000]) {
+    const model = route.model({ id: `window-${inputLimit}`, inputLimit })
+    const image = Message.media(Media.base64("aGVsbG8=", "image/png"))
+    const one = LLM.request({ model, messages: [Message.user([Message.text("look"), image])] })
+    const two = LLM.request({ model, messages: [Message.user([Message.text("look"), image, image])] })
+    expect(ModelBudget.inputBound(one)).toBe(inputLimit)
+    expect(ModelBudget.inputEstimate(one)).toBeGreaterThanOrEqual(ModelBudget.IMAGE_TOKEN_ESTIMATE)
+    expect(ModelBudget.inputEstimate(one)).toBeLessThan(ModelBudget.IMAGE_TOKEN_ESTIMATE + 100)
+    expect(ModelBudget.inputEstimate(two) - ModelBudget.inputEstimate(one)).toBe(ModelBudget.IMAGE_TOKEN_ESTIMATE)
   }
   const small = LLM.request({ model: route.model({ id: "small", inputLimit: 10000 }), prompt: "hello" })
   expect(ModelBudget.inputBound(small)).toBeLessThan(10000)
@@ -353,15 +370,21 @@ test("capable endpoints reserve and send no more than the declared output window
   }
 })
 
-test("ambiguous provider failure retains the hold", async () => {
+test("provider HTTP errors release the hold and gateway timeouts settle the estimate", async () => {
   const events: string[] = []
+  const completions: Array<Record<string, number>> = []
+  let status = 500
   const server = Bun.serve({
     port: 0,
     async fetch(req) {
       const path = new URL(req.url).pathname
       events.push(path)
       if (path === "/reserve") return Response.json({ ok: true })
-      return Response.json({ error: { message: "provider unavailable" } }, { status: 500 })
+      if (path === "/complete") {
+        completions.push(((await req.json()) as { usage: Record<string, number> }).usage)
+        return Response.json({ ok: true })
+      }
+      return Response.json({ error: { message: "provider unavailable" } }, { status })
     },
   })
   const layer = Layer.merge(
@@ -380,8 +403,24 @@ test("ambiguous provider failure retains the hold", async () => {
       .pipe(Stream.runCollect)
   }).pipe(Effect.provide(layer))
   try {
-    await expect(Effect.runPromise(run)).rejects.toThrow()
-    expect(events).toEqual(["/reserve", "/v1/chat/completions"])
+    for (const code of [500, 503, 529, 429, 400]) {
+      status = code
+      events.length = 0
+      completions.length = 0
+      await expect(Effect.runPromise(run)).rejects.toThrow()
+      expect(events).toEqual(["/reserve", "/v1/chat/completions", "/complete"])
+      expect(completions).toEqual([{ input: 0, output: 0, reasoning: 0, cache_read: 0, cache_write: 0 }])
+    }
+    for (const code of [504, 408]) {
+      status = code
+      events.length = 0
+      completions.length = 0
+      await expect(Effect.runPromise(run)).rejects.toThrow()
+      expect(events).toEqual(["/reserve", "/v1/chat/completions", "/complete"])
+      expect(completions).toHaveLength(1)
+      expect(completions[0]!.input).toBeGreaterThan(0)
+      expect(completions[0]!.output).toBe(0)
+    }
   } finally {
     server.stop(true)
   }

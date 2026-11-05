@@ -210,15 +210,20 @@ test("interrupt between admission and invocation journals no-dispatch cancellati
   }
 })
 
-test("an interrupted invoked provider retains unknown exposure without a zero callback", async () => {
+test("an interrupted invoked provider settles the input estimate and the streamed output", async () => {
   const invoked = Promise.withResolvers<void>()
   const events: string[] = []
+  const completions: Array<Record<string, number>> = []
   const server = Bun.serve({
     port: 0,
     async fetch(req) {
       const path = new URL(req.url).pathname
       events.push(path)
       if (path === "/reserve") return Response.json({ ok: true })
+      if (path === "/complete") {
+        completions.push(((await req.json()) as { usage: Record<string, number> }).usage)
+        return Response.json({ ok: true })
+      }
       invoked.resolve()
       return new Response(
         new ReadableStream({
@@ -244,8 +249,14 @@ test("an interrupted invoked provider retains unknown exposure without a zero ca
   )
   try {
     await invoked.promise
+    // Let the first streamed delta reach the budget wrapper before stopping.
+    await new Promise((resolve) => setTimeout(resolve, 50))
     await Effect.runPromise(Fiber.interrupt(fiber))
-    expect(events).toEqual(["/reserve", "/v1/chat/completions"])
+    expect(events).toEqual(["/reserve", "/v1/chat/completions", "/complete"])
+    expect(completions).toHaveLength(1)
+    expect(completions[0]!.input).toBeGreaterThan(0)
+    expect(completions[0]!.output).toBe(2) // "partial" is 7 characters
+    expect(completions[0]!.reasoning + completions[0]!.cache_read + completions[0]!.cache_write).toBe(0)
   } finally {
     await Effect.runPromise(Fiber.interrupt(fiber))
     server.stop(true)

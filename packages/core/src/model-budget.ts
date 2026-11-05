@@ -51,6 +51,7 @@ const journalPrefix = "model-budget:callbacks/"
 const sessionPrefix = (session: string) => `${journalPrefix}${encodeURIComponent(session)}/`
 const journalKey = (record: typeof completion.Type) => `${sessionPrefix(record.session_id)}${record.attempt_id}`
 const zeroUsage = { input: 0, output: 0, reasoning: 0, cache_read: 0, cache_write: 0 }
+const gatewayTimeouts = new Set([408, 504, 524])
 
 const hasOpaqueInput = (request: LLMRequest) =>
   request.messages.some((message) =>
@@ -80,18 +81,39 @@ export const inputBound = (request: LLMRequest) => {
   return limit === undefined ? bytes : Math.min(bytes, limit)
 }
 
+// Providers tokenize an image to a bounded size (about 1,600 tokens for a
+// full-resolution Anthropic image; OpenAI and Gemini use fewer). Admission
+// estimates one image at that size instead of the whole context window, which
+// made every later call in a chat with a screenshot hold a full window.
+export const IMAGE_TOKEN_ESTIMATE = 1600
+
+const isImage = (mime: string | undefined) => mime?.toLowerCase().startsWith("image/") === true
+
+// Documents, audio, and video can expand to the whole window at the provider.
+const hasUnboundedMedia = (request: LLMRequest) =>
+  request.messages.some((message) =>
+    message.content.some(
+      (part) =>
+        (part.type === "media" && part.media.kind !== "image") ||
+        (part.type === "tool-result" &&
+          part.result.type === "content" &&
+          part.result.value.some((content) => content.type === "file" && !isImage(content.mime))),
+    ),
+  )
+
 // Customer admission uses the same approximate text token accounting as
 // compaction. UTF-8/non-ASCII text is not an exact tokenizer measurement; the
 // separate byte/model bound remains authoritative for maximum exposure.
 export const inputEstimate = (request: LLMRequest, bound = inputBound(request)) => {
-  if (hasOpaqueInput(request)) return bound
+  if (hasUnboundedMedia(request)) return bound
   const estimateTool = (tool: ToolEntry): number =>
     Token.estimate(tool.name + (tool.description ?? "")) +
     (tool.type === "tool"
       ? Token.estimate(JSON.stringify(tool.inputSchema))
       : tool.tools.reduce((sum, entry) => sum + estimateTool(entry), 0))
   const estimatePart = (part: ContentPart): number => {
-    if (part.type === "effort" || part.type === "media") return 0
+    if (part.type === "effort") return 0
+    if (part.type === "media") return IMAGE_TOKEN_ESTIMATE
     if (part.type === "compaction") return Token.estimate(part.text ?? "")
     if (part.type === "text" || part.type === "reasoning") return Token.estimate(part.text)
     if (part.type === "tool-call")
@@ -101,7 +123,7 @@ export const inputEstimate = (request: LLMRequest, bound = inputBound(request)) 
       return (
         overhead +
         part.result.value.reduce(
-          (sum, content) => sum + (content.type === "text" ? Token.estimate(content.text) : 0),
+          (sum, content) => sum + (content.type === "text" ? Token.estimate(content.text) : IMAGE_TOKEN_ESTIMATE),
           0,
         )
       )
@@ -294,19 +316,46 @@ export const make = (client: LLMClientShape, endpoint: string, token: string, kv
           provider_id: request.model.provider,
           model_id: request.model.id,
         }
+        const estimatedInput = yield* Effect.try({
+          try: () => inputEstimate(request, input),
+          catch: () => failure("Model input cannot be estimated"),
+        })
+        // Every admitted attempt ends in exactly one callback, so no hold is
+        // left waiting for an operator. The first settlement wins; the journal
+        // key is the attempt, and a second, different payload would conflict.
+        const settle = (
+          state: { settled: boolean },
+          operation: "complete" | "cancel",
+          usage: (typeof completion.Type)["usage"],
+        ) =>
+          Effect.suspend(() => {
+            if (state.settled) return Effect.void
+            state.settled = true
+            return record({ ...attempt, operation, usage })
+          })
         const state = yield* Effect.acquireRelease(
-          Effect.sync(() => ({ dispatched: 0, admitted: false, uncertain: false })),
-          (state) =>
-            !state.dispatched && (state.admitted || state.uncertain)
-              ? record({ ...attempt, operation: "cancel", usage: zeroUsage })
-              : Effect.void,
+          Effect.sync(() => ({ dispatched: 0, admitted: false, uncertain: false, settled: false, outputChars: 0 })),
+          (state) => {
+            if (state.settled) return Effect.void
+            if (!state.dispatched)
+              return state.admitted || state.uncertain ? settle(state, "cancel", zeroUsage) : Effect.void
+            // The provider ran but reported no usage: the stream was interrupted,
+            // disconnected, or ended without a usage event. Providers bill the
+            // prompt and the tokens generated so far, so settle on the admission
+            // input estimate plus the output actually streamed.
+            return settle(state, "complete", {
+              ...zeroUsage,
+              input: estimatedInput,
+              output: Token.estimateLength(state.outputChars),
+            })
+          },
         )
         yield* send("/reserve", {
           ...attempt,
           ...(coveredAt === undefined ? {} : { provider_cost_covered: true }),
           input_token_limit: input,
           output_token_limit: maxTokens,
-          input_token_estimate: inputEstimate(request, input),
+          input_token_estimate: estimatedInput,
           output_token_estimate: outputEstimate,
         }).pipe(
           // Cancellation must not lose an accepted admission between its HTTP
@@ -350,16 +399,7 @@ export const make = (client: LLMClientShape, endpoint: string, token: string, kv
                   yield* options?.assertRequest?.(actual) ?? Effect.void
                   yield* coverageCurrent
                 })
-        let completed = false
         let observed = false
-        const complete = (usage: (typeof completion.Type)["usage"]) =>
-          record({ ...attempt, operation: "complete", usage }).pipe(
-            Effect.tap(() =>
-              Effect.sync(() => {
-                completed = true
-              }),
-            ),
-          )
         return Stream.suspend(() => {
           // With a physical admission guard, its successful send boundary marks
           // dispatch. Refusal after reserve must retain the no-send cancellation.
@@ -387,12 +427,13 @@ export const make = (client: LLMClientShape, endpoint: string, token: string, kv
         }).pipe(
           Stream.tap((event) => {
             observed = true
-            if (completed || !LLMEvent.is.stepFinish(event) || !event.usage) return Effect.void
+            if (LLMEvent.is.textDelta(event) || LLMEvent.is.reasoningDelta(event) || LLMEvent.is.toolInputDelta(event))
+              state.outputChars += event.text.length
+            if (state.settled || !LLMEvent.is.stepFinish(event) || !event.usage) return Effect.void
             const usage = event.usage
+            // Incomplete usage fails the stream; the finalizer settles the estimate.
             if (!Number.isSafeInteger(usage.inputTokens) || !Number.isSafeInteger(usage.outputTokens))
-              return Effect.fail(failure("Provider usage is incomplete; budget remains reserved"))
-            // No usage / disconnected streams retain their durable reservation.
-            // A later verified completion can retry this idempotent callback.
+              return Effect.fail(failure("Provider usage is incomplete"))
             return Schema.decodeUnknownEffect(completion.fields.usage)({
               input: usage.nonCachedInputTokens ?? usage.inputTokens ?? 0,
               output: usage.visibleOutputTokens,
@@ -400,24 +441,21 @@ export const make = (client: LLMClientShape, endpoint: string, token: string, kv
               cache_read: usage.cacheReadInputTokens ?? 0,
               cache_write: usage.cacheWriteInputTokens ?? 0,
             }).pipe(
-              Effect.mapError(() => failure("Provider usage is incomplete; budget remains reserved")),
-              Effect.flatMap(complete),
+              Effect.mapError(() => failure("Provider usage is incomplete")),
+              Effect.flatMap((measured) => settle(state, "complete", measured)),
             )
           }),
           Stream.catch((error) =>
             Stream.unwrap(
               Effect.gen(function* () {
-                const reason = error.reason
-                const status = reason.http?.status
-                // A typed HTTP refusal before any provider output proves this
-                // attempt did not execute. Interruptions and ambiguous transport
-                // outcomes keep their hold until verified usage is available.
+                // An HTTP error response before any provider output (a refusal,
+                // rate limit, overload, or server error) produced no billable
+                // generation. A gateway timeout is the exception: the upstream
+                // may still have run, so the finalizer settles the estimate.
+                const status = error.reason.http?.status
                 const rejected =
-                  ["InvalidRequest", "Authentication", "RateLimit", "QuotaExceeded"].includes(reason._tag) &&
-                  status !== undefined &&
-                  status >= 400 &&
-                  status < 500
-                if (!completed && !observed && rejected) yield* complete(zeroUsage)
+                  status !== undefined && status >= 400 && status < 600 && !gatewayTimeouts.has(status)
+                if (!observed && rejected) yield* settle(state, "complete", zeroUsage)
                 return Stream.fail(error)
               }),
             ),
