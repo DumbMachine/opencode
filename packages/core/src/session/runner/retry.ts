@@ -77,30 +77,36 @@ const retryAfter = (input: Input) => {
   return undefined
 }
 
+const backoff = (cap: Duration.Input, retries: number) =>
+  Schedule.max([Schedule.min([Schedule.exponential("2 seconds"), Schedule.spaced(cap)]), Schedule.recurs(retries)]).pipe(
+    Schedule.jittered,
+    Schedule.setInputType<Input>(),
+    Schedule.modifyDelay(({ input, duration: delay }) => {
+      const minimum = retryAfter(input)
+      const duration = minimum === undefined ? delay : Duration.max(delay, Duration.millis(minimum))
+      return Effect.succeed(Duration.millis(Math.ceil(Duration.toMillis(duration))))
+    }),
+  )
+
 // Exponential from 2s capped at 10s per gap, for 10 retries: 2, 4, 8, then 10 × 7, about 84s of
 // waiting when every attempt fails (67–101s with jitter). `min` takes the faster schedule, so the
 // cap applies per gap; `max` with `recurs` bounds the count.
-const schedule = Schedule.max([
-  Schedule.min([Schedule.exponential("2 seconds"), Schedule.spaced("10 seconds")]),
-  Schedule.recurs(10),
-]).pipe(
-  Schedule.jittered,
-  Schedule.setInputType<Input>(),
-  Schedule.modifyDelay(({ input, duration: delay }) => {
-    const minimum = retryAfter(input)
-    const duration = minimum === undefined ? delay : Duration.max(delay, Duration.millis(minimum))
-    return Effect.succeed(Duration.millis(Math.ceil(Duration.toMillis(duration))))
-  }),
-)
+const schedule = backoff("10 seconds", 10)
+
+// A rate limit clears by waiting, and per-minute token windows shared by parallel sessions can stay
+// exhausted for minutes: 2, 4, 8, 16, 32, then 60 × 15, about 16 minutes before giving up.
+const rateLimitSchedule = backoff("60 seconds", 20)
 
 export const policy = (sessionID: SessionSchema.ID) =>
   Effect.gen(function* () {
     const step = yield* Schedule.toStep(schedule)
+    const rateLimitStep = yield* Schedule.toStep(rateLimitSchedule)
     let attempt = 1
     return (input: Input) =>
       Effect.gen(function* () {
         const now = yield* Clock.currentTimeMillis
-        const next = yield* step(now, input).pipe(Pull.catchDone(() => Effect.succeed(undefined)))
+        const pick = input.cause.reason._tag === "RateLimit" ? rateLimitStep : step
+        const next = yield* pick(now, input).pipe(Pull.catchDone(() => Effect.succeed(undefined)))
         if (!next) return { retry: false as const }
         const [, duration] = next
         attempt++
