@@ -231,6 +231,46 @@ it.effect("generates a title from the sole user message and renames the session"
   }),
 )
 
+it.effect("titles from the final text block, not earlier commentary blocks", () =>
+  Effect.gen(function* () {
+    yield* enableTitleAgent
+    const store = yield* SessionStore.Service
+    const title = yield* SessionTitle.Service
+    const cases = [
+      {
+        id: "ses_title_commentary",
+        blocks: [
+          ["msg_commentary", "Need a short title."],
+          ["msg_final", "Freightline demo workspace setup\n"],
+        ],
+        expected: "Freightline demo workspace setup",
+      },
+      {
+        id: "ses_title_commentary_twice",
+        blocks: [
+          ["msg_a", "Thinking about it"],
+          ["msg_b", "Still deciding"],
+          ["msg_c", "Claims desk build"],
+          ["msg_d", "  \n"],
+        ],
+        expected: "Claims desk build",
+      },
+    ] as const
+    for (const item of cases) {
+      const sessionID = Session.ID.make(item.id)
+      yield* insertSession(sessionID)
+      yield* prompt(sessionID, "Build the demo workspace")
+      titleStream = () =>
+        Stream.make(
+          ...item.blocks.map(([id, text]) => LLMEvent.textDelta({ id, text })),
+          LLMEvent.finish({ reason: { normalized: "stop" } }),
+        )
+      yield* title.generate(sessionID)
+      expect((yield* store.get(sessionID))?.title).toBe(item.expected)
+    }
+  }),
+)
+
 it.effect("runs title hooks instead of context hooks", () =>
   Effect.gen(function* () {
     yield* enableTitleAgent
