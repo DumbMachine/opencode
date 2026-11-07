@@ -207,7 +207,7 @@ describe("toSessionError", () => {
               cause,
               error: toSessionError(cause),
               agent: Agent.ID.make("build"),
-              model: { providerID: ProviderID.make("azure"), id: ModelID.make("gpt") },
+              model: { providerID: Provider.ID.make("azure"), id: ID.make("gpt") },
               hook: () => Effect.void,
               retry: SessionRunnerRetry.isRetryable(cause),
             })
