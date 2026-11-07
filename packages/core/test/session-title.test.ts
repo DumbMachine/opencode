@@ -223,11 +223,51 @@ it.effect("generates a title from the sole user message and renames the session"
     expect(requests[0]?.promptCacheKey).toBe(sessionID)
     expect(requests[0]?.tools).toEqual([])
     expect(requests[0]?.system.map((part) => part.text)).toEqual(["You are a title generator."])
-    expect(JSON.stringify(requests[0]?.messages)).toContain("Help me debug the failing build")
+    expect(JSON.stringify(requests[0]?.messages)).toContain("<conversation>\\nHelp me debug the failing build\\n</conversation>")
     const renamed = yield* store.get(sessionID)
     expect(renamed?.title).toBe("Generated Title")
     expect(renamed?.tokens).toEqual({ input: 10, output: 4, reasoning: 2, cache: { read: 3, write: 2 } })
     expect(renamed?.cost).toBeCloseTo(0.0000233)
+  }),
+)
+
+it.effect("titles from the final text block, not earlier commentary blocks", () =>
+  Effect.gen(function* () {
+    yield* enableTitleAgent
+    const store = yield* SessionStore.Service
+    const title = yield* SessionTitle.Service
+    const cases = [
+      {
+        id: "ses_title_commentary",
+        blocks: [
+          ["msg_commentary", "Need a short title."],
+          ["msg_final", "Freightline demo workspace setup\n"],
+        ],
+        expected: "Freightline demo workspace setup",
+      },
+      {
+        id: "ses_title_commentary_twice",
+        blocks: [
+          ["msg_a", "Thinking about it"],
+          ["msg_b", "Still deciding"],
+          ["msg_c", "Claims desk build"],
+          ["msg_d", "  \n"],
+        ],
+        expected: "Claims desk build",
+      },
+    ] as const
+    for (const item of cases) {
+      const sessionID = Session.ID.make(item.id)
+      yield* insertSession(sessionID)
+      yield* prompt(sessionID, "Build the demo workspace")
+      titleStream = () =>
+        Stream.make(
+          ...item.blocks.map(([id, text]) => LLMEvent.textDelta({ id, text })),
+          LLMEvent.finish({ reason: { normalized: "stop" } }),
+        )
+      yield* title.generate(sessionID)
+      expect((yield* store.get(sessionID))?.title).toBe(item.expected)
+    }
   }),
 )
 

@@ -24,6 +24,9 @@ import { Provider } from "@opencode/core/provider"
 import { Tool } from "@opencode/schema/tool"
 import { toSessionError } from "@opencode/core/session/to-session-error"
 import { SessionRunnerRetry } from "@opencode/core/session/runner/retry"
+import { SessionSchema } from "@opencode/core/session/schema"
+import { Agent } from "@opencode/schema/agent"
+import { Effect } from "effect"
 
 const llm = (reason: AIError["reason"]) => new AIError({ reason })
 
@@ -190,6 +193,39 @@ describe("toSessionError", () => {
 
     expect(eligible.map(SessionRunnerRetry.isRetryable)).toEqual([true, true, true, true])
     expect(ineligible.map(SessionRunnerRetry.isRetryable)).toEqual([false, false, false, false, false, false, false])
+  })
+
+  test("waits out rate limits longer than other transient failures", async () => {
+    const count = (cause: AIError) =>
+      Effect.runPromise(
+        Effect.gen(function* () {
+          const decide = yield* SessionRunnerRetry.policy(SessionSchema.ID.make("ses_retry_budget"))
+          let retries = 0
+          let waited = 0
+          for (;;) {
+            const decision = yield* decide({
+              cause,
+              error: toSessionError(cause),
+              agent: Agent.ID.make("build"),
+              model: { providerID: ProviderID.make("azure"), id: ModelID.make("gpt") },
+              hook: () => Effect.void,
+              retry: SessionRunnerRetry.isRetryable(cause),
+            })
+            if (!decision.retry) return { retries, waited }
+            retries++
+            waited += decision.delay
+          }
+        }),
+      )
+    const rate = await count(llm(new RateLimitError({ message: "rate_limit_exceeded" })))
+    const internal = await count(llm(new ProviderInternalError({ message: "internal" })))
+    const transport = await count(llm(new TransportError({ message: "reset", transport: "http", operation: "request" })))
+    const auth = await count(llm(new AuthenticationError({ message: "auth" })))
+    expect(rate.retries).toBe(20)
+    expect(rate.waited).toBeGreaterThan(10 * 60_000)
+    expect([internal.retries, transport.retries]).toEqual([10, 10])
+    expect(internal.waited).toBeLessThan(3 * 60_000)
+    expect(auth.retries).toBe(0)
   })
 
   test("retries accepted transport reads but not accepted writes or rejected requests", () => {

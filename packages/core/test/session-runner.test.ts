@@ -1178,8 +1178,8 @@ describe("SessionRunnerLLM", () => {
     yield* Fiber.join(renamed)
 
     expect(s.requests).toHaveLength(6)
-    expect(s.requests[2]?.messages).toContainEqual(Message.user("First prompt"))
-    expect(s.requests[4]?.messages).toContainEqual(Message.user("First prompt"))
+    expect(s.requests[2]?.messages).toContainEqual(Message.user("<conversation>\nFirst prompt\n</conversation>"))
+    expect(s.requests[4]?.messages).toContainEqual(Message.user("<conversation>\nFirst prompt\n</conversation>"))
     expect((yield* s.session.get(sessionID)).title).toBe("Generated title")
   })
 

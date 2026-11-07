@@ -23,6 +23,10 @@ const MAX_LENGTH = 100
 const MAX_CONTEXT_LENGTH = 8_000
 const MAX_FIRST_MESSAGE_LENGTH = 2_000
 const titleChanged = Symbol("Session title changed")
+// Delimit the conversation so the title model titles it instead of obeying it.
+const CONVERSATION_OPEN = "<conversation>\n"
+const CONVERSATION_CLOSE = "\n</conversation>"
+const wrapConversation = (text: string) => `${CONVERSATION_OPEN}${text}${CONVERSATION_CLOSE}`
 
 export interface Interface {
   /** Generates an initial title or regenerates one from bounded conversation history. */
@@ -54,7 +58,9 @@ export const layer = Layer.effect(
       readonly inputID?: SessionMessage.ID
       readonly model: SessionRunnerModel.Resolved
     }) {
-      const chunks: string[] = []
+      // A model may stream commentary blocks before its answer; the title is
+      // the first line of the last text block it produced.
+      const blocks = new Map<string, string>()
       let failed = false
       let usage: SessionUsage.Recorded | undefined
       const recordUsage = Effect.suspend(() =>
@@ -72,13 +78,17 @@ export const layer = Layer.effect(
         agent: input.agent.id,
         model: input.model,
         system: input.agent.system ? [SystemPart.make(input.agent.system)] : [],
-        messages: [Message.user(input.text)],
+        messages: [Message.user(wrapConversation(input.text))],
       })
       if (prepared.event.result !== undefined) return prepared.event.result
       yield* llm.stream(prepared.request, prepared.options).pipe(
         Stream.runForEach((event) => {
           if (LLMEvent.is.providerError(event)) failed = true
-          if (LLMEvent.is.textDelta(event)) chunks.push(event.text)
+          if (LLMEvent.is.textDelta(event)) {
+            const prior = blocks.get(event.id) ?? ""
+            blocks.delete(event.id)
+            blocks.set(event.id, prior + event.text)
+          }
           if (LLMEvent.is.stepFinish(event)) {
             const step = SessionUsage.record(event.usage, input.model.cost)
             usage = usage ? SessionUsage.add(usage, step) : step
@@ -94,11 +104,15 @@ export const layer = Layer.effect(
       )
       yield* recordUsage
       if (failed) return
-      return chunks
-        .join("")
-        .split("\n")
-        .map((line) => line.trim())
-        .find((line) => line.length > 0)
+      return [...blocks.values()]
+        .reverse()
+        .map((text) =>
+          text
+            .split("\n")
+            .map((line) => line.trim())
+            .find((line) => line.length > 0),
+        )
+        .find((line) => line !== undefined)
     })
 
     const generate = Effect.fn("SessionTitle.generate")(function* (
@@ -137,7 +151,7 @@ export const layer = Layer.effect(
                 .join("\n\n")
               if (!recent) return original
               const prefix = `${original}\n\nRecent conversation:\n`
-              return `${prefix}${recent.slice(-(MAX_CONTEXT_LENGTH - prefix.length))}`
+              return `${prefix}${recent.slice(-(MAX_CONTEXT_LENGTH - prefix.length - CONVERSATION_OPEN.length - CONVERSATION_CLOSE.length))}`
             })()
           : firstUser.text
       const selection = yield* context.selectTitle(session, firstUser.execution?.model)
