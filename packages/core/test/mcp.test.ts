@@ -428,6 +428,14 @@ const mcp = Layer.mock(Mcp.Service, {
       } satisfies Mcp.Tool,
       {
         server: Mcp.ServerName.make("direct"),
+        name: "operate",
+        codemode: false,
+        description: "Runs one operation, or a batch of them, against a named resource",
+        inputSchema: { type: "object", properties: {} },
+        _meta: { [McpTool.permissionMetaKey]: { fields: ["resource", "operation"], items: ["calls"] } },
+      } satisfies Mcp.Tool,
+      {
+        server: Mcp.ServerName.make("direct"),
         name: "media",
         codemode: false,
         description: "Returns text and an image",
@@ -2309,6 +2317,7 @@ it.effect("advertises MCP output schemas to Code Mode", () =>
       "direct_issues",
       "direct_lookup",
       "direct_media",
+      "direct_operate",
       "execute",
     ])
     expect(codeModeListings(toolSet.codeModeCatalog!).find((tool) => tool.path === "demo.search")?.line).toContain(
@@ -2612,5 +2621,75 @@ it.effect("does not call MCP when permission is blocked", () =>
       error: true,
     })
     expect(calls).toBe(0)
+  }),
+)
+
+describe("MCP permission resources", () => {
+  const meta = { [McpTool.permissionMetaKey]: { fields: ["resource", "operation"], items: ["calls", "batch.calls"] } }
+
+  test("name what one call acts on from the declared fields", () => {
+    expect(McpTool.permissionResources(meta, { resource: "billing", operation: "invoice.create" })).toEqual([
+      "billing:invoice.create",
+    ])
+    expect(McpTool.permissionResources(meta, { resource: "crm", operation: "contacts.list" })).toEqual([
+      "crm:contacts.list",
+    ])
+  })
+
+  test("name every item of a declared array, once each", () => {
+    expect(
+      McpTool.permissionResources(meta, {
+        batch: {
+          calls: [
+            { resource: "billing", operation: "invoice.create" },
+            { resource: "crm", operation: "contacts.list" },
+            { resource: "billing", operation: "invoice.create" },
+            { resource: "pg", argv: ["psql"] },
+          ],
+        },
+      }),
+    ).toEqual(["billing:invoice.create", "crm:contacts.list"])
+  })
+
+  test("keep the resource open when nothing is declared or a field is missing", () => {
+    expect(McpTool.permissionResources(undefined, { resource: "billing", operation: "invoice.create" })).toEqual(["*"])
+    expect(McpTool.permissionResources({ other: true }, { resource: "billing" })).toEqual(["*"])
+    expect(McpTool.permissionResources({ [McpTool.permissionMetaKey]: { fields: "resource" } }, { resource: "x" })).toEqual(["*"])
+    expect(McpTool.permissionResources(meta, { resource: "pg", argv: ["psql", "-c", "select 1"] })).toEqual(["*"])
+    expect(McpTool.permissionResources(meta, { resource: "billing", operation: { id: "invoice.create" } })).toEqual(["*"])
+  })
+
+  test("let a later rule ask for one operation of a tool an earlier rule allows", () => {
+    const rules: Parameters<typeof Permission.evaluate>[2] = [
+      { action: "*", resource: "*", effect: "deny" },
+      { action: "demo_*", resource: "*", effect: "allow" },
+      { action: "demo_operate", resource: "billing:invoice.create", effect: "ask" },
+    ]
+    expect(Permission.evaluate("demo_operate", "billing:invoice.create", rules).effect).toBe("ask")
+    expect(Permission.evaluate("demo_operate", "crm:contacts.list", rules).effect).toBe("allow")
+    expect(Permission.evaluate("demo_operate", "*", rules).effect).toBe("allow")
+  })
+})
+
+it.effect("asks with the resources an MCP tool declares for one call", () =>
+  Effect.gen(function* () {
+    decision = Effect.void
+    const registry = yield* Tool.Service
+    const registration = yield* McpTool.Service
+    yield* registration.flush
+    const toolSet = yield* registry.snapshot()
+    for (const [input, resources] of [
+      [{ resource: "billing", operation: "invoice.create" }, ["billing:invoice.create"]],
+      [{ calls: [{ resource: "crm", operation: "contacts.list" }, { resource: "billing", operation: "invoice.create" }] }, ["crm:contacts.list", "billing:invoice.create"]],
+      [{ resource: "pg" }, ["*"]],
+    ] as const) {
+      assertion = yield* Deferred.make<Permission.AssertInput>()
+      yield* toolSet.execute({
+        sessionID: Session.ID.make("ses_mcp_resources"),
+        ...toolIdentity,
+        call: { type: "tool-call", id: "call_mcp_resources", name: "direct_operate", input },
+      })
+      expect(yield* Deferred.await(assertion)).toMatchObject({ action: "direct_operate", resources, save: resources })
+    }
   }),
 )

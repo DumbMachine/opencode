@@ -28,6 +28,43 @@ const toolFailure = (error: unknown, tool: string) =>
 export const namespace = (server: string) => server.replace(/[^a-zA-Z0-9_-]/g, "_")
 export const name = (server: string, tool: string) => `${namespace(server)}_${tool.replace(/[^a-zA-Z0-9_-]/g, "_")}`
 
+/**
+ * `_meta` key an MCP server sets on a tool in tools/list to say which input
+ * fields name what one call acts on:
+ *
+ *   { "opencode.ai/permission": { "fields": ["resource", "operation"], "items": ["calls"] } }
+ *
+ * Each call's permission resources are the `fields` values joined with ":",
+ * taken from the input itself and from every object in each `items` array
+ * (dotted paths). Rules can then target part of a multiplexed tool, the way
+ * bash rules target one command. An entry missing any field yields nothing,
+ * and a call with no entries keeps the resource "*".
+ */
+export const permissionMetaKey = "opencode.ai/permission"
+
+const nonEmpty = (value: unknown) => (typeof value === "string" && value.trim() !== "" ? value.trim() : undefined)
+const strings = (value: unknown) =>
+  Array.isArray(value) ? value.map(nonEmpty).filter((item): item is string => item !== undefined) : []
+const record = (value: unknown) =>
+  value !== null && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined
+
+export function permissionResources(meta: unknown, input: Record<string, unknown>): string[] {
+  const declared = record(record(meta)?.[permissionMetaKey])
+  const fields = strings(declared?.fields)
+  if (fields.length === 0) return ["*"]
+  const entry = (value: unknown) => {
+    const item = record(value)
+    const parts = fields.map((field) => nonEmpty(item?.[field]))
+    return parts.every((part) => part !== undefined) ? [parts.join(":")] : []
+  }
+  const items = strings(declared?.items).flatMap((path) => {
+    const list = path.split(".").reduce<unknown>((value, key) => record(value)?.[key], input)
+    return Array.isArray(list) ? list.flatMap(entry) : []
+  })
+  const found = [...new Set([...entry(input), ...items])]
+  return found.length === 0 ? ["*"] : found
+}
+
 export interface Interface {
   /** Wait for the initial MCP tool registration to settle. */
   readonly flush: Effect.Effect<void>
@@ -65,13 +102,14 @@ export const layer = Layer.effect(
             execute: (input, context) =>
               Effect.gen(function* () {
                 const args = (input ?? {}) as Record<string, unknown>
+                const resources = permissionResources(tool._meta, args)
                 // Access does not preflight tools/call. OpenCode's own rule is
                 // the only client check, and interactive Access tools are allowed.
                 // Role admission happens inside the tool handler.
                 yield* permission.assert({
                   action: name(tool.server, tool.name),
-                  resources: ["*"],
-                  save: ["*"],
+                  resources,
+                  save: resources,
                   metadata: {},
                   sessionID: context.sessionID,
                   agent: context.agent,
@@ -129,10 +167,11 @@ export const layer = Layer.effect(
                 output: (tool.outputSchema ?? {}) as JsonSchema.JsonSchema,
                 execute: (input, context) =>
                   Effect.gen(function* () {
+                    const resources = permissionResources(tool._meta, (input ?? {}) as Record<string, unknown>)
                     yield* permission.assert({
                       action: name(tool.server, tool.name),
-                      resources: ["*"],
-                      save: ["*"],
+                      resources,
+                      save: resources,
                       metadata: {},
                       sessionID: context.sessionID,
                       agent: context.agent,
