@@ -223,7 +223,7 @@ it.effect("generates a title from the sole user message and renames the session"
     expect(requests[0]?.promptCacheKey).toBe(sessionID)
     expect(requests[0]?.tools).toEqual([])
     expect(requests[0]?.system.map((part) => part.text)).toEqual(["You are a title generator."])
-    expect(JSON.stringify(requests[0]?.messages)).toContain("Help me debug the failing build")
+    expect(JSON.stringify(requests[0]?.messages)).toContain("<conversation>\\nHelp me debug the failing build\\n</conversation>")
     const renamed = yield* store.get(sessionID)
     expect(renamed?.title).toBe("Generated Title")
     expect(renamed?.tokens).toEqual({ input: 10, output: 4, reasoning: 2, cache: { read: 3, write: 2 } })

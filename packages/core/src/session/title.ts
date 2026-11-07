@@ -23,6 +23,10 @@ const MAX_LENGTH = 100
 const MAX_CONTEXT_LENGTH = 8_000
 const MAX_FIRST_MESSAGE_LENGTH = 2_000
 const titleChanged = Symbol("Session title changed")
+// Delimit the conversation so the title model titles it instead of obeying it.
+const CONVERSATION_OPEN = "<conversation>\n"
+const CONVERSATION_CLOSE = "\n</conversation>"
+const wrapConversation = (text: string) => `${CONVERSATION_OPEN}${text}${CONVERSATION_CLOSE}`
 
 export interface Interface {
   /** Generates an initial title or regenerates one from bounded conversation history. */
@@ -74,7 +78,7 @@ export const layer = Layer.effect(
         agent: input.agent.id,
         model: input.model,
         system: input.agent.system ? [SystemPart.make(input.agent.system)] : [],
-        messages: [Message.user(input.text)],
+        messages: [Message.user(wrapConversation(input.text))],
       })
       if (prepared.event.result !== undefined) return prepared.event.result
       yield* llm.stream(prepared.request, prepared.options).pipe(
@@ -147,7 +151,7 @@ export const layer = Layer.effect(
                 .join("\n\n")
               if (!recent) return original
               const prefix = `${original}\n\nRecent conversation:\n`
-              return `${prefix}${recent.slice(-(MAX_CONTEXT_LENGTH - prefix.length))}`
+              return `${prefix}${recent.slice(-(MAX_CONTEXT_LENGTH - prefix.length - CONVERSATION_OPEN.length - CONVERSATION_CLOSE.length))}`
             })()
           : firstUser.text
       const selection = yield* context.selectTitle(session, firstUser.execution?.model)
