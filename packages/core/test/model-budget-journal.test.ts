@@ -133,6 +133,7 @@ test("lost admission response cancels only the exact attempt without invoking a 
       const body = (await req.json()) as Record<string, KV.Value>
       events.push(path)
       if (path === "/reserve") {
+        if (accepted !== undefined) expect(body.attempt_id).toBe(accepted)
         accepted = body.attempt_id as string
         await Bun.sleep(5100)
         return Response.json({ ok: true })
@@ -163,11 +164,12 @@ test("lost admission response cancels only the exact attempt without invoking a 
         }).pipe(Effect.provide(layer())),
       ),
     ).rejects.toThrow()
-    expect(events).toEqual(["/reserve", "/cancel"])
+    // The admission is retried once as the same attempt, then cancelled.
+    expect(events).toEqual(["/reserve", "/reserve", "/cancel"])
   } finally {
     server.stop(true)
   }
-}, 10_000)
+}, 20_000)
 
 test("interrupt between admission and invocation journals no-dispatch cancellation", async () => {
   const entered = Promise.withResolvers<void>()

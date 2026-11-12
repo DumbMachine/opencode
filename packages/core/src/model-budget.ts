@@ -192,11 +192,13 @@ export const make = (client: LLMClientShape, endpoint: string, token: string, kv
     })
   const replaying = Semaphore.makeUnsafe(1)
   let cursor: string | undefined
-  const send = (path: string, body: unknown, tries = path === "/reserve" ? 1 : 3) =>
+  const send = (path: string, body: unknown, tries = path === "/reserve" ? 2 : 3) =>
     Effect.tryPromise({
       try: async () => {
-        // Admission is never retried: an accepted-but-lost response must not
-        // authorize duplicate execution. Completion is idempotent and may retry.
+        // Every call is idempotent on its attempt, so a lost or failed
+        // exchange is retried. Admission is retried once, because the user
+        // is waiting on it. A refused admission is an answer, not a failure:
+        // retrying it would only delay telling the user.
         for (let attempt = 0; attempt < tries; attempt++) {
           try {
             const response = await fetch(endpoint + path, {
@@ -212,7 +214,9 @@ export const make = (client: LLMClientShape, endpoint: string, token: string, kv
               )
             return
           } catch (error) {
-            if (attempt + 1 === tries) throw error
+            const status = error instanceof AIError ? error.reason.http?.status : undefined
+            const refused = path === "/reserve" && status !== undefined && status < 500
+            if (refused || attempt + 1 === tries) throw error
             await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)))
           }
         }

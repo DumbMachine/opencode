@@ -16,6 +16,8 @@ test("admission precedes provider execution and sends an enforced output limit",
   let subscription = false
   let reject = false
   let completionFailures = 0
+  let reserveFailures = 0
+  const reserved: unknown[] = []
   let omitUsage = false
   const server = Bun.serve({
     port: 0,
@@ -31,6 +33,8 @@ test("admission precedes provider execution and sends an enforced output limit",
         expect(body.output_token_estimate).toBe(128)
         expect(body.input_token_estimate).toBeGreaterThanOrEqual(0)
         expect(body.input_token_estimate).toBeLessThan(Number(body.input_token_limit))
+        reserved.push(body.attempt_id)
+        if (reserveFailures-- > 0) return new Response("temporary outage", { status: 503 })
         return new Response("{}", { status: reject && body.provider_cost_covered !== true ? 402 : 200 })
       }
       if (path === "/complete") {
@@ -71,6 +75,14 @@ test("admission precedes provider execution and sends an enforced output limit",
   try {
     await Effect.runPromise(run)
     expect(events).toEqual(["/reserve", "/v1/chat/completions", "/complete"])
+    events.length = 0
+    // A failed admission exchange is retried as the same attempt, so one
+    // host outage does not end the turn.
+    reserveFailures = 1
+    reserved.length = 0
+    await Effect.runPromise(run)
+    expect(events).toEqual(["/reserve", "/reserve", "/v1/chat/completions", "/complete"])
+    expect(new Set(reserved).size).toBe(1)
     events.length = 0
     completionFailures = 1
     await Effect.runPromise(run)
