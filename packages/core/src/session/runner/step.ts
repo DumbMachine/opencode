@@ -38,6 +38,8 @@ export type Outcome = Data.TaggedEnum<{
   }
   RecoverFull: {}
   Compacted: {}
+  /** The model hit its output token limit before it called a tool or finished its answer. */
+  Truncated: {}
 }>
 export const Outcome = Data.taggedEnum<Outcome>()
 
@@ -267,6 +269,15 @@ export const make = Effect.gen(function* () {
         if (tools.interrupted && tools.failure) return yield* Effect.failCause(tools.failure)
         if (tools.interrupted && Exit.isFailure(joined)) return yield* Effect.failCause(joined.cause)
         if (record.failure) return yield* new StepFailedError({ error: record.failure })
+        // A length finish with no tool call is not an answer: the model ran out of
+        // output (often while reasoning) before it acted. Ending the turn here would
+        // stop the session silently, so the runner decides whether to continue.
+        if (
+          record.finish?.finish === "length" &&
+          !record.needsContinuation &&
+          input.prepared.request.toolChoice?.type !== "none"
+        )
+          return Outcome.Truncated()
         return Outcome.Completed({
           needsContinuation: input.prepared.request.toolChoice?.type !== "none" && record.needsContinuation,
         })

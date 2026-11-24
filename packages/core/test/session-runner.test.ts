@@ -6113,6 +6113,62 @@ describe("SessionRunnerLLM", () => {
     expect(s.requests).toHaveLength(2)
   })
 
+  const OUTPUT_LIMIT_CONTINUATION =
+    "Your previous response hit the output token limit before you acted. Keep your reasoning short and take the next step now: call a tool, or write long content in smaller pieces across several calls."
+  const reasoningCutOff = (id: string) =>
+    TestLLM.complete(
+      { reason: { normalized: "length", raw: "length" } },
+      LLMEvent.reasoningStart({ id }),
+      LLMEvent.reasoningDelta({ id, text: "Planning the build script" }),
+      LLMEvent.reasoningEnd({ id }),
+    )
+
+  scenario("continues a step that ran out of output before acting", function* (s) {
+    yield* s.admit("Build the deck")
+    yield* s.llm.push(reasoningCutOff("cut-off"))
+    yield* s.llm.push(TestLLM.text("Deck built", "after-limit"))
+
+    yield* s.resume
+
+    expect(s.requests).toHaveLength(2)
+    expect(s.requests[1]?.messages.at(-1)).toMatchObject({
+      role: "user",
+      content: [{ type: "text", text: OUTPUT_LIMIT_CONTINUATION }],
+    })
+    expect(yield* s.context).toMatchObject([
+      Expected.user("Build the deck"),
+      Expected.assistant({ finish: "length" }, [{ type: "reasoning", text: "Planning the build script" }]),
+      { type: "synthetic", text: OUTPUT_LIMIT_CONTINUATION },
+      Expected.assistant({ finish: "stop" }, [Expected.text("Deck built")]),
+    ])
+  })
+
+  scenario("fails visibly when every continuation runs out of output", function* (s) {
+    yield* s.admit("Build the deck")
+    yield* s.llm.push(reasoningCutOff("cut-1"), reasoningCutOff("cut-2"), reasoningCutOff("cut-3"))
+
+    expect(yield* s.resume.pipe(Effect.flip)).toMatchObject({
+      error: { type: "provider.invalid-output", message: expect.stringContaining("ran out of output tokens") },
+    })
+    expect(s.requests).toHaveLength(3)
+  })
+
+  scenario("does not continue a length finish that called a tool", function* (s) {
+    yield* s.admit("Look something up")
+    yield* s.llm.push(
+      TestLLM.complete(
+        { reason: { normalized: "length" } },
+        LLMEvent.toolCall({ id: "lookup", name: "unknown_lookup", input: {} }),
+      ),
+    )
+    yield* s.llm.push(TestLLM.text("Done", "after-tool"))
+
+    yield* s.resume
+
+    expect(s.requests).toHaveLength(2)
+    expect(JSON.stringify(s.requests[1])).not.toContain(OUTPUT_LIMIT_CONTINUATION)
+  })
+
   scenario("continues an incomplete stream after observable text", function* (s) {
     const failure = incompleteStream()
     yield* s.admit("Continue partial output")

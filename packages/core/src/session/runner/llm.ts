@@ -20,6 +20,7 @@ import { SessionSchema } from "../schema.js"
 import { SessionStore } from "../store.js"
 import { SessionMessageTable, SessionTable } from "../sql.js"
 import { SessionTitle } from "../title.js"
+import { SessionError } from "@opencode/schema/session-error"
 import { toSessionError } from "../to-session-error.js"
 import { DrainResult, Service, type Interface } from "./index.js"
 import { Snapshot } from "../../snapshot.js"
@@ -37,6 +38,18 @@ import { MAX_STEPS_PROMPT } from "./max-steps.js"
 
 const CONTINUE_AFTER_INCOMPLETE_STREAM =
   "The previous response was interrupted. Continue from where you left off without repeating completed content."
+
+const CONTINUE_AFTER_OUTPUT_LIMIT =
+  "Your previous response hit the output token limit before you acted. Keep your reasoning short and take the next step now: call a tool, or write long content in smaller pieces across several calls."
+
+/** How many times one Step may continue after running out of output before it fails visibly. */
+const OUTPUT_LIMIT_CONTINUATIONS = 2
+
+const OUTPUT_LIMIT_ERROR = {
+  type: "provider.invalid-output",
+  message:
+    "The model ran out of output tokens before it finished. Ask it to continue, or choose a lower reasoning level.",
+} as const satisfies SessionError.Error
 
 const layer = Layer.effect(
   Service,
@@ -314,6 +327,7 @@ const layer = Layer.effect(
       let initial: SessionContext.Loaded | undefined = first
       let recoverOverflow = true
       let recoverContinuation = true
+      let outputLimitContinuations = 0
       while (true) {
         // Reuse boundary preparation once; retries refresh context without delivering more input.
         const loaded = initial ?? (yield* prepareContext(sessionID))
@@ -397,6 +411,13 @@ const layer = Layer.effect(
           }),
           RecoverFull: Effect.fnUntraced(function* () {
             recoverContinuation = false
+          }),
+          Truncated: Effect.fnUntraced(function* () {
+            if (outputLimitContinuations >= OUTPUT_LIMIT_CONTINUATIONS)
+              return yield* new StepFailedError({ error: OUTPUT_LIMIT_ERROR })
+            outputLimitContinuations++
+            yield* bus.publish(SessionEvent.Synthetic, { sessionID, text: CONTINUE_AFTER_OUTPUT_LIMIT })
+            assistantMessageID = SessionMessage.ID.create()
           }),
         })
         if (completed !== undefined) return completed

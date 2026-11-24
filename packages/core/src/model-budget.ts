@@ -3,7 +3,6 @@ export * as ModelBudget from "./model-budget.js"
 import {
   AIError,
   type ContentPart,
-  GenerationOptions,
   HttpContext,
   LLMEvent,
   LLMRequest,
@@ -150,25 +149,39 @@ export const inputEstimate = (request: LLMRequest, bound = inputBound(request)) 
   )
 }
 
-export const make = (client: LLMClientShape, endpoint: string, token: string, kv: KV.Interface, outputLimit = 8192) => {
+/**
+ * Billing observes a model request; it never reshapes it. How much a reply may
+ * write is the session's and the provider protocol's decision, exactly as it is
+ * without a budget. Admission needs only a positive balance, so the bounds here
+ * are reported to the host for its records and estimate, not enforced.
+ *
+ * `typicalOutput` sizes the admission estimate, and stands in for the bound
+ * when neither the request nor the model declares one.
+ */
+export const make = (
+  client: LLMClientShape,
+  endpoint: string,
+  token: string,
+  kv: KV.Interface,
+  typicalOutput = 8192,
+) => {
   const outputBounds = (request: LLMRequest) => {
-    const acceptsOutputCap = request.model.compatibility?.supportsMaxOutputTokens !== false
-    if (
-      request.model.outputLimit !== undefined &&
-      (!Number.isSafeInteger(request.model.outputLimit) || request.model.outputLimit < 1)
-    )
+    const window = request.model.outputLimit
+    if (window !== undefined && (!Number.isSafeInteger(window) || window < 1))
       throw failure("Model has an invalid output limit for billing")
-    const outputEstimate = Math.min(
-      outputLimit,
-      request.generation?.maxTokens ?? outputLimit,
-      request.model.outputLimit ?? outputLimit,
-    )
-    const maxTokens = acceptsOutputCap ? outputEstimate : request.model.outputLimit
+    // A requested cap binds only on endpoints that accept one; otherwise the model's window is the bound.
+    const requested =
+      request.model.compatibility?.supportsMaxOutputTokens === false ? undefined : request.generation?.maxTokens
+    const maxTokens =
+      requested !== undefined && window !== undefined
+        ? Math.min(requested, window)
+        : (requested ?? window ?? (request.model.compatibility?.supportsMaxOutputTokens === false ? undefined : typicalOutput))
     if (maxTokens === undefined || !Number.isSafeInteger(maxTokens) || maxTokens < 1)
       throw failure("Model has no enforceable output limit for billing")
+    const outputEstimate = Math.min(typicalOutput, request.generation?.maxTokens ?? maxTokens, maxTokens)
     if (!Number.isSafeInteger(outputEstimate) || outputEstimate < 1)
       throw failure("Model has an invalid output estimate for billing")
-    return { acceptsOutputCap, outputEstimate, maxTokens }
+    return { outputEstimate, maxTokens }
   }
   const prepareRequest = (request: LLMRequest) =>
     Effect.gen(function* () {
@@ -180,15 +193,11 @@ export const make = (client: LLMClientShape, endpoint: string, token: string, kv
         shaped.http?.headers?.["x-opencode-input"] !== inputID
       )
         return yield* failure("Model request billing identity changed during preparation")
-      return yield* Effect.try({
-        try: () => {
-          const { acceptsOutputCap, maxTokens } = outputBounds(shaped)
-          return acceptsOutputCap && shaped.generation?.maxTokens !== maxTokens
-            ? LLMRequest.update(shaped, { generation: GenerationOptions.make({ ...shaped.generation, maxTokens }) })
-            : shaped
-        },
+      yield* Effect.try({
+        try: () => outputBounds(shaped),
         catch: (error) => (error instanceof AIError ? error : failure("Model output cannot be bounded")),
       })
+      return shaped
     })
   const replaying = Semaphore.makeUnsafe(1)
   let cursor: string | undefined

@@ -29,7 +29,8 @@ test("admission precedes provider execution and sends an enforced output limit",
         expect(body.input_id).toBe("msg_budget_input")
       if (path === "/reserve") {
         expect(body.provider_cost_covered).toBe(subscription ? true : undefined)
-        expect(body.output_token_limit).toBe(128)
+        // The caller's cap reaches the provider; the typical size only sizes the estimate.
+        expect(body.output_token_limit).toBe(5000)
         expect(body.output_token_estimate).toBe(128)
         expect(body.input_token_estimate).toBeGreaterThanOrEqual(0)
         expect(body.input_token_estimate).toBeLessThan(Number(body.input_token_limit))
@@ -45,7 +46,7 @@ test("admission precedes provider execution and sends an enforced output limit",
         return Response.json({ ok: true })
       }
       expect(body.provider_cost_covered).toBeUndefined()
-      expect(body.max_completion_tokens).toBe(128)
+      expect(body.max_completion_tokens).toBe(5000)
       if (omitUsage) return new Response("data: [DONE]\n\n", { headers: { "content-type": "text/event-stream" } })
       return new Response(
         'data: {"id":"c1","object":"chat.completion.chunk","model":"test","choices":[{"index":0,"delta":{"content":"hello"},"finish_reason":null}]}\n\ndata: {"id":"c1","object":"chat.completion.chunk","model":"test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":3,"total_tokens":13}}\n\ndata: [DONE]\n\n',
@@ -279,7 +280,7 @@ test("UTF-8 input estimates remain distinct from byte bounds and clamp to each w
   }
 })
 
-test("the default output estimate preserves API wire caps and uncapped model maxima", async () => {
+test("leaves the request uncapped and reports the model window with the default estimate", async () => {
   const admissions: Array<Record<string, number>> = []
   const bodies: Array<Record<string, unknown>> = []
   const server = Bun.serve({
@@ -320,14 +321,15 @@ test("the default output estimate preserves API wire caps and uncapped model max
   try {
     for (const accepts of [true, false]) await Effect.runPromise(run(accepts)).catch(() => undefined)
     expect(admissions.map((body) => body.output_token_estimate)).toEqual([8192, 8192])
-    expect(admissions.map((body) => body.output_token_limit)).toEqual([8192, 128000])
-    expect(bodies.map((body) => body.max_output_tokens)).toEqual([8192, undefined])
+    // Billing reports the model's window but never writes a cap into the request.
+    expect(admissions.map((body) => body.output_token_limit)).toEqual([128000, 128000])
+    expect(bodies.map((body) => body.max_output_tokens)).toEqual([undefined, undefined])
   } finally {
     server.stop(true)
   }
 })
 
-test("capable endpoints reserve and send no more than the declared output window", async () => {
+test("reports the smaller of the requested cap and window without rewriting the request", async () => {
   const limits: number[] = []
   const estimates: number[] = []
   const sent: number[] = []
@@ -371,12 +373,13 @@ test("capable endpoints reserve and send no more than the declared output window
     }).pipe(Effect.provide(layer))
   try {
     for (const window of [64, 256]) await Effect.runPromise(run(window)).catch(() => undefined)
-    expect(limits).toEqual([64, 128])
+    expect(limits).toEqual([64, 256])
     expect(estimates).toEqual([64, 128])
-    expect(sent).toEqual([64, 128])
+    // The caller's own cap reaches the provider untouched.
+    expect(sent).toEqual([5000, 5000])
     for (const invalid of [0, -1, 10000.5, Number.NaN])
       await expect(Effect.runPromise(run(invalid))).rejects.toThrow("invalid output limit")
-    expect(limits).toEqual([64, 128])
+    expect(limits).toEqual([64, 256])
   } finally {
     server.stop(true)
   }
